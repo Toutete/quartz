@@ -1,9 +1,49 @@
 # THz ISAC Testbed — Handoff Document
 
-> Purpose: hand this entire conversation's technical content to Claude Code so it
-> can continue with implementation (DSP, simulation, automation) without losing
-> context. This is the detailed companion to `CLAUDE.md`. Where `CLAUDE.md` is
-> the quick-reference, this file carries the **reasoning** behind each decision.
+> THz ISAC 프로젝트의 전체 기술 컨텍스트를 담은 로컬 규칙 파일입니다.
+> 전역 규칙은 `content/Home/CLAUDE.md`를 참조하세요.
+> 이 파일은 모든 하드웨어 사양, 바이어스 절차, DSP 체인의 **근거(reasoning)**를 포함합니다.
+
+---
+
+## Quick Reference
+
+### 하드웨어 요약
+
+| Block | Model | Key specs |
+|-------|-------|-----------|
+| MZM | iXblue **MXAN-LN-40** | Vπ,DC ≈ 6.5 V; Vπ,RF@10GHz ≈ 6 V; X-cut; IL 3.5 dB; ER 25 dB; abs-max: optical +20 dBm, RF +28 dBm, bias ±20 V |
+| UTC-PD | NICT **IOD-PMJ-13001** | J-band (270 GHz); 역방향 바이어스 ≈ −1 V (데이터시트 필수 확인); 현재 ~−7 mA, ~−10 dBm THz 출력 |
+| ZBD | VDI **WR3.4ZBD** | 영바이어스; 감도 ≈ 2200 V/W; WR3.4 도파관 (220–330 GHz) |
+| AWG | Keysight **M8194A** | 120 GSa/s; 45 GHz BW; 8-bit; ≤ 0.8 Vpp(se) / 1.6 Vpp(diff) |
+| DSO | Keysight **UXR0404A** | 40 GHz BW; 256 GSa/s (4채널 동시, 속도 손실 없음); 10-bit; ENOB ≤ 8.7; 최대 2 Gpts |
+| Lasers | 2× free-running DFB | f1 − f2 = 270 GHz (예: 193.410 THz & 193.140 THz) |
+
+### 신호 체인
+
+```
+AWG(M8194A) → Amp(+29 dB) → 10 dB atten → MZM(MXAN-LN-40) → Coupler(+LD2)
+  → EDFA → UTC-PD(IOD-PMJ-13001) → THz PA → OMT → Horn  ══RHCP══▶  target
+  target ══LHCP══▶ Horn → OMT → THz LNA → ZBD(WR3.4) → LNA → DSO(UXR0404A)
+```
+
+### 주파수 계획
+
+| 항목 | 값 |
+|------|-----|
+| THz 반송파 | **270 GHz** (= LD1 − LD2 비트) |
+| SIM IF | **15 GHz** (데이터 대역 [10, 20] GHz, 10 GBaud 16-QAM, B = 5 GHz) |
+| SSBI 바닥 | [0, 10] GHz → IF 조건: $f_{IF} > \frac{3B}{2}$ |
+| 현재 브링업 | 10 GHz 단일 톤 (DSB), ZBD 출력 예상 = DC + 10 GHz 톤 |
+
+### 핵심 바이어스 설정
+
+| 항목 | 값 |
+|------|-----|
+| MZM DC 바이어스 | 직교점 ≈ **+3.25 V** (반드시 실측 후 적용) |
+| MZM 변조 지수 | **m ≈ 0.2** → AWG ≈ **122 mVpp** |
+| AWG → MZM 체인 | AWG → +29 dB 앰프 → −10 dB 감쇠기 → MZM (순이득 +19 dB) |
+| UTC-PD 역바이어스 | **바이어스 먼저, 광입력 나중** (순서 절대 준수) |
 
 ---
 
@@ -188,14 +228,13 @@ Notes:
 
 ## 8. TODO for Claude Code
 
-1. **Receiver DSP** (`dsp/`): implement stages 0–10 as composable Python modules with a
-   driver script that ingests a UXR capture (CSV/HDF5) and emits EVM/BER + constellation.
-2. **Link-budget simulator** (`sim/`): the SINR model in §7; sweep target range, OMT
-   isolation, laser linewidth; reproduce comm range ≈ 3.8 m, radar range ≈ 1.9 m.
-3. **Tone/QAM waveform generator** (`awg/`): build SIM waveforms (10 GHz tone; 10 GBaud
-   16-QAM @ 15 GHz IF, RRC), export to M8194A format; enforce m and Vpp limits from §3.2.
-4. **Capture+DSP glue** (`bench/`): orchestrate AWG load → DSO capture → offline DSP.
-5. Before raising optical power, **verify NICT UTC-PD bias & photocurrent limits**.
+코드는 `projects/THz_ISAC/code/` 하위에 저장합니다.
+
+- [ ] **수신기 DSP** (`code/dsp/`): 0–10단계를 Python 모듈로 구현. UXR 캡처(CSV/HDF5) 입력 → EVM/BER + 성상도 출력.
+- [ ] **링크 버짓 시뮬레이터** (`code/sim/`): §7 SINR 모델 구현. 범위·OMT 격리도·레이저 선폭 스윕. 통신 범위 ≈ 3.8 m, 레이더 범위 ≈ 1.9 m 재현.
+- [ ] **파형 생성기** (`code/awg/`): SIM 파형 생성 (10 GHz 톤; 10 GBaud 16-QAM @ 15 GHz IF, RRC). M8194A 포맷 출력. §3.2의 m 및 Vpp 한계 적용.
+- [ ] **캡처+DSP 자동화** (`code/bench/`): AWG 로드 → DSO 캡처 → 오프라인 DSP 오케스트레이션.
+- [ ] 광출력 증가 전 **NICT UTC-PD 데이터시트 역바이어스 및 최대 광전류 한계 확인**.
 
 ## 9. Style / preferences for any writing tasks
 - IEEEtran 2-column; concise active voice; no redundant equations; cross-reference instead
