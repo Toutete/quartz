@@ -6,6 +6,58 @@
 
 ---
 
+## 0. 환경 설정 (새 컴퓨터 세팅)
+
+### 필수 사전 설치
+- Python 3.10 이상
+- Git
+- (계측기 직접 연결 시) Keysight IO Libraries Suite
+
+### 저장소 클론 및 Python 환경 구성
+
+```bash
+git clone https://github.com/Toutete/quartz.git
+cd quartz/content/Home/projects/THz_ISAC/code
+python -m venv venv
+venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+```
+
+### Claude Code로 자동 세팅
+
+Claude Code CLI 설치 후 `quartz/` 에서 `claude` 실행, 아래와 같이 지시:
+
+> "`https://github.com/Toutete/quartz.git` 를 클론하고,
+> `content/Home/projects/THz_ISAC/code/` 에서 venv 만들고
+> requirements.txt 설치한 다음 isac_unified_gui.py 실행해줘"
+
+### 스크립트별 실행 방법
+
+`code/` 폴더를 반드시 작업 디렉토리로 설정해야 합니다 (상대 import 때문).
+
+```bash
+cd content/Home/projects/THz_ISAC/code
+venv\Scripts\activate
+
+python isac_unified_gui.py              # 통합 TX·RX·SIC GUI
+python envelope_detector_si_gui.py      # 엔벨로프 검출·시뮬레이션 GUI
+python sim\back2back_sim.py             # OMT S-파라미터 시뮬레이션 (계측기 불필요)
+python rx\dso_demod.py --mode sim       # 오프라인 복조 테스트
+```
+
+### 이론 노트 위치
+
+각 모듈의 원리는 `concepts/` 폴더 참조:
+
+| 파일 | 내용 |
+|------|------|
+| `concepts/00_system_architecture.md` | 전체 신호 흐름 및 시스템 구조 |
+| `concepts/01_tx_signal_generation.md` | TX 파형 생성 및 AWG 연동 |
+| `concepts/02_rx_demodulation.md` | DSO 캡처 및 DSP 복조 체인 |
+| `concepts/03_omt_simulation.md` | OMT S-파라미터 시뮬레이션 |
+
+---
+
 ## Quick Reference
 
 ### 하드웨어 요약
