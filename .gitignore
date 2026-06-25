@@ -11,3 +11,13 @@ private/
 replit.nix
 .quartz/
 quartz/cli/tui/dist/
+
+# 프로젝트 코드 폴더 내 데이터·환경 파일 전면 차단
+**/code/venv/
+**/code/.venv/
+**/code/__pycache__/
+**/code/**/data/
+**/__pycache__/
+*.hdf5
+*.mat
+*.pkl
