@@ -168,11 +168,13 @@ class KeysightUxrDso:
 
     # capture ─────────────────────────────────────────────────────────────────
     def capture(
-        self, channel: str = "CHAN1", fallback_fs: float = 256e9
+        self, channel: str = "CHAN1", fallback_fs: float = 256e9, max_samples: int | None = None
     ) -> tuple[np.ndarray, np.ndarray, float]:
         ch = _norm_keysight_ch(channel)
 
         self.write(f":WAVeform:SOURce {ch}")
+        if max_samples:
+            self.write(f":WAVeform:POINts {int(max_samples)}")
         self.write(":WAVeform:FORmat WORD")
         self.write(":WAVeform:BYTeorder LSBFirst")
         self.write(":WAVeform:UNSigned OFF")

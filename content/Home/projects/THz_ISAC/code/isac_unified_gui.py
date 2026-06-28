@@ -27,10 +27,12 @@ from functions.dsp_functions import (
     bits_per_symbol as _bits_per_symbol,
     bits_to_qam_symbols as _bits_to_qam_symbols,
     hard_bits_from_symbols as _hard_bits_from_symbols,
+    generate_zadoff_chu,
     normalize_iq_for_awg,
     normalize_real_for_awg,
     prbs_bits_lfsr as _prbs_bits_lfsr,
-    simple_lms_equalizer,
+    sc_fde_equalizer,
+    lfm_qam_rx_dsp_chain,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -143,12 +145,7 @@ class IsacTxSimPanel:
                 ttk.Entry(hw_grp, textvariable=self.power_dbm_var, width=12).grid(row=2, column=1, sticky="w", pady=(8, 0))
                 ttk.Label(hw_grp, text="(입력 시 Vpp 자동 계산, 50Ω 기준)", style="Muted.TLabel").grid(row=2, column=2, columnspan=4, sticky="w", padx=(16, 0), pady=(8, 0))
 
-                btn_frame_hw = ttk.Frame(hw_grp)
-                btn_frame_hw.grid(row=3, column=0, columnspan=6, sticky="w", pady=(12, 0))
-                ttk.Button(btn_frame_hw, text="Generate TX Signal", style="Primary.TButton", command=self._on_generate).pack(side=tk.LEFT)
-                ttk.Button(btn_frame_hw, text="Download to AWG", style="Primary.TButton", command=self._on_download).pack(side=tk.LEFT, padx=(8, 0))
-                ttk.Button(btn_frame_hw, text="AWG Run", style="Primary.TButton", command=self._on_awg_run).pack(side=tk.LEFT, padx=(8, 0))
-                ttk.Button(btn_frame_hw, text="Test Connection", command=self._on_test_connection).pack(side=tk.LEFT, padx=(8, 0))
+                pass  # Buttons consolidated in PhotonicIsacSimPanel global controls
 
                 current_row += 1
 
@@ -201,8 +198,8 @@ class IsacTxSimPanel:
 
                 frm.columnconfigure(1, weight=1); frm.columnconfigure(3, weight=1); frm.columnconfigure(5, weight=1)
 
-                for var in [self.prbs_n_var, self.fs_var, self.symbol_rate_var, self.chirp_len_var]:
-                    var.trace_add("write", lambda *_: self._check_memory_limit())
+                for var in [self.prbs_n_var, self.fs_var, self.symbol_rate_var, self.chirp_len_var, self.modulation_var, self.waveform_var, self.if_var]:
+                    var.trace_add("write", lambda *_: [self._check_memory_limit(), self._on_generate()])
 
                 self.power_dbm_var.trace_add("write", self._on_power_changed)
                 self.vpp_var.trace_add("write", self._on_vpp_changed)
@@ -340,6 +337,36 @@ class IsacTxSimPanel:
                 tx_bb_matrix = np.repeat(tx_sym_matrix, n_per_sym, axis=1) * base_chirp[np.newaxis, :]
             else:
                 base_chirp = lfm_chirp
+                
+                zc_len = 63
+                zc_seq = generate_zadoff_chu(zc_len, u=25)
+                
+                pilot_len = 200
+                pn_bits = _prbs_bits_lfsr(9, pilot_len)
+                pilot_syms = (2.0 * pn_bits.astype(np.float64) - 1.0).astype(np.complex128)
+                pilot_syms *= np.exp(1j * np.pi / 4.0)
+                
+                header = np.concatenate([zc_seq, pilot_syms])
+                header_len = len(header)
+                
+                data_len = n_sym_per_chirp - header_len
+                if data_len <= 0:
+                    raise ValueError(f"Symbols per Chirp ({n_sym_per_chirp}) must be > {header_len} for ZC+Pilot header")
+                
+                data_needed = n_chirps * data_len
+                if len(qam_all) < data_needed:
+                    rep = int(np.ceil(data_needed / max(len(qam_all), 1)))
+                    qam_all = np.tile(qam_all, rep)
+                qam_data = qam_all[:data_needed].reshape(n_chirps, data_len)
+                
+                tx_sym_matrix = np.concatenate([np.tile(header, (n_chirps, 1)), qam_data], axis=1)
+                qam_symbols = tx_sym_matrix.reshape(-1)
+                
+                qam_rrc_beta = 0.25
+                qam_rrc_span = 8
+                qam_rrc_taps = self._rrc_taps(n_per_sym, beta=qam_rrc_beta, span=qam_rrc_span)
+                
+                # LFM-QAM bypasses RRC (uses rectangular pulses) as requested
                 tx_bb_matrix = np.repeat(tx_sym_matrix, n_per_sym, axis=1) * base_chirp[np.newaxis, :]
 
             tx_baseband = tx_bb_matrix.reshape(-1)
@@ -436,8 +463,11 @@ class IsacTxSimPanel:
         def _on_download(self) -> None:
             def worker():
                 try:
-                    if "tx_payload" not in self.runtime:
-                        self.runtime["tx_payload"] = self._generate_tx_signal()
+                    # Always generate anew when "To AWG" is clicked
+                    payload = self._generate_tx_signal()
+                    self.runtime["tx_payload"] = payload
+                    if callable(self.on_tx_generated):
+                        self.parent.after(0, lambda: self.on_tx_generated(str(APP_DIR / "data" / "current_tx_ref.npz")))
                 
                     pl = self.runtime["tx_payload"]
                     addr = f"TCPIP0::{self.ip_var.get().strip()}::{int(self.port_var.get())}::SOCKET"
@@ -1392,7 +1422,7 @@ class IsacTxSimPanel:
                             slope, intercept = np.polyfit(k, ph, deg=1)
                             qam_est = qam_est * np.exp(-1j * (slope * k + intercept))
 
-                        qam_est_eq = simple_lms_equalizer(qam_est, qam_ref, num_taps=21, mu=0.005)
+                        qam_est_eq = sc_fde_equalizer(qam_est, qam_ref, num_taps=sc_fde_taps, enable=sc_fde_enable)
 
                         # Remove clearly invalid near-origin symbols typically caused by frame padding/underrun.
                         if waveform_type == "QAM" and len(qam_est_eq) > 0 and len(qam_ref) == len(qam_est_eq):
@@ -1566,6 +1596,8 @@ class SimConfig:
     si_enable: bool = True
     carrier_wander_enable: bool = True
     carrier_wander_mhz: float = 300.0
+    sc_fde_enable: bool = True
+    sc_fde_taps: int = 21
     
     # 💡 하드웨어 및 레이더 물리 파라미터 
     utcpd_target_dbm: float = -25.0
@@ -1984,9 +2016,9 @@ def run_isac_sim(cfg: SimConfig):
                     sym_rx = sym_rx * np.exp(-1j * ph_s)
                     
                     # 향상된 수렴 속도를 위해 mu=0.05 로 증가
-                    eq_all = simple_lms_equalizer(sym_rx, tx_ref, num_taps=21, mu=0.05)
+                    eq_all = sc_fde_equalizer(sym_rx, tx_ref, num_taps=cfg.sc_fde_taps, enable=cfg.sc_fde_enable)
                 else:
-                    eq_all = simple_lms_equalizer(sym_rx, tx_ref, num_taps=21, mu=0.05)
+                    eq_all = sc_fde_equalizer(sym_rx, tx_ref, num_taps=cfg.sc_fde_taps, enable=cfg.sc_fde_enable)
                     t_fit = tx_ref[g0:g1]
 
                 err = eq_all - tx_ref
@@ -2014,8 +2046,11 @@ def run_isac_sim(cfg: SimConfig):
     }
 
 class PhotonicIsacSimPanel:
-    def __init__(self, parent: ttk.Frame):
+    def __init__(self, parent: ttk.Frame, plot_parent: ttk.Frame = None, awg_source=None, show_awg_params: bool = True):
         self.parent = parent
+        self.plot_parent = plot_parent if plot_parent else parent
+        self.awg_source = awg_source
+        self.show_awg_params = show_awg_params
         self.after_id, self.frame_idx, self.data = None, 0, None
         self.params = {}
         
@@ -2024,52 +2059,66 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=True)
         self.si_enable_var = tk.BooleanVar(value=True)
-        self.rx_mode_var = tk.StringVar(value="Mixer")
+        self.rx_mode_var = tk.StringVar(value="ZBD")
         self.coherence_var = tk.StringVar(value="Free-running")
+        if self.awg_source is not None:
+            self.awg_fs_var = self.awg_source.fs_var
+            self.awg_ip_var = self.awg_source.ip_var
+            self.awg_port_var = self.awg_source.port_var
+            self.awg_ch_var = self.awg_source.ch_var
+            self.awg_vpp_var = self.awg_source.vpp_var
         
         self._build_ui()
         self._init_plot()
         self._update_table()
 
     def _build_ui(self):
-        main = ttk.Frame(self.parent, padding=10)
-        main.pack(fill=tk.BOTH, expand=True)
+        # LEFT PANEL (parameters)
+        left = ttk.Frame(self.parent)
+        left.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # --- LEFT PANEL (fixed width) ---
-        left = ttk.Frame(main, width=360)
-        left.pack(side=tk.LEFT, fill=tk.Y)
-        left.pack_propagate(False)
-
-        # RIGHT PANEL (plot, expands)
-        right = ttk.Frame(main)
+        # RIGHT PANEL (plots)
+        self.right_frame = ttk.Frame(self.plot_parent)
+        right = self.right_frame
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
 
-        # ── TOP (always visible): Control buttons ──────────────────────
-        ctrl = ttk.LabelFrame(left, text="Control", padding=6)
+        # ── TOP: Control buttons (4 consolidated) ──
+        ctrl = ttk.LabelFrame(left, text="Controls", padding=4)
         ctrl.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
-        ttk.Button(ctrl, text="1. Run Simulation", style="Primary.TButton", command=self.run_simulation).pack(fill=tk.X)
-        ttk.Button(ctrl, text="2. Download to AWG", command=self._on_download_awg).pack(fill=tk.X, pady=(4, 0))
-        btn_anim = ttk.Frame(ctrl)
-        btn_anim.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(btn_anim, text="3. Start Animation", command=self.start_animation).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Button(btn_anim, text="4. Stop Animation", command=self.stop_animation).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
 
-        # ── MIDDLE (always visible): Physics Parameters Table ──────────
-        tf = ttk.LabelFrame(left, text="Calculated Physics Parameters", padding=4)
-        tf.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+        ttk.Button(ctrl, text="Run Simulation", style="Primary.TButton", command=self.run_simulation).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(ctrl, text="To AWG", command=self._cmd_to_awg).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(ctrl, text="Run AWG", command=self._cmd_run_awg).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        self._anim_btn = ttk.Button(ctrl, text="Anim Start", command=self._cmd_toggle_anim)
+        self._anim_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+
+        # ── Split left panel horizontally into (Simulation params | Physics Table) ──
+        split_pane = ttk.PanedWindow(left, orient=tk.HORIZONTAL)
+        split_pane.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        left_params = ttk.Frame(split_pane)
+        right_table = ttk.Frame(split_pane)
+        
+        split_pane.add(left_params, weight=3)
+        split_pane.add(right_table, weight=2)
+        
+        # ── RIGHT TABLE: Calculated Physics Parameters ──
+        tf = ttk.LabelFrame(right_table, text="Calculated Physics Parameters", padding=4)
+        tf.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=(4, 0))
         tbl_frame = ttk.Frame(tf)
-        tbl_frame.pack(fill=tk.X)
+        tbl_frame.pack(fill=tk.BOTH, expand=True)
         self.table = ttk.Treeview(tbl_frame, columns=("Value", "Unit"), show="tree headings", height=15)
         self.table.heading("#0", text="Parameter")
         self.table.heading("Value", text="Value")
         self.table.heading("Unit", text="Unit")
-        self.table.column("#0", width=145)
-        self.table.column("Value", width=72, anchor="center")
-        self.table.column("Unit", width=45, anchor="center")
+        self.table.column("#0", width=120)
+        self.table.column("Value", width=70, anchor="center")
+        self.table.column("Unit", width=40, anchor="center")
         tbl_scroll = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=tbl_scroll.set)
-        self.table.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tbl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
         self.rows = {
             "tx":        self.table.insert("", "end", text="Antenna TX Power",  values=("0.00", "dBm")),
             "delay":     self.table.insert("", "end", text="Radar Echo Delay",  values=("0.00", "ns")),
@@ -2078,20 +2127,16 @@ class PhotonicIsacSimPanel:
             "si":        self.table.insert("", "end", text="Local SI Power",    values=("0.00", "dBm")),
             "lna":       self.table.insert("", "end", text="LNA Out (Sig)",     values=("0.00", "dBm")),
             "lna_total": self.table.insert("", "end", text="LNA Out (Total)",   values=("0.00", "dBm")),
-            "noise":     self.table.insert("", "end", text="LNA Noise",         values=("0.00", "dBm")),
-            "zbd":       self.table.insert("", "end", text="ZBD Noise",         values=("0.00", "V")),
             "sinr":      self.table.insert("", "end", text="Radar SINR",        values=("0.00", "dB")),
             "comm_loss": self.table.insert("", "end", text="Comm Path Loss",    values=("0.00", "dB")),
             "comm_rx":   self.table.insert("", "end", text="Comm Rx Power",     values=("0.00", "dBm")),
             "comm_snr":  self.table.insert("", "end", text="Comm SNR",          values=("0.00", "dB")),
-            "evm_est":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "dB")),
             "evm_pct":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "%")),
         }
 
-        # ── BOTTOM (scrollable): AWG + Simulation Parameters ──────────
-        param_outer = ttk.Frame(left)
+        # ── LEFT PARAMS (scrollable): AWG + Simulation Parameters ──
+        param_outer = ttk.Frame(left_params)
         param_outer.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
         param_canvas = tk.Canvas(param_outer, highlightthickness=0, bg="#f4f6f9")
         param_vbar = ttk.Scrollbar(param_outer, orient="vertical", command=param_canvas.yview)
         param_canvas.configure(yscrollcommand=param_vbar.set)
@@ -2105,28 +2150,29 @@ class PhotonicIsacSimPanel:
         param_canvas.bind("<MouseWheel>", lambda e: param_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
         # AWG Parameters
-        awg_grp = ttk.LabelFrame(params_frame, text="AWG Parameters", padding=8)
-        awg_grp.pack(fill=tk.X, pady=(0, 5))
+        if self.show_awg_params:
+            awg_grp = ttk.LabelFrame(params_frame, text="AWG Parameters", padding=8)
+            awg_grp.pack(fill=tk.X, pady=(0, 5))
 
-        ttk.Label(awg_grp, text="AWG Fs [GS/s]").grid(row=0, column=0, sticky="w", pady=2)
-        self.awg_fs_var = tk.StringVar(value="120")
-        ttk.Entry(awg_grp, textvariable=self.awg_fs_var, width=10).grid(row=0, column=1, sticky="w")
+            ttk.Label(awg_grp, text="AWG Fs [GS/s]").grid(row=0, column=0, sticky="w", pady=2)
+            self.awg_fs_var = tk.StringVar(value="120")
+            ttk.Entry(awg_grp, textvariable=self.awg_fs_var, width=10).grid(row=0, column=1, sticky="w")
 
-        ttk.Label(awg_grp, text="AWG IP").grid(row=1, column=0, sticky="w", pady=2)
-        self.awg_ip_var = tk.StringVar(value="192.168.1.2")
-        ttk.Entry(awg_grp, textvariable=self.awg_ip_var, width=12).grid(row=1, column=1, sticky="w")
+            ttk.Label(awg_grp, text="AWG IP").grid(row=1, column=0, sticky="w", pady=2)
+            self.awg_ip_var = tk.StringVar(value="192.168.1.2")
+            ttk.Entry(awg_grp, textvariable=self.awg_ip_var, width=12).grid(row=1, column=1, sticky="w")
 
-        ttk.Label(awg_grp, text="AWG Port").grid(row=2, column=0, sticky="w", pady=2)
-        self.awg_port_var = tk.StringVar(value="60007")
-        ttk.Entry(awg_grp, textvariable=self.awg_port_var, width=10).grid(row=2, column=1, sticky="w")
+            ttk.Label(awg_grp, text="AWG Port").grid(row=2, column=0, sticky="w", pady=2)
+            self.awg_port_var = tk.StringVar(value="60007")
+            ttk.Entry(awg_grp, textvariable=self.awg_port_var, width=10).grid(row=2, column=1, sticky="w")
 
-        ttk.Label(awg_grp, text="Channel").grid(row=3, column=0, sticky="w", pady=2)
-        self.awg_ch_var = tk.StringVar(value="2")
-        ttk.Combobox(awg_grp, textvariable=self.awg_ch_var, values=["1", "2", "3", "4", "1,2", "1,3"], width=8).grid(row=3, column=1, sticky="w")
+            ttk.Label(awg_grp, text="Channel").grid(row=3, column=0, sticky="w", pady=2)
+            self.awg_ch_var = tk.StringVar(value="2")
+            ttk.Combobox(awg_grp, textvariable=self.awg_ch_var, values=["1", "2", "3", "4", "1,2", "1,3"], width=8).grid(row=3, column=1, sticky="w")
 
-        ttk.Label(awg_grp, text="Amplitude (Vpp)").grid(row=4, column=0, sticky="w", pady=2)
-        self.awg_vpp_var = tk.StringVar(value="0.1")
-        ttk.Entry(awg_grp, textvariable=self.awg_vpp_var, width=10).grid(row=4, column=1, sticky="w")
+            ttk.Label(awg_grp, text="Amplitude (Vpp)").grid(row=4, column=0, sticky="w", pady=2)
+            self.awg_vpp_var = tk.StringVar(value="0.1")
+            ttk.Entry(awg_grp, textvariable=self.awg_vpp_var, width=10).grid(row=4, column=1, sticky="w")
 
         # Simulation Parameters
         grp = ttk.LabelFrame(params_frame, text="Simulation Parameters", padding=8)
@@ -2139,14 +2185,12 @@ class PhotonicIsacSimPanel:
             e.grid(row=row, column=1, sticky="w")
             return e
 
-        add_p(0, "fs_gsps", "Sample Rate [GS/s]", "100")
+        # removed fs_gsps
         add_p(1, "linewidth_mhz", "Laser Linewidth [MHz]", "0.1")
-        add_p(2, "baud_gbaud", "Baud Rate [Gbaud]", "10")
-        add_p(3, "if_ghz", "IF Freq [GHz]", "10")
-        ttk.Label(grp, text="TX Waveform").grid(row=4, column=0, sticky="w", pady=2)
-        self.waveform_var = tk.StringVar(value="16QAM")
-        ttk.Combobox(grp, textvariable=self.waveform_var, values=["16QAM", "LFM-16QAM", "OFDM-16QAM"], width=12, state="readonly").grid(row=4, column=1)
-        add_p(5, "chirp_bw_ghz", "Chirp BW [GHz]", "2.0")
+        # removed baud_gbaud
+        # removed if_ghz
+        self.waveform_var = tk.StringVar(value="16QAM") # Hidden, managed by awg
+        # removed chirp_bw_ghz
 
         ttk.Checkbutton(grp, text="Enable Carrier Wander", variable=self.carrier_wander_enable_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=2)
@@ -2174,9 +2218,15 @@ class PhotonicIsacSimPanel:
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
         ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=24, column=1, sticky="w")
+        
+        self.sc_fde_enable_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(grp, text="Enable SC-FDE", variable=self.sc_fde_enable_var).grid(row=25, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="SC-FDE Taps").grid(row=26, column=0, sticky="w", pady=2)
+        self.sc_fde_taps_var = tk.StringVar(value="21")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=26, column=1, sticky="w")
 
         # Plot on right
-        self.fig = Figure(figsize=(10.5, 7.2), dpi=100)
+        self.fig = Figure(figsize=(8, 8), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         ttk.Label(right, textvariable=self.demod_var, foreground="#114488", font=("Arial", 12, "bold")).pack(pady=5)
@@ -2199,8 +2249,14 @@ class PhotonicIsacSimPanel:
             si_enable = bool(self.si_enable_var.get())
             si_dbm = tx_dbm - float(self.params["omt_iso_db"].get()) if si_enable else -300.0
             lna_out_dbm = max(echo_dbm, si_dbm) + float(self.params["lna_gain_db"].get())
-            lna_noise_dbm = -174.0 + 10 * np.log10(float(self.params["fs_gsps"].get()) * 1e9) + float(self.params["lna_nf_db"].get()) + float(self.params["lna_gain_db"].get())
-            zbd_noise_v = float(self.params["zbd_resp_vpw"].get()) * float(self.params["zbd_nep_pw"].get()) * 1e-12 * np.sqrt(float(self.params["fs_gsps"].get()) * 1e9 / 2.0)
+            # Use AWG fs for bandwidth approximation since fs_gsps param was removed
+            if getattr(self, "awg_fs_var", None):
+                rx_bw_hz = float(self.awg_fs_var.get()) * 1e9
+            else:
+                rx_bw_hz = 120e9
+            
+            lna_noise_dbm = -174.0 + 10 * np.log10(rx_bw_hz) + float(self.params["lna_nf_db"].get()) + float(self.params["lna_gain_db"].get())
+            zbd_noise_v = float(self.params["zbd_resp_vpw"].get()) * float(self.params["zbd_nep_pw"].get()) * 1e-12 * np.sqrt(rx_bw_hz / 2.0)
 
             # Link-budget SINR approximation
             # [물리적 신호 전력 교정] 송신 파워(tx_dbm)의 98%는 광 캐리어 성분이며 데이터(IF) 전력은 약 16.6dB 낮음
@@ -2208,8 +2264,14 @@ class PhotonicIsacSimPanel:
             p_echo_lin = 10 ** ((echo_dbm + data_pwr_ratio_db) / 10.0)
             p_si_lin = 10 ** ((si_dbm + data_pwr_ratio_db) / 10.0)
             
-            # [잡음 대역폭 교정] 수신기 매치드 필터(RRC) 이후 유효 잡음 대역폭은 Symbol Rate와 동일
-            baud_rate_hz = float(self.params["baud_gbaud"].get()) * 1e9
+            # [수신 대역폭 내 잡음] 정합 필터 통과 후 유효 잡음 대역폭은 Symbol Rate와 동일
+            try:
+                if getattr(self, "awg_source", None):
+                    baud_rate_hz = float(self.awg_source.symbol_rate_var.get()) * 1e9
+                else:
+                    baud_rate_hz = 10e9
+            except:
+                baud_rate_hz = 10e9
             p_noise_in_dbm = -174.0 + 10 * np.log10(baud_rate_hz) + float(self.params["lna_nf_db"].get())
             p_noise_lin = 10 ** (p_noise_in_dbm / 10.0)
             
@@ -2237,8 +2299,6 @@ class PhotonicIsacSimPanel:
             self.table.item(self.rows["si"], values=((f"{si_dbm:.1f}" if si_enable else "OFF"), ("dBm" if si_enable else "-")))
             self.table.item(self.rows["lna"], values=(f"{lna_out_dbm:.1f}", "dBm"))
             self.table.item(self.rows["lna_total"], values=(f"{lna_total_dbm:.1f}", "dBm"))
-            self.table.item(self.rows["noise"], values=(f"{lna_noise_dbm:.1f}", "dBm"))
-            self.table.item(self.rows["zbd"], values=(f"{zbd_noise_v:.3e}", "V"))
             self.table.item(self.rows["sinr"], values=(f"{sinr_db:.2f}", "dB"))
             if "comm_loss" in self.rows:
                 self.table.item(self.rows["comm_loss"], values=(f"{loss_com_db:.1f}", "dB"))
@@ -2246,20 +2306,19 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["comm_rx"], values=(f"{comm_dbm:.1f}", "dBm"))
             if "comm_snr" in self.rows:
                 self.table.item(self.rows["comm_snr"], values=(f"{com_snr_db:.2f}", "dB"))
-            self.table.item(self.rows["evm_est"], values=("N/A", "dB"))
-            self.table.item(self.rows["evm_pct"], values=("N/A", "%"))
         except Exception as e:
             print(f"Update table error: {e}")
 
     def _cfg_from_ui(self) -> SimConfig:
+        awg = self.awg_source
         cfg = SimConfig(
-            fs_gsps=float(self.params["fs_gsps"].get()),
+            fs_gsps=float(awg.fs_var.get()) if awg else 100.0,
             linewidth_mhz=float(self.params["linewidth_mhz"].get()),
-            baud_gbaud=float(self.params["baud_gbaud"].get()),
-            if_ghz=float(self.params["if_ghz"].get()),
-            rf_carrier_ghz=270.0,
-            waveform=self.waveform_var.get().strip(),
-            chirp_bw_ghz=max(float(self.params["chirp_bw_ghz"].get()), 0.01),
+            baud_gbaud=float(awg.symbol_rate_var.get()) if awg else 10.0,
+            if_ghz=float(awg.if_var.get()) if awg else 10.0,
+            rf_carrier_ghz=float(awg.rf_var.get()) if awg else 270.0,
+            waveform=awg.waveform_var.get().strip() if awg else "LFM-QAM",
+            chirp_bw_ghz=float(awg.symbol_rate_var.get()) if awg else 2.0,
             coherence_mode=self.coherence_var.get().strip(),
             rx_mode=self.rx_mode_var.get().strip(),
             si_enable=bool(self.si_enable_var.get()),
@@ -2392,13 +2451,11 @@ class PhotonicIsacSimPanel:
             if np.isfinite(evm_db):
                 self.demod_var.set(f"16-QAM Demod: EVM={evm_db:.1f} dB | SER={ser:.4f}")
                 evm_pct = estimate_measured_evm_percent(evm_db)
-                self.table.item(self.rows["evm_est"], values=(f"{evm_db:.2f}", "dB"))
+                self.table.item(self.rows["evm_pct"], values=(f"{evm_db:.2f}", "dB"))
                 self.table.item(self.rows["evm_pct"], values=(f"{evm_pct:.2f}", "%"))
             else:
                 self.demod_var.set(f"Comm Demod: N/A ({cfg.rx_mode})")
-                self.table.item(self.rows["evm_est"], values=("N/A", "dB"))
-                self.table.item(self.rows["evm_pct"], values=("N/A", "%"))
-
+                                
             self._update_range_profile()
 
             self.frame_idx = 0
@@ -2520,7 +2577,7 @@ class PhotonicIsacSimPanel:
                     awg_sig=awg_sig,
                     channels=channels_list if channels_list else [1],
                     awg_addr=addr,
-                    fs=awg_fs_ghz,
+                    fs=awg_fs,
                     vpp=float(self.awg_vpp_var.get()),
                 )
                 n_samp = len(awg_sig)
@@ -2543,6 +2600,25 @@ class PhotonicIsacSimPanel:
         if self.after_id:
             self.parent.after_cancel(self.after_id)
             self.after_id = None
+
+    def _cmd_to_awg(self):
+        if self.awg_source is not None:
+            self.awg_source._on_download()
+        else:
+            self._on_download_awg()
+
+    def _cmd_run_awg(self):
+        if self.awg_source is not None:
+            self.awg_source._on_awg_run()
+
+    def _cmd_toggle_anim(self):
+        if self.after_id:
+            self.stop_animation()
+            self._anim_btn.configure(text="Anim Start")
+        else:
+            self.start_animation()
+            if self.after_id:
+                self._anim_btn.configure(text="Anim Stop")
 
 class DsoPanel:
     """DSO Capture + Spectrum Analysis + Demodulation panel."""
@@ -2586,7 +2662,8 @@ class DsoPanel:
         lc.bind("<MouseWheel>", lambda e: lc.yview_scroll(int(-1*(e.delta/120)), "units"))
 
         # ── RIGHT PANEL (plot) ────────────────────────────────────────
-        right = ttk.Frame(main)
+        self.right_frame = ttk.Frame(main)
+        right = self.right_frame
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
 
         # ══ Section 1: DSO Connection ════════════════════════════════
@@ -2609,6 +2686,10 @@ class DsoPanel:
         ttk.Label(grp1, text="Scope BW (GHz)").grid(row=1, column=2, sticky="w", padx=(10, 0))
         self.scope_bw_var = tk.StringVar(value=str(self._UXR0404A_BW_GHZ))
         ttk.Entry(grp1, textvariable=self.scope_bw_var, width=7).grid(row=1, column=3, sticky="w")
+        
+        ttk.Label(grp1, text="DSO SR (GS/s)").grid(row=1, column=4, sticky="w", padx=(10, 0))
+        self.dso_sr_var = tk.StringVar(value="256")
+        ttk.Combobox(grp1, textvariable=self.dso_sr_var, values=["64", "128", "256", "Auto"], state="readonly", width=7).grid(row=1, column=5, sticky="w")
 
         ttk.Label(grp1, text="DSO Host").grid(row=2, column=0, sticky="w", pady=3)
         self.host_var = tk.StringVar(value="192.168.1.4")
@@ -2624,9 +2705,19 @@ class DsoPanel:
         self.timeout_var = tk.StringVar(value="10000")
         self.timeout_entry = ttk.Entry(grp1, textvariable=self.timeout_var, width=8)
         self.timeout_entry.grid(row=3, column=3, sticky="w")
+        ttk.Label(grp1, text="Ch Scale (mV/div)").grid(row=3, column=4, sticky="w", padx=(10, 0))
+        self.ch_scale_mv_var = tk.StringVar(value="50")
+        ttk.Entry(grp1, textvariable=self.ch_scale_mv_var, width=7).grid(row=3, column=5, sticky="w")
+
+        ttk.Label(grp1, text="Process Fs (GS/s)").grid(row=4, column=0, sticky="w", pady=3)
+        self.capture_fs_var = tk.StringVar(value="")
+        ttk.Entry(grp1, textvariable=self.capture_fs_var, width=10).grid(row=4, column=1, sticky="w")
+        ttk.Label(grp1, text="Capture Margin (xT)").grid(row=4, column=2, sticky="w", padx=(10, 0))
+        self.max_samples_var = tk.StringVar(value="3.0")
+        ttk.Entry(grp1, textvariable=self.max_samples_var, width=10).grid(row=4, column=3, sticky="w")
 
         conn_btn_f = ttk.Frame(grp1)
-        conn_btn_f.grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        conn_btn_f.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
         self.test_btn = ttk.Button(conn_btn_f, text="Test Connection",
                                    command=self._on_test_connection)
         self.test_btn.pack(side=tk.LEFT)
@@ -2635,7 +2726,7 @@ class DsoPanel:
 
         self.conn_status_var = tk.StringVar(value="Not checked")
         tk.Label(grp1, textvariable=self.conn_status_var,
-                 fg="gray", bg="#f4f6f9").grid(row=5, column=0, columnspan=4, sticky="w", pady=(2, 0))
+                 fg="gray", bg="#f4f6f9").grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         # ══ Section 2: Signal Parameters (unified for all measurements) ══
         grp2 = ttk.LabelFrame(lf, text="Signal Parameters", padding=8)
@@ -2645,11 +2736,11 @@ class DsoPanel:
 
         ttk.Label(grp2, text="Carrier Freq (GHz)").grid(row=0, column=0, sticky="w", pady=3)
         self.fc_var = tk.StringVar(value="10.0")
-        ttk.Entry(grp2, textvariable=self.fc_var, width=10).grid(row=0, column=1, sticky="w")
+        ttk.Entry(grp2, textvariable=self.fc_var, state="disabled", width=10).grid(row=0, column=1, sticky="w")
 
         ttk.Label(grp2, text="Symbol Rate (GHz)").grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.sr_var = tk.StringVar(value="1.0")
-        ttk.Entry(grp2, textvariable=self.sr_var, width=10).grid(row=0, column=3, sticky="w")
+        ttk.Entry(grp2, textvariable=self.sr_var, state="disabled", width=10).grid(row=0, column=3, sticky="w")
 
         ttk.Label(grp2, text="Modulation").grid(row=1, column=0, sticky="w", pady=3)
         self.demod_mod_var = tk.StringVar(value="16QAM")
@@ -2659,7 +2750,7 @@ class DsoPanel:
 
         ttk.Label(grp2, text="RRC Roll-off β").grid(row=1, column=2, sticky="w", padx=(10, 0))
         self.demod_beta_var = tk.StringVar(value="0.25")
-        ttk.Entry(grp2, textvariable=self.demod_beta_var, width=10).grid(row=1, column=3, sticky="w")
+        ttk.Entry(grp2, textvariable=self.demod_beta_var, state="disabled", width=10).grid(row=1, column=3, sticky="w")
 
         ttk.Label(grp2, text="RRC Span (sym)").grid(row=2, column=0, sticky="w", pady=3)
         self.demod_span_var = tk.StringVar(value="8")
@@ -2679,8 +2770,24 @@ class DsoPanel:
                    command=self._on_measure_band).pack(side=tk.LEFT)
         ttk.Button(btn_f, text="Demodulate", style="Primary.TButton",
                    command=self._on_demodulate).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btn_f, text="ISAC De-chirp / Range", style="Primary.TButton",
+                   command=self._on_isac_dechirp_range).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btn_f, text="Measure Noise Floor",
                    command=self._on_measure_noise_floor).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.filter_overlay_var = tk.BooleanVar(value=True)
+        self.filter_enable_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(grp2, text="Show filtered spectrum", variable=self.filter_overlay_var,
+                        command=self._plot_spectrum_and_time).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(grp2, text="Apply demod LPF", variable=self.filter_enable_var).grid(
+            row=4, column=2, columnspan=2, sticky="w", padx=(10, 0), pady=(6, 0))
+            
+        self.sc_fde_enable_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(grp2, text="Enable SC-FDE", variable=self.sc_fde_enable_var).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(grp2, text="SC-FDE Taps").grid(row=5, column=2, sticky="w", padx=(10, 0), pady=(6, 0))
+        self.sc_fde_taps_var = tk.StringVar(value="21")
+        ttk.Entry(grp2, textvariable=self.sc_fde_taps_var, width=10).grid(row=5, column=3, sticky="w", pady=(6, 0))
 
         # ══ Section 3: Results ════════════════════════════════════════
         grp3 = ttk.LabelFrame(lf, text="Results", padding=8)
@@ -2778,6 +2885,67 @@ class DsoPanel:
         except Exception:
             return self._UXR0404A_BW_GHZ
 
+    def _requested_process_fs(self) -> float | None:
+        raw = self.capture_fs_var.get().strip()
+        if not raw:
+            return None
+        fs = float(raw) * 1e9
+        if fs <= 0:
+            raise ValueError("Process Fs must be positive.")
+        return fs
+
+    def _max_capture_samples(self) -> int | None:
+        raw = self.max_samples_var.get().strip()
+        if not raw:
+            return None
+        val = float(raw)
+        if val <= 0:
+            raise ValueError("Margin/Samples must be positive.")
+        
+        # If the user typed a huge number, treat it as literal Max Samples (legacy)
+        if val >= 1000:
+            return int(val)
+            
+        # Otherwise, compute required samples dynamically based on actual TX duration!
+        pl = self._load_tx_payload_for_isac()
+        if pl and "awg_sig" in pl and "fs" in pl:
+            sig_len = len(pl["awg_sig"])
+            fs_awg = pl["fs"]
+            
+            sr_val = self.dso_sr_var.get()
+            fs_dso_target = float(sr_val) * 1e9 if sr_val != "Auto" else 256e9
+            
+            duration = sig_len / fs_awg
+            needed_samples = int(duration * fs_dso_target * val)
+            
+            # Add a small overhead or floor to ensure we don't capture too little
+            return max(needed_samples, 100000)
+            
+        # Fallback if no TX payload is generated yet
+        return 10000000
+
+    @staticmethod
+    def _resample_real(sig: np.ndarray, fs_in: float, fs_out: float) -> np.ndarray:
+        if np.isclose(fs_in, fs_out):
+            return np.asarray(sig, dtype=np.float64)
+        y = fft_resample_complex(np.asarray(sig, dtype=np.float64), fs_in=fs_in, fs_out=fs_out)
+        return np.real(y).astype(np.float64)
+
+    @staticmethod
+    def _fft_bandpass_real(sig: np.ndarray, fs: float, f_lo: float, f_hi: float) -> np.ndarray:
+        x = np.asarray(sig, dtype=np.float64)
+        if len(x) == 0:
+            return x
+        lo = max(0.0, float(f_lo))
+        hi = min(fs / 2.0, float(f_hi))
+        if hi <= lo:
+            return np.zeros_like(x)
+        freq = np.fft.fftfreq(len(x), d=1.0 / fs)
+        X = np.fft.fft(x)
+        mask = ((np.abs(freq) >= lo) & (np.abs(freq) <= hi))
+        X[~mask] = 0.0
+        return np.real(np.fft.ifft(X))
+
     @staticmethod
     def _compute_psd_db(sig: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray]:
         """Single-sided PSD in dBm/Hz (50Ω reference) via Welch."""
@@ -2843,6 +3011,67 @@ class DsoPanel:
                     host=host, timeout_ms=timeout_ms
                 ) as dso:
                     idn = dso.query("*IDN?")
+                    
+                    try:
+                        dso.write("*RST")
+                        import time; time.sleep(1.0)
+                        
+                        ch_str = self.ch_var.get().strip().upper()
+                        ch_num = ch_str.replace("C", "").replace("HAN", "").replace("NEL", "")
+                        if ch_num:
+                            dso.write(f":CHANnel{ch_num}:DISPlay ON")
+                            try:
+                                scale_vdiv = float(self.ch_scale_mv_var.get()) / 1000.0
+                                dso.write(f":CHANnel{ch_num}:SCALe {scale_vdiv:.4f}")
+                            except Exception:
+                                pass
+
+                        # Sync Sample Rate and Points
+                        sr_val = self.dso_sr_var.get()
+                        if sr_val != "Auto":
+                            fs_dso_target = float(sr_val) * 1e9
+                            try: dso.write(f":ACQuire:SRATe {fs_dso_target}")
+                            except: pass
+
+                        # To prevent broadened spectrum on the DSO screen, explicitly set Acquire Points and Time Range
+                        try:
+                            max_samples = self._max_capture_samples()
+                            if max_samples:
+                                dso.write(f":ACQuire:POINts {int(max_samples)}")
+                                if sr_val != "Auto":
+                                    time_range = int(max_samples) / fs_dso_target
+                                    dso.write(f":TIMebase:RANGe {time_range}")
+                        except: pass
+
+                        # Split waveform areas: channel waveform in Area 1, FFT in Area 2
+                        if ch_num:
+                            dso_type_val = self.dso_type_var.get().lower()
+                            try:
+                                if "uxr" in dso_type_val or "keysight" in dso_type_val:
+                                    # UXR: FFTMagnitude syntax, then split via GRATicule commands (PDF p.621-624)
+                                    dso.write(f":FUNCtion1:FFTMagnitude CHANnel{ch_num}")
+                                    dso.write(":FUNCtion1:DISPlay ON")
+                                    try: dso.write(":DISPlay:LAYout SVERtical")
+                                    except: pass
+                                    try: dso.write(":DISPlay:GRATicule:AREA2:STATe ON")
+                                    except: pass
+                                    try: dso.write(f":DISPlay:GRATicule:SETGrat CHN{ch_num},1,1")
+                                    except: pass
+                                    try: dso.write(":DISPlay:GRATicule:SETGrat FN1,1,2")
+                                    except: pass
+                                else:
+                                    dso.write(f":FUNCtion1:FFT:MAGNitude CHANnel{ch_num}")
+                                    dso.write(":FUNCtion1:DISPlay ON")
+                                    try: dso.write(":DISPlay:WINDow2:STATE ON")
+                                    except: pass
+                                    try: dso.write(":DISPlay:WINDow2:SOURce FUNCtion1")
+                                    except: pass
+                            except:
+                                pass
+                        self._log("[Conn] DSO hardware initialized and synced.")
+                    except Exception as ex:
+                        self._log(f"[Conn] Warning: could not set all DSO params ({ex})")
+                        
                 self._log(f"[Conn] OK: {idn}")
                 self.parent.after(0, lambda: self.conn_status_var.set("Connected"))
             except Exception as e:
@@ -2858,12 +3087,35 @@ class DsoPanel:
                     host = self.host_var.get().strip()
                     timeout_ms = int(_parse_float_input(self.timeout_var.get(), "Timeout"))
                     ch = self.ch_var.get().strip().upper()
+                    process_fs = self._requested_process_fs()
+                    fallback_fs = process_fs or (256e9 if "keysight" in normalize_dso_type(self.dso_type_var.get()) else 40e9)
+                    max_samples = self._max_capture_samples()
                     self._log(f"[Acq] Connecting {host} ch={ch}...")
                     with create_dso_controller(
                         dso_type=normalize_dso_type(self.dso_type_var.get()),
                         host=host, timeout_ms=timeout_ms
                     ) as dso:
-                        t_rx, rx_sig, fs_dso = dso.capture(channel=ch, fallback_fs=40e9)
+                        try:
+                            sr_val = self.dso_sr_var.get()
+                            if sr_val != "Auto":
+                                fs_dso_target = float(sr_val) * 1e9
+                                dso.write(f":ACQuire:SRATe {fs_dso_target}")
+                                import time; time.sleep(0.5)
+                        except Exception as e:
+                            self._log(f"[Acq] Could not set sample rate: {e}")
+                            
+                        t_rx, rx_sig, fs_dso = dso.capture(channel=ch, fallback_fs=fallback_fs, max_samples=max_samples)
+                    fs_native = float(fs_dso)
+                    rx_sig = np.asarray(rx_sig, dtype=np.float64)
+                    if process_fs is not None and not np.isclose(fs_native, process_fs):
+                        rx_sig = self._resample_real(rx_sig, fs_native, process_fs)
+                        fs_dso = process_fs
+                        t_rx = np.arange(len(rx_sig), dtype=np.float64) / fs_dso
+                        self._log(f"[Acq] Resampled: {fs_native/1e9:.3f} -> {fs_dso/1e9:.3f} GSa/s")
+                    if max_samples is not None and len(rx_sig) > max_samples:
+                        rx_sig = rx_sig[:max_samples]
+                        t_rx = np.asarray(t_rx)[:max_samples] if len(t_rx) >= max_samples else np.arange(max_samples, dtype=np.float64) / float(fs_dso)
+                        self._log(f"[Acq] Truncated to {max_samples:,} samples")
                     self._rx_sig = np.asarray(rx_sig, dtype=np.float64)
                     self._rx_t   = np.asarray(t_rx)
                     self._rx_fs  = float(fs_dso)
@@ -2879,6 +3131,15 @@ class DsoPanel:
                     self._rx_sig = np.asarray(sig, dtype=np.float64)
                     self._rx_t   = self.runtime.get("latest_t")
                     self._rx_fs  = float(self.runtime.get("latest_fs", 40e9))
+                    process_fs = self._requested_process_fs()
+                    max_samples = self._max_capture_samples()
+                    if process_fs is not None and not np.isclose(self._rx_fs, process_fs):
+                        self._rx_sig = self._resample_real(self._rx_sig, self._rx_fs, process_fs)
+                        self._rx_fs = process_fs
+                        self._rx_t = np.arange(len(self._rx_sig), dtype=np.float64) / self._rx_fs
+                    if max_samples is not None and len(self._rx_sig) > max_samples:
+                        self._rx_sig = self._rx_sig[:max_samples]
+                        self._rx_t = np.asarray(self._rx_t)[:max_samples] if self._rx_t is not None and len(self._rx_t) >= max_samples else np.arange(max_samples, dtype=np.float64) / self._rx_fs
                     self._log(f"[Acq] Loaded from memory: N={len(self._rx_sig):,}")
                 self.parent.after(0, self._plot_spectrum_and_time)
             except Exception as e:
@@ -2902,11 +3163,14 @@ class DsoPanel:
 
         # --- Spectrum ---
         self.ax_spec.cla()
-        self.ax_spec.plot(f_ghz[mask_disp], psd_db[mask_disp], linewidth=0.8, color="#2563eb")
+        self.ax_spec.plot(f_ghz[mask_disp], psd_db[mask_disp], linewidth=0.8, color="#2563eb", label="Raw")
         self.ax_spec.set_xlabel("Frequency (GHz)")
         self.ax_spec.set_ylabel("PSD (dBm/Hz)")
         self.ax_spec.set_title(f"Spectrum  [0 – {fmax_ghz:.0f} GHz]")
         self.ax_spec.set_xlim(0.0, fmax_ghz)
+        if np.any(mask_disp):
+            pmax_disp = float(np.max(psd_db[mask_disp]))
+            self.ax_spec.set_ylim(pmax_disp - 80.0, pmax_disp + 10.0)
         self.ax_spec.set_axis_on()
         self.ax_spec.grid(True, alpha=0.4)
 
@@ -2914,12 +3178,26 @@ class DsoPanel:
         try:
             f1_ghz, f2_ghz = self._get_signal_band_ghz()
             fc_ghz = float(self.fc_var.get())
+            if bool(self.filter_overlay_var.get()):
+                filt = self._fft_bandpass_real(sig, fs, f1_ghz * 1e9, f2_ghz * 1e9)
+                ff_hz, ff_db = self._compute_psd_db(filt, fs)
+                ff_ghz = ff_hz / 1e9
+                ff_mask = ff_ghz <= fmax_ghz
+                self.ax_spec.plot(ff_ghz[ff_mask], ff_db[ff_mask], linewidth=0.9,
+                                  color="#dc2626", alpha=0.85, label="Filtered")
             self.ax_spec.axvspan(f1_ghz, f2_ghz, alpha=0.15, color="orange",
                                  label=f"Signal [{f1_ghz:.2f}–{f2_ghz:.2f} GHz]")
             self.ax_spec.axvline(f1_ghz, color="orange", lw=1.2, linestyle="--")
             self.ax_spec.axvline(f2_ghz, color="orange", lw=1.2, linestyle="--")
             self.ax_spec.axvline(fc_ghz, color="red", lw=1.0, linestyle=":",
                                  label=f"fc={fc_ghz:.2f} GHz")
+            idx_fc = np.argmin(np.abs(f_ghz - fc_ghz))
+            if mask_disp[idx_fc]:
+                psd_fc = psd_db[idx_fc]
+                self.ax_spec.plot(fc_ghz, psd_fc, 'ro', markersize=4)
+                self.ax_spec.annotate(f"{psd_fc:.1f} dBm/Hz", (fc_ghz, psd_fc),
+                                      textcoords="offset points", xytext=(0, 6),
+                                      ha='center', color='red', fontsize=8, fontweight='bold')
             # Stored noise floor reference line
             if self._noise_floor_ref_dbmhz is not None:
                 self.ax_spec.axhline(self._noise_floor_ref_dbmhz, color="#b0280a",
@@ -3035,11 +3313,27 @@ class DsoPanel:
 
             bw_sig_hz    = (f2_ghz - f1_ghz) * 1e9
             p_noise_mw   = nf_mwhz * bw_sig_hz
-            snr_db       = 10.0 * np.log10(max(p_sig_mw / max(p_noise_mw, 1e-30), 1e-30))
+            
+            p_sig_true_mw = max(p_sig_mw - p_noise_mw, 1e-30)
+            p_sig_true_dbm = 10.0 * np.log10(p_sig_true_mw)
+            
+            snr_db       = 10.0 * np.log10(max(p_sig_true_mw / max(p_noise_mw, 1e-30), 1e-30))
 
-            self.band_pwr_var.set(f"Band Power:  {p_sig_dbm:.2f} dBm")
+            self.band_pwr_var.set(f"Band Power:  {p_sig_true_dbm:.2f} dBm")
             self.noise_floor_var.set(f"Noise Floor: {nf_label}")
             self.snr_var.set(f"SNR:         {snr_db:.2f} dB")
+            
+            # Send measurement message to DSO screen
+            try:
+                live = bool(self.live_var.get())
+                if live:
+                    host = self.host_var.get().strip()
+                    timeout_ms = int(float(self.timeout_var.get()))
+                    from functions.dso_functions import create_dso_controller
+                    with create_dso_controller("keysight_uxr", host=host, timeout_ms=timeout_ms) as dso:
+                        dso.write(f":SYSTem:DSP 'Band Power: {p_sig_true_dbm:.2f} dBm, SNR: {snr_db:.2f} dB'")
+            except Exception:
+                pass
             self._log(f"[Meas] fc={float(self.fc_var.get()):.2f} GHz  "
                       f"sr={float(self.sr_var.get()):.3f} GHz → "
                       f"P={p_sig_dbm:.2f} dBm  NF={nf_label}  SNR={snr_db:.2f} dB")
@@ -3048,6 +3342,128 @@ class DsoPanel:
             self._plot_spectrum_and_time()
         except Exception as e:
             messagebox.showerror("Measure Error", str(e))
+
+    def _load_tx_payload_for_isac(self) -> dict | None:
+        payload = self.runtime.get("tx_payload")
+        if payload is not None:
+            return payload
+        ref_path = APP_DIR / "data" / "current_tx_ref.npz"
+        if not ref_path.exists():
+            return None
+        loaded = np.load(ref_path, allow_pickle=True)
+        payload = {}
+        for key in loaded.files:
+            val = loaded[key]
+            if val.shape == (1,):
+                payload[key] = val[0].item() if hasattr(val[0], "item") else val[0]
+            else:
+                payload[key] = val
+        self.runtime["tx_payload"] = payload
+        return payload
+
+    def _on_isac_dechirp_range(self) -> None:
+        if self._rx_sig is None:
+            messagebox.showwarning("No data", "Acquire a signal first.")
+            return
+
+        def worker():
+            try:
+                meta = self._load_tx_payload_for_isac()
+                if meta is None:
+                    raise ValueError("No TX reference found. Generate or download the TX signal first.")
+
+                sig = np.asarray(self._rx_sig, dtype=np.float64)
+                fs_rx = float(self._rx_fs)
+                fs_ref = float(meta.get("fs", fs_rx))
+                if_freq = float(meta.get("if_freq", 0.0))
+                mode = str(meta.get("mode", "Real IF"))
+                tx_ref = np.asarray(meta.get("tx_signal"), dtype=np.complex128).reshape(-1)
+                tx_mat = np.asarray(meta.get("tx_bb_matrix", []), dtype=np.complex128)
+                base_chirp = np.asarray(meta.get("base_chirp", []), dtype=np.complex128).reshape(-1)
+                n_chirps = int(meta.get("n_chirps", tx_mat.shape[0] if tx_mat.ndim == 2 else 1))
+                n_sym = int(meta.get("n_sym_per_chirp", 0))
+                sps = int(meta.get("sps", 0))
+                pts_per_chirp = int(tx_mat.shape[1] if tx_mat.ndim == 2 and tx_mat.shape[1] > 0 else n_sym * sps)
+                if len(tx_ref) == 0 or pts_per_chirp <= 0:
+                    raise ValueError("TX reference is incomplete. Regenerate the TX signal.")
+
+                t_rx = np.arange(len(sig), dtype=np.float64) / fs_rx
+                if mode == "Real IF" and if_freq > 0:
+                    rx_bb = sig * np.exp(-1j * 2.0 * np.pi * if_freq * t_rx) * 2.0
+                else:
+                    rx_bb = sig.astype(np.complex128)
+                if not np.isclose(fs_rx, fs_ref):
+                    rx_bb = fft_resample_complex(rx_bb, fs_in=fs_rx, fs_out=fs_ref)
+
+                template = tx_ref[:min(len(tx_ref), len(rx_bb))]
+                if len(rx_bb) < len(template):
+                    raise ValueError("Capture is shorter than TX reference.")
+                corr = fftconvolve(rx_bb, np.conj(template[::-1]), mode="valid")
+                frame_start = int(np.argmax(np.abs(corr))) if len(corr) else 0
+
+                valid_chirps = min(n_chirps, max(1, (len(rx_bb) - frame_start) // pts_per_chirp))
+                total_pts = valid_chirps * pts_per_chirp
+                rx_frame = rx_bb[frame_start:frame_start + total_pts]
+                if len(rx_frame) < total_pts:
+                    rx_frame = np.pad(rx_frame, (0, total_pts - len(rx_frame)))
+                rx_mat = rx_frame.reshape(valid_chirps, pts_per_chirp)
+
+                if tx_mat.ndim == 2 and tx_mat.shape[1] == pts_per_chirp:
+                    tx_cmp = tx_mat[:valid_chirps]
+                else:
+                    tx_cmp = tx_ref[:total_pts].reshape(valid_chirps, pts_per_chirp)
+
+                corr_acc = None
+                lags = None
+                for i in range(valid_chirps):
+                    ci = np.abs(fftconvolve(rx_mat[i], np.conj(tx_cmp[i][::-1]), mode="full"))
+                    corr_acc = ci if corr_acc is None else corr_acc + ci
+                    lags = np.arange(-(len(tx_cmp[i]) - 1), len(rx_mat[i]), dtype=np.int64)
+                prof = corr_acc / max(valid_chirps, 1)
+                valid = lags >= 0
+                rng = lags[valid].astype(np.float64) * 3e8 / (2.0 * fs_ref)
+                prof_db = 20.0 * np.log10(prof[valid] / (np.max(prof[valid]) + 1e-15) + 1e-15)
+
+                if len(base_chirp) == pts_per_chirp:
+                    dechirped = (rx_mat * np.conj(base_chirp)[np.newaxis, :]).reshape(-1)
+                else:
+                    dechirped = rx_mat.reshape(-1)
+
+                est_idx = int(np.argmax(prof[valid])) if np.any(valid) else 0
+                est_range = float(rng[est_idx]) if len(rng) > est_idx else float("nan")
+                self._log(f"[ISAC] frame={frame_start:,}  chirps={valid_chirps}  est_range={est_range:.4g} m")
+                self.parent.after(0, lambda: self._show_isac_range_result(dechirped, fs_ref, rng, prof_db, est_range))
+            except Exception as e:
+                self._log(f"[ISAC] Error: {e}")
+                self.parent.after(0, lambda m=str(e): messagebox.showerror("ISAC De-chirp Error", m))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_isac_range_result(self, dechirped: np.ndarray, fs_ref: float,
+                                rng: np.ndarray, prof_db: np.ndarray, est_range: float) -> None:
+        self._plot_spectrum_and_time()
+
+        n_plot = min(len(dechirped), 4000)
+        t_plot = np.arange(n_plot, dtype=np.float64) / fs_ref * 1e9
+        self.ax_time.cla()
+        self.ax_time.plot(t_plot, np.real(dechirped[:n_plot]), linewidth=0.7, color="#9333ea")
+        self.ax_time.set_xlabel("Time (ns)")
+        self.ax_time.set_ylabel("I amplitude")
+        self.ax_time.set_title("De-chirped ISAC Signal")
+        self.ax_time.grid(True, alpha=0.4)
+
+        self.ax_const.cla()
+        max_x = max(10.0, float(np.nanmax(rng)) if len(rng) else 10.0)
+        show = rng <= max_x
+        self.ax_const.plot(rng[show], prof_db[show], color="#0f766e", linewidth=1.2)
+        if np.isfinite(est_range):
+            self.ax_const.axvline(est_range, color="#dc2626", linestyle="--", label=f"Peak {est_range:.3g} m")
+            self.ax_const.legend(fontsize=8)
+        self.ax_const.set_xlabel("Range (m)")
+        self.ax_const.set_ylabel("Magnitude (dB)")
+        self.ax_const.set_title("ISAC Range Profile")
+        self.ax_const.grid(True, alpha=0.35)
+        self.fig.tight_layout()
+        self.canvas_plot.draw_idle()
 
     def _on_demodulate(self) -> None:
         if self._rx_sig is None:
@@ -3065,47 +3481,37 @@ class DsoPanel:
                 bps  = self._bits_per_sym(mod)
                 M    = 2 ** bps
 
-                # 1. Down-convert to baseband
-                t  = np.arange(len(sig)) / fs
-                bb = sig * np.exp(-1j * 2.0 * np.pi * fc * t)
-
-                # 2. Low-pass filter at signal BW
-                from scipy.signal import firwin, lfilter
-                n_taps = 101
-                cutoff = min(0.75 * sr / (fs / 2.0), 0.99)
-                lpf    = firwin(n_taps, cutoff)
-                bb     = lfilter(lpf, 1.0, bb)
-
-                # 3. Matched filter (RRC)
-                sps   = max(2, int(round(fs / sr)))
-                rrc   = self._rrc_filter(sps, beta, span)
-                bb_mf = np.convolve(bb, rrc, mode="same")
-
-                # 4. Symbol timing: scan sps offsets, pick maximum energy
-                start      = span * sps
-                candidates = [bb_mf[start + off :: sps] for off in range(sps)]
-                powers     = [np.mean(np.abs(c) ** 2) for c in candidates]
-                syms_raw   = bb_mf[start + int(np.argmax(powers)) :: sps]
-
-                # 5. Amplitude normalise
-                syms_raw = syms_raw / (np.sqrt(np.mean(np.abs(syms_raw) ** 2)) + 1e-15)
-
-                # 6. Phase correction
-                ideal_tmp = self._qam_hard_decision(syms_raw, M)
-                phase_err = np.mean(np.angle(syms_raw * np.conj(ideal_tmp)))
-                syms_eq   = syms_raw * np.exp(-1j * phase_err)
-
-                # 7. Hard decision
-                syms_ideal = self._qam_hard_decision(syms_eq, M)
-
-                # 8. EVM
-                err     = syms_eq - syms_ideal
-                evm_rms = float(np.sqrt(np.mean(np.abs(err) ** 2)) /
-                                (np.sqrt(np.mean(np.abs(syms_ideal) ** 2)) + 1e-15))
-                evm_db  = 20.0 * np.log10(max(evm_rms, 1e-10))
+                pl = self._load_tx_payload_for_isac()
+                tx_ref = None
+                if pl:
+                    tx_ref = pl.get("qam_symbols", pl.get("syms", None))
+                if tx_ref is None:
+                    self.parent.after(0, lambda: messagebox.showwarning("No TX Reference", "Please generate the TX signal first (Run AWG/Sim) before demodulating."))
+                    return
+                chirp_sig = pl.get("base_chirp", None) if pl else None
+                
+                # Use 10-step DSP chain
+                syms_eq, syms_ideal, evm_db = lfm_qam_rx_dsp_chain(
+                    rx_signal=sig,
+                    fs=fs,
+                    baud_rate=sr,
+                    if_freq=fc,
+                    chirp_signal=chirp_sig,
+                    tx_ref_symbols=tx_ref,
+                    rrc_alpha=beta,
+                    rx_mode="Mixer",
+                    sc_fde_enable=self.sc_fde_enable_var.get(),
+                    sc_fde_taps=max(1, int(_parse_float_input(self.sc_fde_taps_var.get(), "SC-FDE Taps")))
+                )
+                
+                if syms_eq is None or syms_ideal is None:
+                    self._log("[Demod] Demodulation failed (no sync or metric too low).")
+                    return
+                
+                evm_rms = 10 ** (evm_db / 20.0)
                 evm_pct = evm_rms * 100.0
-
-                # 9. BER (decision-directed)
+                
+                # BER
                 n_sym = len(syms_eq)
                 uniq_re = np.unique(np.real(syms_ideal))
                 min_sep = float(np.min(np.diff(uniq_re)) if len(uniq_re) > 1 else 1.0)
@@ -3153,7 +3559,8 @@ class UnifiedApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("ISAC Unified GUI (TX + DSO + Simulation)")
-        self.root.geometry("1500x950")
+        self.root.geometry("1700x1100")
+        self.root.minsize(1450, 900)
         apply_unified_style(self.root)
 
         self.runtime: dict = {}
@@ -3161,17 +3568,59 @@ class UnifiedApp:
         notebook.pack(fill=tk.BOTH, expand=True)
 
         tab_tx_sim = ttk.Frame(notebook)
-        tab_photonic_sim = ttk.Frame(notebook)
         tab_dso = ttk.Frame(notebook)
         notebook.add(tab_tx_sim, text="TX Design & Simulation")
-        notebook.add(tab_photonic_sim, text="Photonic ISAC Sim (Proposed)")
         notebook.add(tab_dso, text="DSO Live Capture")
-        self.tx_sim_panel = IsacTxSimPanel(tab_tx_sim, runtime=self.runtime, on_tx_generated=self._on_reference_npz_ready)
-        self.photonic_sim_panel = PhotonicIsacSimPanel(tab_photonic_sim)
+
+        tx_sim_paned = ttk.PanedWindow(tab_tx_sim, orient=tk.HORIZONTAL)
+        tx_sim_paned.pack(fill=tk.BOTH, expand=True)
+
+        # Single sidebar on the left for all controls
+        controls_left = ttk.Frame(tx_sim_paned)
+        # Main area on the right for all plots
+        plots_right = ttk.Frame(tx_sim_paned)
+        
+        tx_sim_paned.add(controls_left, weight=1)
+        tx_sim_paned.add(plots_right, weight=4)
+        
+        awg_control_frame = ttk.Frame(controls_left)
+        awg_control_frame.pack(fill=tk.X)
+        
+        sim_control_frame = ttk.Frame(controls_left)
+        sim_control_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.tx_sim_panel = IsacTxSimPanel(awg_control_frame, runtime=self.runtime, on_tx_generated=self._on_reference_npz_ready)
+        self.photonic_sim_panel = PhotonicIsacSimPanel(
+            parent=sim_control_frame,
+            plot_parent=plots_right,
+            awg_source=self.tx_sim_panel,
+            show_awg_params=False,
+        )
         self.dso_panel = DsoPanel(tab_dso, runtime=self.runtime)
 
     def _on_reference_npz_ready(self, file_path: str) -> None:
         self.dso_panel._log(f"[App] Internal TX Reference Updated: {file_path}")
+        
+        # Auto-synchronize AWG parameters to DSO
+        try:
+            self.dso_panel.fc_var.set(self.tx_sim_panel.rf_var.get())
+            self.dso_panel.sr_var.set(self.tx_sim_panel.symbol_rate_var.get())
+            self.dso_panel.demod_mod_var.set(self.tx_sim_panel.modulation_var.get())
+            
+            # Sync Channel automatically
+            awg_ch = self.tx_sim_panel.ch_var.get().strip()
+            if awg_ch:
+                first_ch = awg_ch.split(',')[0].strip()
+                if first_ch.isdigit():
+                    self.dso_panel.ch_var.set(f"C{first_ch}")
+
+            # Auto-apply DSO config to hardware
+            self.dso_panel._on_test_connection()
+            
+            # Auto-measure if connected, or at least log sync success
+            self.dso_panel._log("[App] AWG parameters synced to DSO panel automatically.")
+        except Exception as e:
+            self.dso_panel._log(f"[App] Sync error: {e}")
 
 if __name__ == "__main__":
     main()
