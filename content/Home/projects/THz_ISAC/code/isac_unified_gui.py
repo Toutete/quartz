@@ -1194,7 +1194,8 @@ class IsacTxSimPanel:
                     if meta["f_if_demod"] > 0:
                         t_sim = np.arange(len(rx_signal_sim)) / fs_sim
                         rx_bb_sync = rx_signal_sim * np.exp(-1j * 2.0 * np.pi * meta["f_if_demod"] * t_sim) * 2.0
-                        rx_bb_sync = self._lowpass_complex_fft(rx_bb_sync, fs=fs_sim, cutoff_hz=1.2 * meta["B"])
+                        lpf_cutoff = min(1.2 * meta["B"], fs_sim * 0.45)
+                        rx_bb_sync = self._lowpass_complex_fft(rx_bb_sync, fs=fs_sim, cutoff_hz=lpf_cutoff)
                     else:
                         rx_bb_sync = np.asarray(rx_signal_sim, dtype=np.complex128)
 
@@ -2795,13 +2796,13 @@ class DsoPanel:
         grp2.columnconfigure(1, weight=1)
         grp2.columnconfigure(3, weight=1)
 
-        ttk.Label(grp2, text="Carrier Freq (GHz)").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Label(grp2, text="Carrier/IF Freq (GHz)").grid(row=0, column=0, sticky="w", pady=3)
         self.fc_var = tk.StringVar(value="10.0")
-        ttk.Entry(grp2, textvariable=self.fc_var, state="disabled", width=10).grid(row=0, column=1, sticky="w")
+        ttk.Entry(grp2, textvariable=self.fc_var, width=10).grid(row=0, column=1, sticky="w")
 
         ttk.Label(grp2, text="Symbol Rate (GHz)").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        self.sr_var = tk.StringVar(value="1.0")
-        ttk.Entry(grp2, textvariable=self.sr_var, state="disabled", width=10).grid(row=0, column=3, sticky="w")
+        self.sr_var = tk.StringVar(value="10.0")
+        ttk.Entry(grp2, textvariable=self.sr_var, width=10).grid(row=0, column=3, sticky="w")
 
         ttk.Label(grp2, text="Modulation").grid(row=1, column=0, sticky="w", pady=3)
         self.demod_mod_var = tk.StringVar(value="16QAM")
@@ -2811,7 +2812,7 @@ class DsoPanel:
 
         ttk.Label(grp2, text="RRC Roll-off β").grid(row=1, column=2, sticky="w", padx=(10, 0))
         self.demod_beta_var = tk.StringVar(value="0.25")
-        ttk.Entry(grp2, textvariable=self.demod_beta_var, state="disabled", width=10).grid(row=1, column=3, sticky="w")
+        ttk.Entry(grp2, textvariable=self.demod_beta_var, width=10).grid(row=1, column=3, sticky="w")
 
         ttk.Label(grp2, text="RRC Span (sym)").grid(row=2, column=0, sticky="w", pady=3)
         self.demod_span_var = tk.StringVar(value="8")
@@ -3718,25 +3719,11 @@ class UnifiedApp:
 
     def _on_reference_npz_ready(self, file_path: str) -> None:
         self.dso_panel._log(f"[App] Internal TX Reference Updated: {file_path}")
-        
-        # Auto-synchronize AWG parameters to DSO
+        # Sync only symbol rate and modulation; fc_var stays as-is (user sets IF/carrier freq manually)
         try:
-            self.dso_panel.fc_var.set(self.tx_sim_panel.rf_var.get())
             self.dso_panel.sr_var.set(self.tx_sim_panel.symbol_rate_var.get())
             self.dso_panel.demod_mod_var.set(self.tx_sim_panel.modulation_var.get())
-            
-            # Sync Channel automatically
-            awg_ch = self.tx_sim_panel.ch_var.get().strip()
-            if awg_ch:
-                first_ch = awg_ch.split(',')[0].strip()
-                if first_ch.isdigit():
-                    self.dso_panel.ch_var.set(f"C{first_ch}")
-
-            # Auto-apply DSO config to hardware
-            self.dso_panel._on_test_connection()
-            
-            # Auto-measure if connected, or at least log sync success
-            self.dso_panel._log("[App] AWG parameters synced to DSO panel automatically.")
+            self.dso_panel._log("[App] Symbol rate & modulation synced from AWG panel.")
         except Exception as e:
             self.dso_panel._log(f"[App] Sync error: {e}")
 

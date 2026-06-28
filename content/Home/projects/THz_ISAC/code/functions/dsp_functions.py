@@ -150,20 +150,24 @@ def lfm_qam_rx_dsp_chain(rx_signal, fs, baud_rate, if_freq, chirp_signal=None, t
     
     # 1. Band-pass filtering
     bw_hz = baud_rate * (1 + rrc_alpha)
+    nyq = fs / 2.0
     if rx_mode == "Mixer":
-        # Passband filter
-        f_low = max(0.1e9, if_freq - bw_hz/2)
-        f_high = min(fs/2 - 0.1e9, if_freq + bw_hz/2)
-        taps = firwin(101, [f_low, f_high], fs=fs, pass_zero=False)
-        sig = lfilter(taps, 1.0, sig)
-        
+        # Passband filter — clamp to valid firwin range
+        f_low = float(np.clip(if_freq - bw_hz / 2, 1e6, nyq - 1e6))
+        f_high = float(np.clip(if_freq + bw_hz / 2, f_low + 1e6, nyq - 1e6))
+        if f_low < f_high:
+            taps = firwin(101, [f_low, f_high], fs=fs, pass_zero=False)
+            sig = lfilter(taps, 1.0, sig)
+
         # 2. Downconversion
         rx_bb = sig * np.exp(-1j * 2.0 * np.pi * if_freq * t)
-        taps_lpf = firwin(101, bw_hz/2, fs=fs)
+        lpf_cut = float(np.clip(bw_hz / 2, 1e6, nyq - 1e6))
+        taps_lpf = firwin(101, lpf_cut, fs=fs)
         rx_bb = lfilter(taps_lpf, 1.0, rx_bb)
     else:
         # ZBD mode (Direct detection, so it's already baseband roughly, just LPF)
-        taps_lpf = firwin(101, bw_hz/2, fs=fs)
+        lpf_cut = float(np.clip(bw_hz / 2, 1e6, nyq - 1e6))
+        taps_lpf = firwin(101, lpf_cut, fs=fs)
         rx_bb = lfilter(taps_lpf, 1.0, sig)
         rx_bb = rx_bb + 0j
         
