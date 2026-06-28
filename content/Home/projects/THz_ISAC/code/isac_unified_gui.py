@@ -304,6 +304,9 @@ class IsacTxSimPanel:
             qam_rrc_beta = 0.25
             qam_rrc_span = 8
             qam_rrc_taps = np.array([1.0], dtype=np.float64)
+            n_overhead_chirps = 0
+            lfm_zc_preamble = np.zeros(0, dtype=np.complex128)
+            lfm_pilot_chirp = np.zeros(0, dtype=np.complex128)
 
             if waveform_type == "QAM":
                 qam_preamble_len = min(64, max(16, n_sym_per_chirp // 8))
@@ -335,40 +338,48 @@ class IsacTxSimPanel:
                 tx_sym_matrix = np.ones((n_chirps, n_sym_per_chirp), dtype=np.complex128)
                 qam_symbols = tx_sym_matrix.reshape(-1)
                 tx_bb_matrix = np.repeat(tx_sym_matrix, n_per_sym, axis=1) * base_chirp[np.newaxis, :]
-            else:
+            else:  # LFM-QAM: frame-level preamble (ZC chirp + Pilot chirp + Data chirps)
                 base_chirp = lfm_chirp
-                
-                zc_len = 63
-                zc_seq = generate_zadoff_chu(zc_len, u=25)
+                n_overhead = 2  # chirp[0]=ZC preamble, chirp[1]=QPSK pilot
 
-                # Pilot length must leave at least 1 data symbol per chirp
-                pilot_len = min(128, max(16, n_sym_per_chirp - zc_len - 1))
-                pn_bits = _prbs_bits_lfsr(9, pilot_len)
-                pilot_syms = (2.0 * pn_bits.astype(np.float64) - 1.0).astype(np.complex128)
-                pilot_syms *= np.exp(1j * np.pi / 4.0)
-                
-                header = np.concatenate([zc_seq, pilot_syms])
-                header_len = len(header)
-                
-                data_len = n_sym_per_chirp - header_len
-                if data_len <= 0:
-                    raise ValueError(f"Symbols per Chirp ({n_sym_per_chirp}) must be > {header_len} for ZC+Pilot header")
-                
-                data_needed = n_chirps * data_len
-                if len(qam_all) < data_needed:
-                    rep = int(np.ceil(data_needed / max(len(qam_all), 1)))
-                    qam_all = np.tile(qam_all, rep)
-                qam_data = qam_all[:data_needed].reshape(n_chirps, data_len)
-                
-                tx_sym_matrix = np.concatenate([np.tile(header, (n_chirps, 1)), qam_data], axis=1)
+                # ZC preamble: largest prime ≤ n_sym_per_chirp, zero-padded to full chirp length
+                zc_len = next(
+                    (p for p in range(n_sym_per_chirp, 1, -1)
+                     if all(p % d != 0 for d in range(2, int(p ** 0.5) + 1))),
+                    n_sym_per_chirp,
+                )
+                zc_raw = generate_zadoff_chu(zc_len, u=1)
+                zc_preamble = np.zeros(n_sym_per_chirp, dtype=np.complex128)
+                zc_preamble[:zc_len] = zc_raw
+                rms_zc = float(np.sqrt(np.mean(np.abs(zc_preamble) ** 2)))
+                if rms_zc > 1e-15:
+                    zc_preamble /= rms_zc
+
+                # Pilot chirp: known QPSK for LS channel estimation
+                pilot_bits = _prbs_bits_lfsr(9, n_sym_per_chirp * 2)
+                pilot_chirp_syms = _bits_to_qam_symbols(
+                    pilot_bits[: n_sym_per_chirp * 2], modulation="QPSK"
+                )[:n_sym_per_chirp]
+
+                # Data chirps: full n_sym_per_chirp of payload QAM
+                n_data_chirps = max(2, n_chirps - n_overhead)
+                n_chirps = n_data_chirps + n_overhead
+                data_count = n_data_chirps * n_sym_per_chirp
+                if len(qam_all) < data_count:
+                    qam_all = np.tile(qam_all, int(np.ceil(data_count / max(len(qam_all), 1))))
+                qam_data = qam_all[:data_count].reshape(n_data_chirps, n_sym_per_chirp)
+
+                tx_sym_matrix = np.concatenate([
+                    zc_preamble[np.newaxis, :],
+                    pilot_chirp_syms[np.newaxis, :],
+                    qam_data,
+                ], axis=0)
                 qam_symbols = tx_sym_matrix.reshape(-1)
-                
-                qam_rrc_beta = 0.25
-                qam_rrc_span = 8
-                qam_rrc_taps = self._rrc_taps(n_per_sym, beta=qam_rrc_beta, span=qam_rrc_span)
-                
-                # LFM-QAM bypasses RRC (uses rectangular pulses) as requested
                 tx_bb_matrix = np.repeat(tx_sym_matrix, n_per_sym, axis=1) * base_chirp[np.newaxis, :]
+
+                n_overhead_chirps = n_overhead
+                lfm_zc_preamble = zc_preamble.copy()
+                lfm_pilot_chirp = pilot_chirp_syms.copy()
 
             tx_baseband = tx_bb_matrix.reshape(-1)
 
@@ -404,6 +415,9 @@ class IsacTxSimPanel:
                 "sps": n_per_sym,
                 "n_chirps": n_chirps,
                 "n_sym_per_chirp": n_sym_per_chirp,
+                "n_overhead_chirps": n_overhead_chirps,
+                "zc_preamble_syms": lfm_zc_preamble,
+                "pilot_chirp_syms": lfm_pilot_chirp,
             }
         
             # Save implicit reference for live processing if needed
@@ -1394,27 +1408,60 @@ class IsacTxSimPanel:
                             else:
                                 qam_ref = tx_sym_matrix.reshape(-1)
                                 qam_est = qam_est_mat.reshape(-1)
-                        else:
-                            dechirped_mat = rx_sync_mat * np.conj(np.asarray(meta["base_chirp"], dtype=np.complex128))[np.newaxis, :]
+                        else:  # LFM-QAM with frame-level preamble
+                            n_ovhd = min(int(meta.get("n_overhead_chirps", 0)), max(0, n_chirps - 1))
+                            base_ch = np.asarray(meta["base_chirp"], dtype=np.complex128)
+                            dechirped_mat = rx_sync_mat * np.conj(base_ch)[np.newaxis, :]
                             timing_gain_used = float("nan")
-                            # Fractional delay leaves a residual symbol phase offset. Search best sampling phase.
                             best_nmse = np.inf
-                            qam_est_mat = np.mean(dechirped_mat.reshape(n_chirps, n_sym_per_chirp, nps), axis=2)
-                            for phase in range(max(1, nps)):
-                                cand = dechirped_mat[:, phase::nps]
-                                if cand.shape[1] < n_sym_per_chirp:
-                                    continue
-                                cand = cand[:, :n_sym_per_chirp]
-                                den_c = np.sum(np.abs(tx_sym_matrix) ** 2) + 1e-15
-                                h_c = np.sum(cand * np.conj(tx_sym_matrix)) / den_c
-                                cand_eq = cand / (h_c + 1e-15)
-                                nmse = np.mean(np.abs(cand_eq - tx_sym_matrix) ** 2) / (np.mean(np.abs(tx_sym_matrix) ** 2) + 1e-15)
-                                if nmse < best_nmse:
-                                    best_nmse = float(nmse)
-                                    qam_est_mat = cand
+                            best_phase = 0
 
-                            qam_est = qam_est_mat.reshape(-1)
-                            qam_ref = tx_sym_matrix.reshape(-1)
+                            if n_ovhd >= 2 and n_chirps > n_ovhd:
+                                # Phase search + LS channel estimate using pilot chirp (row 1)
+                                pilot_ref = tx_sym_matrix[1]
+                                pilot_raw = dechirped_mat[1]
+                                for phase in range(max(1, nps)):
+                                    cand_p = pilot_raw[phase::nps][:n_sym_per_chirp]
+                                    if len(cand_p) < n_sym_per_chirp:
+                                        continue
+                                    den_p = np.sum(np.abs(cand_p) ** 2) + 1e-15
+                                    h_p = np.sum(pilot_ref * np.conj(cand_p)) / den_p
+                                    nmse_p = np.mean(np.abs(h_p * cand_p - pilot_ref) ** 2) / (np.mean(np.abs(pilot_ref) ** 2) + 1e-15)
+                                    if nmse_p < best_nmse:
+                                        best_nmse = float(nmse_p)
+                                        best_phase = phase
+
+                                pilot_rx_syms = dechirped_mat[1, best_phase::nps][:n_sym_per_chirp]
+                                den_h = np.sum(np.abs(pilot_rx_syms) ** 2) + 1e-15
+                                h_est = np.sum(tx_sym_matrix[1] * np.conj(pilot_rx_syms)) / den_h
+
+                                data_raw = dechirped_mat[n_ovhd:]
+                                qam_est_mat = data_raw[:, best_phase::nps]
+                                if qam_est_mat.shape[1] >= n_sym_per_chirp:
+                                    qam_est_mat = qam_est_mat[:, :n_sym_per_chirp]
+                                else:
+                                    pad_w = n_sym_per_chirp - qam_est_mat.shape[1]
+                                    qam_est_mat = np.pad(qam_est_mat, ((0, 0), (0, pad_w)))
+                                qam_est_mat = qam_est_mat * h_est
+                                qam_est = qam_est_mat.reshape(-1)
+                                qam_ref = tx_sym_matrix[n_ovhd:].reshape(-1)
+                            else:
+                                # Fallback: no preamble structure, process all chirps
+                                qam_est_mat = np.mean(dechirped_mat.reshape(n_chirps, n_sym_per_chirp, nps), axis=2)
+                                for phase in range(max(1, nps)):
+                                    cand = dechirped_mat[:, phase::nps]
+                                    if cand.shape[1] < n_sym_per_chirp:
+                                        continue
+                                    cand = cand[:, :n_sym_per_chirp]
+                                    den_c = np.sum(np.abs(tx_sym_matrix) ** 2) + 1e-15
+                                    h_c = np.sum(cand * np.conj(tx_sym_matrix)) / den_c
+                                    cand_eq = cand / (h_c + 1e-15)
+                                    nmse = np.mean(np.abs(cand_eq - tx_sym_matrix) ** 2) / (np.mean(np.abs(tx_sym_matrix) ** 2) + 1e-15)
+                                    if nmse < best_nmse:
+                                        best_nmse = float(nmse)
+                                        qam_est_mat = cand
+                                qam_est = qam_est_mat.reshape(-1)
+                                qam_ref = tx_sym_matrix.reshape(-1)
 
                         # Remove linear phase drift across symbols (beat/CFO residue after de-chirp).
                         if len(qam_est) > 4 and len(qam_ref) == len(qam_est):
