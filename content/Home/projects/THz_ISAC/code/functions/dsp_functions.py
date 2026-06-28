@@ -41,22 +41,73 @@ def prbs_bits_lfsr(n: int, length: int) -> np.ndarray:
     return bits
 
 def bits_to_qam_symbols(bits: np.ndarray, modulation: str) -> np.ndarray:
-    """Converts bits to QAM symbols (placeholder)."""
-    bps = bits_per_symbol(modulation)
-    num_symbols = len(bits) // bps
-    
-    # Generate random complex symbols for placeholder
-    rng = np.random.default_rng()
-    symbols = rng.standard_normal(num_symbols) + 1j * rng.standard_normal(num_symbols)
-    
-    # Normalize to have roughly unit power
-    return symbols / np.sqrt(np.mean(np.abs(symbols)**2))
+    """Gray-coded QAM symbol mapping for BPSK, QPSK, and 16QAM."""
+    mod = modulation.strip().upper()
+    bps = bits_per_symbol(mod)
+    n_sym = len(bits) // bps
+    if n_sym == 0:
+        return np.array([], dtype=np.complex128)
+    b = np.asarray(bits[:n_sym * bps], dtype=np.uint8).reshape(n_sym, bps)
+
+    if 'BPSK' in mod:
+        # 0→+1, 1→-1
+        return (1.0 - 2.0 * b[:, 0].astype(np.float64)).astype(np.complex128)
+
+    if 'QPSK' in mod:
+        # Gray: b0→I, b1→Q; 0→+1/√2, 1→-1/√2
+        I = (1.0 - 2.0 * b[:, 0].astype(np.float64)) / np.sqrt(2.0)
+        Q = (1.0 - 2.0 * b[:, 1].astype(np.float64)) / np.sqrt(2.0)
+        return (I + 1j * Q).astype(np.complex128)
+
+    if '16QAM' in mod:
+        # Gray map per axis: (MSB,LSB)=(0,0)→-3, (0,1)→-1, (1,1)→+1, (1,0)→+3
+        # Normalized by √10 so average power = 1
+        def _gray_to_level(msb, lsb):
+            sign = 2.0 * msb.astype(np.float64) - 1.0   # 0→-1, 1→+1
+            mag  = 3.0 - 2.0 * lsb.astype(np.float64)   # 0→3,  1→1
+            return sign * mag / np.sqrt(10.0)
+        I = _gray_to_level(b[:, 0], b[:, 1])
+        Q = _gray_to_level(b[:, 2], b[:, 3])
+        return (I + 1j * Q).astype(np.complex128)
+
+    # Fallback: BPSK
+    return (1.0 - 2.0 * b[:, 0].astype(np.float64)).astype(np.complex128)
 
 def hard_bits_from_symbols(symbols: np.ndarray, modulation: str) -> np.ndarray:
-    """Performs hard decision and converts symbols to bits (placeholder)."""
-    bps = bits_per_symbol(modulation)
-    num_bits = len(symbols) * bps
-    return np.random.randint(0, 2, num_bits, dtype=np.uint8)
+    """Hard decision demapping (minimum-distance) for BPSK, QPSK, and 16QAM."""
+    mod = modulation.strip().upper()
+    syms = np.asarray(symbols, dtype=np.complex128)
+
+    if 'BPSK' in mod:
+        return (np.real(syms) < 0.0).astype(np.uint8)
+
+    if 'QPSK' in mod:
+        b0 = (np.real(syms) < 0.0).astype(np.uint8)
+        b1 = (np.imag(syms) < 0.0).astype(np.uint8)
+        return np.stack([b0, b1], axis=1).reshape(-1)
+
+    if '16QAM' in mod:
+        # Undo normalization: decision thresholds at 0 and ±2/√10
+        norm = np.sqrt(10.0)
+        I = np.real(syms) * norm
+        Q = np.imag(syms) * norm
+
+        def _level_to_gray(v):
+            msb = (v > 0.0).astype(np.uint8)           # positive half → MSB=1
+            lsb = (np.abs(v) < 2.0).astype(np.uint8)   # inner levels → LSB=1
+            return msb, lsb
+
+        bi0, bi1 = _level_to_gray(I)
+        bq0, bq1 = _level_to_gray(Q)
+        n = len(syms)
+        bits = np.empty(4 * n, dtype=np.uint8)
+        bits[0::4] = bi0
+        bits[1::4] = bi1
+        bits[2::4] = bq0
+        bits[3::4] = bq1
+        return bits
+
+    return (np.real(syms) < 0.0).astype(np.uint8)
 
 def normalize_iq_for_awg(iq_signal: np.ndarray) -> np.ndarray:
     """Normalizes complex IQ signal for AWG (returns tuple of real arrays)."""
@@ -90,25 +141,43 @@ def apply_linear_rls_sic(rx_signal: np.ndarray, tx_ref: np.ndarray, num_taps: in
     return rx_signal, {"sic_db": 0.0, "lag_samples": 0}
 
 def align_symbols_for_ber(ref_symbols: np.ndarray, est_symbols: np.ndarray, max_lag: int) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Aligns estimated symbols to reference symbols by finding the best correlation lag.
-    """
-    if len(ref_symbols) == 0 or len(est_symbols) == 0:
-        return np.array([]), np.array([])
+    """Cross-correlation alignment: find lag in [-max_lag, +max_lag] maximising |<ref[lag:], est>|."""
+    ref = np.ravel(np.asarray(ref_symbols, dtype=np.complex128))
+    est = np.ravel(np.asarray(est_symbols, dtype=np.complex128))
+    if len(ref) == 0 or len(est) == 0:
+        return np.array([], dtype=np.complex128), np.array([], dtype=np.complex128)
 
-    # Ensure they are 1D arrays
-    ref = np.ravel(ref_symbols)
-    est = np.ravel(est_symbols)
+    if max_lag <= 0:
+        n = min(len(ref), len(est))
+        return ref[:n].copy(), est[:n].copy()
 
+    # lag > 0: ref is ahead by lag samples → align ref[lag:] with est[:]
+    # lag < 0: est is ahead by |lag| samples → align ref[:] with est[-lag:]
     best_lag = 0
-    max_corr = 0
-    # Simplified alignment: just trim to the same length for placeholder
-    min_len = min(len(ref), len(est))
-    ref_aligned = ref[:min_len]
-    est_aligned = est[:min_len]
-    
-    print(f"Warning: Using simplified placeholder 'align_symbols_for_ber'.")
-    return ref_aligned, est_aligned
+    best_c = -1.0
+    for lag in range(-max_lag, max_lag + 1):
+        if lag >= 0:
+            n_ov = min(len(ref) - lag, len(est))
+            if n_ov < 4:
+                continue
+            c = float(np.abs(np.dot(ref[lag:lag + n_ov], np.conj(est[:n_ov]))))
+        else:
+            n_ov = min(len(ref), len(est) + lag)   # lag<0 so +lag = -|lag|
+            if n_ov < 4:
+                continue
+            c = float(np.abs(np.dot(ref[:n_ov], np.conj(est[-lag:-lag + n_ov]))))
+        if c > best_c:
+            best_c = c
+            best_lag = lag
+
+    if best_lag >= 0:
+        r_out = ref[best_lag:]
+        n_out = min(len(r_out), len(est))
+        return r_out[:n_out].copy(), est[:n_out].copy()
+    else:
+        e_out = est[-best_lag:]
+        n_out = min(len(ref), len(e_out))
+        return ref[:n_out].copy(), e_out[:n_out].copy()
 
 
 def sc_fde_equalizer(rx_symbols, ref_symbols, num_taps=1, enable=True):

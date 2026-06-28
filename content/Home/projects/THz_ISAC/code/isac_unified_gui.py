@@ -3717,13 +3717,13 @@ class DsoPanel:
                 self._log(f"[Demod] {mod}  frame={frame_start:,}  ph={best_phase}  "
                           f"N={n_sym_out}  EVM={evm_db:.2f} dB ({evm_pct:.1f}%)  BER~{ber:.2e}")
                 self.parent.after(0, lambda: self._show_demod_result(
-                    qam_est_al, qam_ref_al, evm_db, evm_pct, ber, n_sym_out))
+                    qam_est_al, evm_db, evm_pct, ber, n_sym_out))
             except Exception as e:
                 self._log(f"[Demod] Error: {e}")
                 self.parent.after(0, lambda m=str(e): messagebox.showerror("Demodulate Error", m))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_demod_result(self, syms_eq: np.ndarray, syms_ideal: np.ndarray,
+    def _show_demod_result(self, syms_eq: np.ndarray,
                            evm_db: float, evm_pct: float, ber: float, n_sym: int) -> None:
         self.evm_var.set(f"EVM:         {evm_db:.2f} dB  ({evm_pct:.1f} %)")
         self.ber_var.set(f"BER:         {ber:.2e}")
@@ -3734,7 +3734,14 @@ class DsoPanel:
         n_show = min(len(syms_eq), 3000)
         self.ax_const.scatter(np.real(syms_eq[:n_show]), np.imag(syms_eq[:n_show]),
                               s=6, alpha=0.5, color="#2563eb", label="RX")
-        ideal_pts = np.unique(syms_ideal)
+        # Build constellation alphabet from modulation type (deterministic, exact grid)
+        _bps = _bits_per_symbol(self.demod_mod_var.get())
+        _n_pts = 1 << _bps
+        _all_bits = np.array(
+            [[int(b) for b in format(i, f'0{_bps}b')] for i in range(_n_pts)],
+            dtype=np.uint8,
+        )
+        ideal_pts = _bits_to_qam_symbols(_all_bits.reshape(-1), self.demod_mod_var.get())
         self.ax_const.scatter(np.real(ideal_pts), np.imag(ideal_pts),
                               s=60, marker="x", color="red", linewidths=1.5, label="Ideal")
         self.ax_const.set_title(f"Constellation   EVM={evm_db:.2f} dB   BER~{ber:.2e}")
