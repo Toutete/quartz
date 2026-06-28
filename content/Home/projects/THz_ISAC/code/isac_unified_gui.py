@@ -340,8 +340,9 @@ class IsacTxSimPanel:
                 
                 zc_len = 63
                 zc_seq = generate_zadoff_chu(zc_len, u=25)
-                
-                pilot_len = 200
+
+                # Pilot length must leave at least 1 data symbol per chirp
+                pilot_len = min(128, max(16, n_sym_per_chirp - zc_len - 1))
                 pn_bits = _prbs_bits_lfsr(9, pilot_len)
                 pilot_syms = (2.0 * pn_bits.astype(np.float64) - 1.0).astype(np.complex128)
                 pilot_syms *= np.exp(1j * np.pi / 4.0)
@@ -2715,18 +2716,31 @@ class DsoPanel:
         ttk.Label(grp1, text="Capture Margin (xT)").grid(row=4, column=2, sticky="w", padx=(10, 0))
         self.max_samples_var = tk.StringVar(value="3.0")
         ttk.Entry(grp1, textvariable=self.max_samples_var, width=10).grid(row=4, column=3, sticky="w")
+        ttk.Label(grp1, text="Data Length (kSa)").grid(row=4, column=4, sticky="w", padx=(10, 0))
+        self.data_len_ksa_var = tk.StringVar(value="")
+        ttk.Entry(grp1, textvariable=self.data_len_ksa_var, width=7).grid(row=4, column=5, sticky="w")
+        ttk.Label(grp1, text="(blank=auto)", style="Muted.TLabel").grid(row=4, column=5, sticky="e")
+
+        ttk.Label(grp1, text="FFT Offset (dBm)").grid(row=5, column=0, sticky="w", pady=3)
+        self.fft_offset_var = tk.StringVar(value="-40")
+        ttk.Entry(grp1, textvariable=self.fft_offset_var, width=10).grid(row=5, column=1, sticky="w")
+        ttk.Label(grp1, text="FFT Scale (dBm/div)").grid(row=5, column=2, sticky="w", padx=(10, 0))
+        self.fft_scale_div_var = tk.StringVar(value="10")
+        ttk.Entry(grp1, textvariable=self.fft_scale_div_var, width=10).grid(row=5, column=3, sticky="w")
 
         conn_btn_f = ttk.Frame(grp1)
-        conn_btn_f.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        conn_btn_f.grid(row=6, column=0, columnspan=6, sticky="w", pady=(8, 0))
         self.test_btn = ttk.Button(conn_btn_f, text="Test Connection",
                                    command=self._on_test_connection)
         self.test_btn.pack(side=tk.LEFT)
         ttk.Button(conn_btn_f, text="Acquire", style="Primary.TButton",
                    command=self._on_capture_live).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(conn_btn_f, text="Apply Settings",
+                   command=self._on_apply_dso_settings).pack(side=tk.LEFT, padx=(6, 0))
 
         self.conn_status_var = tk.StringVar(value="Not checked")
         tk.Label(grp1, textvariable=self.conn_status_var,
-                 fg="gray", bg="#f4f6f9").grid(row=6, column=0, columnspan=4, sticky="w", pady=(2, 0))
+                 fg="gray", bg="#f4f6f9").grid(row=7, column=0, columnspan=6, sticky="w", pady=(2, 0))
 
         # ══ Section 2: Signal Parameters (unified for all measurements) ══
         grp2 = ttk.LabelFrame(lf, text="Signal Parameters", padding=8)
@@ -2895,32 +2909,38 @@ class DsoPanel:
         return fs
 
     def _max_capture_samples(self) -> int | None:
+        # Manual data length override has highest priority
+        raw_ksa = self.data_len_ksa_var.get().strip()
+        if raw_ksa:
+            try:
+                return int(float(raw_ksa) * 1000)
+            except Exception:
+                pass
+
         raw = self.max_samples_var.get().strip()
         if not raw:
             return None
         val = float(raw)
         if val <= 0:
             raise ValueError("Margin/Samples must be positive.")
-        
+
         # If the user typed a huge number, treat it as literal Max Samples (legacy)
         if val >= 1000:
             return int(val)
-            
-        # Otherwise, compute required samples dynamically based on actual TX duration!
+
+        # Otherwise, compute required samples dynamically based on actual TX duration
         pl = self._load_tx_payload_for_isac()
         if pl and "awg_sig" in pl and "fs" in pl:
             sig_len = len(pl["awg_sig"])
             fs_awg = pl["fs"]
-            
+
             sr_val = self.dso_sr_var.get()
             fs_dso_target = float(sr_val) * 1e9 if sr_val != "Auto" else 256e9
-            
+
             duration = sig_len / fs_awg
             needed_samples = int(duration * fs_dso_target * val)
-            
-            # Add a small overhead or floor to ensure we don't capture too little
             return max(needed_samples, 100000)
-            
+
         # Fallback if no TX payload is generated yet
         return 10000000
 
@@ -3000,6 +3020,57 @@ class DsoPanel:
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+    def _on_apply_dso_settings(self) -> None:
+        """Apply Ch Scale, FFT Offset/Scale, Data Length to the DSO without full reset."""
+        def worker():
+            try:
+                self.parent.after(0, lambda: self.conn_status_var.set("Applying..."))
+                host = self.host_var.get().strip()
+                timeout_ms = int(_parse_float_input(self.timeout_var.get(), "Timeout"))
+                with create_dso_controller(
+                    dso_type=normalize_dso_type(self.dso_type_var.get()),
+                    host=host, timeout_ms=timeout_ms
+                ) as dso:
+                    ch_str = self.ch_var.get().strip().upper()
+                    ch_num = ch_str.replace("C", "").replace("HAN", "").replace("NEL", "")
+
+                    # Channel vertical scale
+                    if ch_num:
+                        try:
+                            scale_vdiv = float(self.ch_scale_mv_var.get()) / 1000.0
+                            dso.write(f":CHANnel{ch_num}:SCALe {scale_vdiv:.4f}")
+                        except Exception:
+                            pass
+
+                    # FFT vertical: offset and range (range = scale/div × 8 div)
+                    try:
+                        fft_offset = float(self.fft_offset_var.get())
+                        fft_range  = float(self.fft_scale_div_var.get()) * 8.0
+                        dso.write(f":FUNCtion1:VERTical:OFFSet {fft_offset}")
+                        dso.write(f":FUNCtion1:VERTical:RANGe {fft_range}")
+                    except Exception:
+                        pass
+
+                    # Data length / acquisition points
+                    raw_ksa = self.data_len_ksa_var.get().strip()
+                    if raw_ksa:
+                        try:
+                            n_pts = int(float(raw_ksa) * 1000)
+                            dso.write(f":ACQuire:POINts {n_pts}")
+                            sr_val = self.dso_sr_var.get()
+                            if sr_val != "Auto":
+                                fs_t = float(sr_val) * 1e9
+                                dso.write(f":TIMebase:RANGe {n_pts / fs_t}")
+                        except Exception:
+                            pass
+
+                self._log("[Apply] DSO settings applied.")
+                self.parent.after(0, lambda: self.conn_status_var.set("Settings Applied"))
+            except Exception as e:
+                self._log(f"[Apply] Failed: {e}")
+                self.parent.after(0, lambda m=str(e): messagebox.showerror("Apply Error", m))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_test_connection(self) -> None:
         def worker():
             try:
