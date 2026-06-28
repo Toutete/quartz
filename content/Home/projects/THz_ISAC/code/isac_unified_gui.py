@@ -3480,6 +3480,73 @@ class DsoPanel:
         self.runtime["tx_payload"] = payload
         return payload
 
+    @staticmethod
+    def _lpf_fft_bb(sig: np.ndarray, fs: float, cutoff_hz: float) -> np.ndarray:
+        x = np.asarray(sig, dtype=np.complex128)
+        if len(x) == 0:
+            return x
+        freq = np.fft.fftfreq(len(x), d=1.0 / fs)
+        X = np.fft.fft(x)
+        X[np.abs(freq) > cutoff_hz] = 0.0
+        return np.fft.ifft(X)
+
+    def _rx_to_baseband(self, sig: np.ndarray, fs_rx: float, pl: dict) -> tuple[np.ndarray, float]:
+        """Resample DSO capture to AWG rate, then down-convert to complex BB."""
+        fs_ref = float(pl.get("fs", fs_rx))
+        if_freq = float(pl.get("if_freq", 0.0))
+        sym_rate = float(pl.get("symbol_rate", pl.get("B", 1e9)))
+
+        if not np.isclose(fs_rx, fs_ref, rtol=1e-4):
+            if if_freq > 0:
+                rx = np.real(fft_resample_complex(sig.astype(np.complex128), fs_in=fs_rx, fs_out=fs_ref))
+            else:
+                rx = fft_resample_complex(sig.astype(np.complex128), fs_in=fs_rx, fs_out=fs_ref)
+        else:
+            rx = sig.copy()
+
+        t = np.arange(len(rx), dtype=np.float64) / fs_ref
+        if if_freq > 0:
+            rx_bb = rx * np.exp(-1j * 2.0 * np.pi * if_freq * t) * 2.0
+            cutoff = min(1.2 * sym_rate, fs_ref * 0.45)
+            rx_bb = self._lpf_fft_bb(rx_bb, fs_ref, cutoff)
+        else:
+            rx_bb = rx.astype(np.complex128)
+        return rx_bb, fs_ref
+
+    def _frame_sync_and_reshape(self, rx_bb: np.ndarray, fs_ref: float, pl: dict):
+        """Cross-correlate with ZC preamble chirp, reshape to (n_chirps × pts_per_chirp)."""
+        tx_bb_matrix = np.asarray(pl.get("tx_bb_matrix", []), dtype=np.complex128)
+        tx_sym_matrix = np.asarray(pl.get("tx_sym_matrix", []), dtype=np.complex128)
+        base_chirp = np.asarray(pl.get("base_chirp", []), dtype=np.complex128).reshape(-1)
+        n_chirps = int(pl.get("n_chirps", tx_bb_matrix.shape[0] if tx_bb_matrix.ndim == 2 else 1))
+        n_sym = int(pl.get("n_sym_per_chirp", 0))
+        nps = int(pl.get("sps", 1))
+        pts_per_chirp = n_sym * nps
+        if pts_per_chirp <= 0 or tx_bb_matrix.ndim != 2:
+            raise ValueError("TX reference is incomplete. Regenerate the TX signal.")
+
+        # Use ZC preamble chirp (row 0) as sync template
+        template = tx_bb_matrix[0]
+        search_len = min(len(rx_bb), len(template) * 6)
+        if len(rx_bb) > len(template):
+            corr = np.abs(fftconvolve(rx_bb[:search_len], np.conj(template[::-1]), mode="valid"))
+            frame_start = int(np.argmax(corr))
+        else:
+            frame_start = 0
+
+        valid_chirps = min(n_chirps, max(1, (len(rx_bb) - frame_start) // pts_per_chirp))
+        if valid_chirps < n_chirps:
+            tx_bb_matrix = tx_bb_matrix[:valid_chirps]
+            tx_sym_matrix = tx_sym_matrix[:valid_chirps]
+            n_chirps = valid_chirps
+
+        total_pts = n_chirps * pts_per_chirp
+        rx_frame = rx_bb[frame_start: frame_start + total_pts]
+        if len(rx_frame) < total_pts:
+            rx_frame = np.pad(rx_frame, (0, total_pts - len(rx_frame)))
+        rx_mat = rx_frame.reshape(n_chirps, pts_per_chirp)
+        return rx_mat, tx_bb_matrix, tx_sym_matrix, base_chirp, n_chirps, n_sym, nps, pts_per_chirp, frame_start
+
     def _on_isac_dechirp_range(self) -> None:
         if self._rx_sig is None:
             messagebox.showwarning("No data", "Acquire a signal first.")
@@ -3487,70 +3554,34 @@ class DsoPanel:
 
         def worker():
             try:
-                meta = self._load_tx_payload_for_isac()
-                if meta is None:
+                pl = self._load_tx_payload_for_isac()
+                if pl is None:
                     raise ValueError("No TX reference found. Generate or download the TX signal first.")
 
                 sig = np.asarray(self._rx_sig, dtype=np.float64)
-                fs_rx = float(self._rx_fs)
-                fs_ref = float(meta.get("fs", fs_rx))
-                if_freq = float(meta.get("if_freq", 0.0))
-                mode = str(meta.get("mode", "Real IF"))
-                tx_ref = np.asarray(meta.get("tx_signal"), dtype=np.complex128).reshape(-1)
-                tx_mat = np.asarray(meta.get("tx_bb_matrix", []), dtype=np.complex128)
-                base_chirp = np.asarray(meta.get("base_chirp", []), dtype=np.complex128).reshape(-1)
-                n_chirps = int(meta.get("n_chirps", tx_mat.shape[0] if tx_mat.ndim == 2 else 1))
-                n_sym = int(meta.get("n_sym_per_chirp", 0))
-                sps = int(meta.get("sps", 0))
-                pts_per_chirp = int(tx_mat.shape[1] if tx_mat.ndim == 2 and tx_mat.shape[1] > 0 else n_sym * sps)
-                if len(tx_ref) == 0 or pts_per_chirp <= 0:
-                    raise ValueError("TX reference is incomplete. Regenerate the TX signal.")
+                rx_bb, fs_ref = self._rx_to_baseband(sig, float(self._rx_fs), pl)
+                rx_mat, tx_bb_mat, _, base_chirp, n_chirps, n_sym, nps, pts_per_chirp, frame_start = \
+                    self._frame_sync_and_reshape(rx_bb, fs_ref, pl)
 
-                t_rx = np.arange(len(sig), dtype=np.float64) / fs_rx
-                if mode == "Real IF" and if_freq > 0:
-                    rx_bb = sig * np.exp(-1j * 2.0 * np.pi * if_freq * t_rx) * 2.0
-                else:
-                    rx_bb = sig.astype(np.complex128)
-                if not np.isclose(fs_rx, fs_ref):
-                    rx_bb = fft_resample_complex(rx_bb, fs_in=fs_rx, fs_out=fs_ref)
+                # Per-chirp matched filter → range profile
+                corr_acc = np.zeros(pts_per_chirp + pts_per_chirp - 1, dtype=np.float64)
+                for i in range(n_chirps):
+                    ci = np.abs(fftconvolve(rx_mat[i], np.conj(tx_bb_mat[i][::-1]), mode="full"))
+                    corr_acc += ci
+                corr_acc /= max(n_chirps, 1)
 
-                template = tx_ref[:min(len(tx_ref), len(rx_bb))]
-                if len(rx_bb) < len(template):
-                    raise ValueError("Capture is shorter than TX reference.")
-                corr = fftconvolve(rx_bb, np.conj(template[::-1]), mode="valid")
-                frame_start = int(np.argmax(np.abs(corr))) if len(corr) else 0
-
-                valid_chirps = min(n_chirps, max(1, (len(rx_bb) - frame_start) // pts_per_chirp))
-                total_pts = valid_chirps * pts_per_chirp
-                rx_frame = rx_bb[frame_start:frame_start + total_pts]
-                if len(rx_frame) < total_pts:
-                    rx_frame = np.pad(rx_frame, (0, total_pts - len(rx_frame)))
-                rx_mat = rx_frame.reshape(valid_chirps, pts_per_chirp)
-
-                if tx_mat.ndim == 2 and tx_mat.shape[1] == pts_per_chirp:
-                    tx_cmp = tx_mat[:valid_chirps]
-                else:
-                    tx_cmp = tx_ref[:total_pts].reshape(valid_chirps, pts_per_chirp)
-
-                corr_acc = None
-                lags = None
-                for i in range(valid_chirps):
-                    ci = np.abs(fftconvolve(rx_mat[i], np.conj(tx_cmp[i][::-1]), mode="full"))
-                    corr_acc = ci if corr_acc is None else corr_acc + ci
-                    lags = np.arange(-(len(tx_cmp[i]) - 1), len(rx_mat[i]), dtype=np.int64)
-                prof = corr_acc / max(valid_chirps, 1)
+                lags = np.arange(-(pts_per_chirp - 1), pts_per_chirp, dtype=np.int64)
                 valid = lags >= 0
                 rng = lags[valid].astype(np.float64) * 3e8 / (2.0 * fs_ref)
-                prof_db = 20.0 * np.log10(prof[valid] / (np.max(prof[valid]) + 1e-15) + 1e-15)
+                prof_v = corr_acc[valid]
+                prof_db = 20.0 * np.log10(prof_v / (np.max(prof_v) + 1e-15) + 1e-15)
 
-                if len(base_chirp) == pts_per_chirp:
-                    dechirped = (rx_mat * np.conj(base_chirp)[np.newaxis, :]).reshape(-1)
-                else:
-                    dechirped = rx_mat.reshape(-1)
+                # Dechirped signal (for time-domain view)
+                dechirped = (rx_mat * np.conj(base_chirp)[np.newaxis, :]).reshape(-1)
 
-                est_idx = int(np.argmax(prof[valid])) if np.any(valid) else 0
+                est_idx = int(np.argmax(prof_v))
                 est_range = float(rng[est_idx]) if len(rng) > est_idx else float("nan")
-                self._log(f"[ISAC] frame={frame_start:,}  chirps={valid_chirps}  est_range={est_range:.4g} m")
+                self._log(f"[ISAC] frame={frame_start:,}  chirps={n_chirps}  peak={est_range:.4g} m")
                 self.parent.after(0, lambda: self._show_isac_range_result(dechirped, fs_ref, rng, prof_db, est_range))
             except Exception as e:
                 self._log(f"[ISAC] Error: {e}")
@@ -3588,59 +3619,105 @@ class DsoPanel:
         if self._rx_sig is None:
             messagebox.showwarning("No data", "Acquire a signal first.")
             return
+
         def worker():
             try:
-                sig  = self._rx_sig.copy()
-                fs   = self._rx_fs
-                mod  = self.demod_mod_var.get().strip()
-                fc   = float(self.fc_var.get()) * 1e9
-                sr   = float(self.sr_var.get()) * 1e9
-                beta = float(self.demod_beta_var.get())
-                span = max(4, int(float(self.demod_span_var.get())))
-                bps  = self._bits_per_sym(mod)
-                M    = 2 ** bps
-
                 pl = self._load_tx_payload_for_isac()
-                tx_ref = None
-                if pl:
-                    tx_ref = pl.get("qam_symbols", pl.get("syms", None))
-                if tx_ref is None:
-                    self.parent.after(0, lambda: messagebox.showwarning("No TX Reference", "Please generate the TX signal first (Run AWG/Sim) before demodulating."))
+                if pl is None:
+                    self.parent.after(0, lambda: messagebox.showwarning(
+                        "No TX Reference", "Generate the TX signal first."))
                     return
-                chirp_sig = pl.get("base_chirp", None) if pl else None
-                
-                # Use 10-step DSP chain
-                syms_eq, syms_ideal, evm_db = lfm_qam_rx_dsp_chain(
-                    rx_signal=sig,
-                    fs=fs,
-                    baud_rate=sr,
-                    if_freq=fc,
-                    chirp_signal=chirp_sig,
-                    tx_ref_symbols=tx_ref,
-                    rrc_alpha=beta,
-                    rx_mode="Mixer",
-                    sc_fde_enable=self.sc_fde_enable_var.get(),
-                    sc_fde_taps=max(1, int(_parse_float_input(self.sc_fde_taps_var.get(), "SC-FDE Taps")))
-                )
-                
-                if syms_eq is None or syms_ideal is None:
-                    self._log("[Demod] Demodulation failed (no sync or metric too low).")
-                    return
-                
-                evm_rms = 10 ** (evm_db / 20.0)
-                evm_pct = evm_rms * 100.0
-                
-                # BER
-                n_sym = len(syms_eq)
-                uniq_re = np.unique(np.real(syms_ideal))
-                min_sep = float(np.min(np.diff(uniq_re)) if len(uniq_re) > 1 else 1.0)
-                n_err   = int(np.sum(np.abs(syms_eq - syms_ideal) > 0.5 * min_sep))
-                ber_est = n_err / max(n_sym * bps, 1)
 
-                self._log(f"[Demod] {mod}  fc={fc/1e9:.2f} GHz  sr={sr/1e9:.3f} GHz  "
-                          f"N={n_sym}  EVM={evm_db:.2f} dB ({evm_pct:.1f}%)  BER~{ber_est:.2e}")
+                sig = np.asarray(self._rx_sig, dtype=np.float64)
+                rx_bb, fs_ref = self._rx_to_baseband(sig, float(self._rx_fs), pl)
+
+                rx_mat, tx_bb_mat, tx_sym_mat, base_chirp, n_chirps, n_sym, nps, pts_per_chirp, frame_start = \
+                    self._frame_sync_and_reshape(rx_bb, fs_ref, pl)
+
+                # Dechirp every row
+                dechirped_mat = rx_mat * np.conj(base_chirp)[np.newaxis, :]
+
+                n_ovhd = min(int(pl.get("n_overhead_chirps", 0)), max(0, n_chirps - 1))
+                sc_fde_taps = max(1, int(_parse_float_input(self.sc_fde_taps_var.get(), "SC-FDE Taps")))
+                sc_fde_enable = bool(self.sc_fde_enable_var.get())
+                mod = str(pl.get("modulation", self.demod_mod_var.get())).strip()
+
+                best_phase = 0
+                if n_ovhd >= 2 and n_chirps > n_ovhd:
+                    # --- Pilot chirp (row 1): phase search + LS channel estimate ---
+                    pilot_ref = tx_sym_mat[1]
+                    pilot_raw = dechirped_mat[1]
+                    best_nmse = np.inf
+                    for phase in range(max(1, nps)):
+                        cand_p = pilot_raw[phase::nps][:n_sym]
+                        if len(cand_p) < n_sym:
+                            continue
+                        den_p = np.sum(np.abs(cand_p) ** 2) + 1e-15
+                        h_p = np.sum(pilot_ref * np.conj(cand_p)) / den_p
+                        nmse_p = float(np.mean(np.abs(h_p * cand_p - pilot_ref) ** 2) /
+                                       (np.mean(np.abs(pilot_ref) ** 2) + 1e-15))
+                        if nmse_p < best_nmse:
+                            best_nmse = nmse_p
+                            best_phase = phase
+
+                    pilot_rx = dechirped_mat[1, best_phase::nps][:n_sym]
+                    den_h = np.sum(np.abs(pilot_rx) ** 2) + 1e-15
+                    h_est = np.sum(tx_sym_mat[1] * np.conj(pilot_rx)) / den_h
+
+                    data_raw = dechirped_mat[n_ovhd:, best_phase::nps]
+                    if data_raw.shape[1] >= n_sym:
+                        data_raw = data_raw[:, :n_sym]
+                    else:
+                        data_raw = np.pad(data_raw, ((0, 0), (0, n_sym - data_raw.shape[1])))
+                    qam_est = (data_raw * h_est).reshape(-1)
+                    qam_ref = tx_sym_mat[n_ovhd:].reshape(-1)
+                else:
+                    # Fallback: phase search across all chirps
+                    best_nmse = np.inf
+                    qam_est_mat = np.mean(dechirped_mat.reshape(n_chirps, n_sym, nps), axis=2)
+                    for phase in range(max(1, nps)):
+                        cand = dechirped_mat[:, phase::nps]
+                        if cand.shape[1] < n_sym:
+                            continue
+                        cand = cand[:, :n_sym]
+                        den_c = np.sum(np.abs(tx_sym_mat) ** 2) + 1e-15
+                        h_c = np.sum(cand * np.conj(tx_sym_mat)) / den_c
+                        nmse = float(np.mean(np.abs((cand / (h_c + 1e-15)) - tx_sym_mat) ** 2) /
+                                     (np.mean(np.abs(tx_sym_mat) ** 2) + 1e-15))
+                        if nmse < best_nmse:
+                            best_nmse = nmse
+                            best_phase = phase
+                            qam_est_mat = cand
+                    qam_est = qam_est_mat.reshape(-1)
+                    qam_ref = tx_sym_mat.reshape(-1)
+
+                # Residual linear phase correction across all symbols
+                if len(qam_est) > 4 and len(qam_ref) == len(qam_est):
+                    ph = np.unwrap(np.angle(qam_est * np.conj(qam_ref) + 1e-15))
+                    k = np.arange(len(ph), dtype=np.float64)
+                    slope, intercept = np.polyfit(k, ph, deg=1)
+                    qam_est = qam_est * np.exp(-1j * (slope * k + intercept))
+
+                # SC-FDE equalization (taps=1 → flat scalar equalization)
+                qam_est_eq = sc_fde_equalizer(qam_est, qam_ref, num_taps=sc_fde_taps, enable=sc_fde_enable)
+
+                # Symbol alignment + metrics
+                qam_ref_al, qam_est_al = _align_symbols_for_ber(qam_ref, qam_est_eq, max_lag=16)
+                err = qam_est_al - qam_ref_al
+                evm_rms = float(np.sqrt(np.mean(np.abs(err) ** 2) /
+                                        (np.mean(np.abs(qam_ref_al) ** 2) + 1e-15)))
+                evm_db  = 20.0 * np.log10(evm_rms + 1e-15)
+                evm_pct = 100.0 * evm_rms
+
+                br = _hard_bits_from_symbols(qam_ref_al, mod)
+                be = _hard_bits_from_symbols(qam_est_al, mod)
+                ber = float(np.mean(br != be)) if len(br) == len(be) > 0 else float("nan")
+                n_sym_out = len(qam_ref_al)
+
+                self._log(f"[Demod] {mod}  frame={frame_start:,}  ph={best_phase}  "
+                          f"N={n_sym_out}  EVM={evm_db:.2f} dB ({evm_pct:.1f}%)  BER~{ber:.2e}")
                 self.parent.after(0, lambda: self._show_demod_result(
-                    syms_eq, syms_ideal, evm_db, evm_pct, ber_est, n_sym))
+                    qam_est_al, qam_ref_al, evm_db, evm_pct, ber, n_sym_out))
             except Exception as e:
                 self._log(f"[Demod] Error: {e}")
                 self.parent.after(0, lambda m=str(e): messagebox.showerror("Demodulate Error", m))
