@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 from scipy.signal import resample as _sp_resample
+from scipy.signal import resample_poly
 
 # ── Constants ────────────────────────────────────────────────────────────────
 KEYSIGHT_SCPI_PORT = 5025
@@ -405,8 +406,11 @@ def create_dso_controller(dso_type: str, host: str, timeout_ms: int):
 
 # ── Utility functions used by GUI ────────────────────────────────────────────
 def fft_resample_complex(sig: np.ndarray, fs_in: float, fs_out: float) -> np.ndarray:
-    num_out = int(round(len(sig) * fs_out / fs_in))
-    return _sp_resample(sig, num_out)
+    from fractions import Fraction
+    frac = Fraction(fs_out / fs_in).limit_denominator(100000)
+    up = frac.numerator
+    down = frac.denominator
+    return resample_poly(sig, up, down)
 
 
 def normalize_dso_type(dso_type_str: str) -> str:

@@ -137,13 +137,14 @@ def download_to_awg(awg_sig: np.ndarray, channels: list[int], awg_addr: str, fs:
     vpp      : peak-to-peak output amplitude in Volts
     """
     host, port = _parse_visa_socket_addr(awg_addr)
-    ch = channels[0] if channels else 1
+    if not channels:
+        channels = [1]
 
     sig_i16 = _normalize_to_int16(awg_sig)
     n_samples = len(sig_i16)
     raw_bytes = sig_i16.tobytes()
 
-    print(f"Downloading {n_samples} samples to AWG Ch{ch} @ {fs/1e9:.3f} GSa/s, Vpp={vpp:.4f} V ...")
+    print(f"Downloading {n_samples} samples to AWG Channels {channels} @ {fs/1e9:.3f} GSa/s, Vpp={vpp:.4f} V ...")
     with AwgSocketController(host, port, timeout_s=120.0) as awg:
         idn = awg.query('*IDN?')
         print(f"  AWG: {idn}")
@@ -151,25 +152,28 @@ def download_to_awg(awg_sig: np.ndarray, channels: list[int], awg_addr: str, fs:
         awg.write('*RST', delay_s=1.0)
         awg.write(f':FREQ:RAST {fs:.6e}', delay_s=0.1)
 
-        # Disable output before upload
-        awg.write(f':OUTP{ch} OFF', delay_s=0.05)
+        for ch in channels:
+            # Disable output before upload
+            awg.write(f':OUTP{ch} OFF', delay_s=0.05)
 
-        # Delete all segments and define new one
-        awg.write(f':TRAC{ch}:DEL:ALL', delay_s=0.1)
-        awg.write(f':TRAC{ch}:DEF 1,{n_samples}', delay_s=0.1)
+            # Delete all segments and define new one
+            awg.write(f':TRAC{ch}:DEL:ALL', delay_s=0.1)
+            awg.write(f':TRAC{ch}:DEF 1,{n_samples}', delay_s=0.1)
 
-        # Upload waveform data
-        awg.write_binary_block(f':TRAC{ch}:DATA 1,0', raw_bytes, delay_s=0.2)
-        awg.wait_opc(timeout_s=60.0)
+            # Upload waveform data
+            awg.write_binary_block(f':TRAC{ch}:DATA 1,0', raw_bytes, delay_s=0.2)
+            awg.wait_opc(timeout_s=60.0)
 
-        # Select uploaded segment on channel
-        awg.write(f':TRAC{ch}:SEL 1', delay_s=0.05)
+            # Select uploaded segment on channel
+            awg.write(f':TRAC{ch}:SEL 1', delay_s=0.05)
 
-        # Set amplitude
-        awg.write(f':VOLT{ch} {vpp:.4f}', delay_s=0.05)
+            # Set amplitude
+            awg.write(f':VOLT{ch} {vpp:.4f}', delay_s=0.05)
 
-        # Enable output and arm
-        awg.write(f':OUTP{ch} ON', delay_s=0.05)
+            # Enable output
+            awg.write(f':OUTP{ch} ON', delay_s=0.05)
+            
+        # Arm all
         awg.write(':INIT:IMM', delay_s=0.1)
 
     print("Download and run complete.")
@@ -181,11 +185,29 @@ def run_awg(awg_addr: str, channels: list[int], vpp: float) -> None:
     (without re-downloading waveform data).
     """
     host, port = _parse_visa_socket_addr(awg_addr)
-    ch = channels[0] if channels else 1
-
-    print(f"AWG Run: Ch{ch}, Vpp={vpp:.4f} V ...")
-    with AwgSocketController(host, port, timeout_s=15.0) as awg:
-        awg.write(f':VOLT{ch} {vpp:.4f}', delay_s=0.05)
-        awg.write(f':OUTP{ch} ON', delay_s=0.05)
+    if not channels:
+        channels = [1]
+        
+    print(f"Running AWG Channels {channels} with Vpp={vpp:.4f} V ...")
+    with AwgSocketController(host, port, timeout_s=10.0) as awg:
+        for ch in channels:
+            awg.write(f':VOLT{ch} {vpp:.4f}', delay_s=0.05)
+            awg.write(f':OUTP{ch} ON', delay_s=0.05)
         awg.write(':INIT:IMM', delay_s=0.1)
     print("AWG output running.")
+
+
+def stop_awg(awg_addr: str, channels: list[int]) -> None:
+    """
+    Disable AWG output.
+    """
+    host, port = _parse_visa_socket_addr(awg_addr)
+    if not channels:
+        channels = [1]
+
+    print(f"Stopping AWG Channels {channels} ...")
+    with AwgSocketController(host, port, timeout_s=15.0) as awg:
+        for ch in channels:
+            awg.write(f':OUTP{ch} OFF', delay_s=0.05)
+    print("AWG output stopped.")
+

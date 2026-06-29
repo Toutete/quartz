@@ -160,12 +160,14 @@ def align_symbols_for_ber(ref_symbols: np.ndarray, est_symbols: np.ndarray, max_
             n_ov = min(len(ref) - lag, len(est))
             if n_ov < 4:
                 continue
-            c = float(np.abs(np.dot(ref[lag:lag + n_ov], np.conj(est[:n_ov]))))
+            n = min(n_ov, 128)
+            c = float(np.abs(np.dot(ref[lag:lag + n], np.conj(est[:n]))))
         else:
             n_ov = min(len(ref), len(est) + lag)   # lag<0 so +lag = -|lag|
             if n_ov < 4:
                 continue
-            c = float(np.abs(np.dot(ref[:n_ov], np.conj(est[-lag:-lag + n_ov]))))
+            n = min(n_ov, 128)
+            c = float(np.abs(np.dot(ref[:n], np.conj(est[-lag:-lag + n]))))
         if c > best_c:
             best_c = c
             best_lag = lag
@@ -180,14 +182,15 @@ def align_symbols_for_ber(ref_symbols: np.ndarray, est_symbols: np.ndarray, max_
         return ref[:n_out].copy(), e_out[:n_out].copy()
 
 
-def sc_fde_equalizer(rx_symbols, ref_symbols, num_taps=1, enable=True):
+def sc_fde_equalizer(rx_symbols, ref_symbols, num_taps=21, enable=True):
     import numpy as np
     from scipy.signal import lfilter
+
     if not enable or len(rx_symbols) == 0 or len(ref_symbols) == 0:
         return rx_symbols
         
     n_train = min(len(rx_symbols), len(ref_symbols))
-    if n_train < 10:
+    if n_train < num_taps * 2:
         return rx_symbols
         
     rx_train = rx_symbols[:n_train]
@@ -196,17 +199,40 @@ def sc_fde_equalizer(rx_symbols, ref_symbols, num_taps=1, enable=True):
     if num_taps <= 1:
         a = np.vdot(rx_train, tx_train) / (np.vdot(rx_train, rx_train) + 1e-15)
         return a * rx_symbols
-    else:
-        # Time-domain LS FIR
-        X = np.zeros((n_train - num_taps + 1, num_taps), dtype=np.complex128)
-        for i in range(num_taps):
-            X[:, i] = rx_train[num_taps - 1 - i : n_train - i]
-        d = tx_train[num_taps - 1:]
+
+    # Optimal MMSE Linear Equalizer via Time-Domain Least Squares
+    # To make the filter non-causal (handling precursors), we offset the target by delay
+    delay = (num_taps - 1) // 2
+    
+    # We want to estimate tx[t - delay] using rx[t], rx[t-1], ..., rx[t - num_taps + 1]
+    # valid t must be >= num_taps - 1. 
+    t_start = num_taps - 1
+    t_end = n_train
+    num_eq_samples = t_end - t_start
+    
+    if num_eq_samples < num_taps:
+        return rx_symbols
         
-        w, _, _, _ = np.linalg.lstsq(X, d, rcond=None)
-        eq_sig = lfilter(w, [1.0], rx_symbols)
-        delay = (num_taps - 1) // 2
-        return np.roll(eq_sig, -delay)
+    X = np.zeros((num_eq_samples, num_taps), dtype=np.complex128)
+    for i in range(num_taps):
+        start_idx = t_start - i
+        X[:, i] = rx_train[start_idx : start_idx + num_eq_samples]
+        
+    target_start = t_start - delay
+    target_end = target_start + num_eq_samples
+    d = tx_train[target_start : target_end]
+    
+    w, _, _, _ = np.linalg.lstsq(X, d, rcond=None)
+    
+    # Pad signal to avoid edge transients
+    pad = num_taps
+    rx_pad = np.pad(rx_symbols, (pad, pad), mode='reflect')
+    
+    from scipy.signal import fftconvolve
+    eq_sig_pad = fftconvolve(rx_pad, w, mode='same')
+    
+    # Return the valid portion. mode='same' naturally aligns the center tap.
+    return eq_sig_pad[pad : -pad]
 
 def lfm_qam_rx_dsp_chain(rx_signal, fs, baud_rate, if_freq, chirp_signal=None, tx_ref_symbols=None, rrc_alpha=0.25, rx_mode="Mixer", sc_fde_enable=True, sc_fde_taps=1):
     import numpy as np
