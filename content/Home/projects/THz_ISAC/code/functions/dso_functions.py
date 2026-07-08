@@ -14,13 +14,13 @@ import numpy as np
 from scipy.signal import resample as _sp_resample
 from scipy.signal import resample_poly
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# Constants
 KEYSIGHT_SCPI_PORT = 5025
 LECROY_VICP_PORT   = 1861
 _RECV_BUF          = 131072        # 128 kB per recv()
 
 
-# ── Low-level helpers ────────────────────────────────────────────────────────
+# Low-level helpers
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -59,12 +59,12 @@ def _extract_wavedesc(raw: bytes) -> bytes:
 def _norm_keysight_ch(ch: str) -> str:
     ch = ch.upper().strip()
     if ch.startswith("C") and ch[1:].isdigit():
-        return f"CHAN{ch[1:]}"
+        return f"CHANnel{ch[1:]}"
     if ch.isdigit():
-        return f"CHAN{ch}"
+        return f"CHANnel{ch}"
     if ch.startswith("CHAN"):
         return ch
-    return "CHAN1"
+    return "CHANnel1"
 
 
 def _norm_lecroy_ch(ch: str) -> str:
@@ -78,7 +78,7 @@ def _norm_lecroy_ch(ch: str) -> str:
     return "C1"
 
 
-# ── Keysight UXR / MSOX (SCPI socket, port 5025) ────────────────────────────
+# Keysight UXR / MSOX (SCPI socket, port 5025)
 class KeysightUxrDso:
     """Keysight UXR-series oscilloscope via raw SCPI on port 5025."""
 
@@ -87,7 +87,7 @@ class KeysightUxrDso:
         self.timeout_s = timeout_ms / 1000.0
         self._sock: socket.socket | None = None
 
-    # context manager ─────────────────────────────────────────────────────────
+    # Context manager
     def __enter__(self) -> "KeysightUxrDso":
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(self.timeout_s)
@@ -109,7 +109,7 @@ class KeysightUxrDso:
                 pass
             self._sock = None
 
-    # SCPI primitives ─────────────────────────────────────────────────────────
+    # SCPI primitives
     def write(self, cmd: str, delay: float = 0.05) -> None:
         assert self._sock
         self._sock.sendall((cmd + "\n").encode("ascii"))
@@ -167,18 +167,15 @@ class KeysightUxrDso:
         self._sock.settimeout(self.timeout_s)
         return bytes(buf)
 
-    # capture ─────────────────────────────────────────────────────────────────
+    # Capture
     def capture(
         self, channel: str = "CHAN1", fallback_fs: float = 256e9, max_samples: int | None = None
     ) -> tuple[np.ndarray, np.ndarray, float]:
         ch = _norm_keysight_ch(channel)
 
         self.write(f":WAVeform:SOURce {ch}")
-        if max_samples:
-            self.write(f":WAVeform:POINts {int(max_samples)}")
         self.write(":WAVeform:FORmat WORD")
         self.write(":WAVeform:BYTeorder LSBFirst")
-        self.write(":WAVeform:UNSigned OFF")
 
         pre = self.query(":WAVeform:PREamble?", timeout_s=10.0)
         parts = pre.split(",")
@@ -207,19 +204,19 @@ class KeysightUxrDso:
         return t, voltage, fs
 
 
-# ── LeCroy / Teledyne-LeCroy (VICP, port 1861) ──────────────────────────────
+# LeCroy / Teledyne-LeCroy (VICP, port 1861)
 class LecroyVicpDso:
     """
     LeCroy MAUI oscilloscope via VICP (Virtual Instrument Control Protocol).
     VICP wraps IEEE 488.2 SCPI over TCP on port 1861.
 
-    VICP frame layout (controller→instrument):
+    VICP frame layout (controller -> instrument):
       byte 0-1: 0x01 0x01  (version)
       byte 2  : operation  (0x09 = DATA + EOI)
       byte 3  : sequence number (1-255, wraps)
       bytes 4-7: payload length, big-endian uint32
 
-    Instrument→controller response has the same 8-byte header, followed by
+    Instrument -> controller response has the same 8-byte header, followed by
     the response payload (ASCII or IEEE 488.2 binary block).
     """
 
@@ -229,7 +226,7 @@ class LecroyVicpDso:
         self._sock: socket.socket | None = None
         self._seq: int = 1
 
-    # context manager ─────────────────────────────────────────────────────────
+    # Context manager
     def __enter__(self) -> "LecroyVicpDso":
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.settimeout(self.timeout_s)
@@ -257,7 +254,7 @@ class LecroyVicpDso:
                 pass
             self._sock = None
 
-    # VICP primitives ─────────────────────────────────────────────────────────
+    # VICP primitives
     def _next_seq(self) -> int:
         s = self._seq
         self._seq = (self._seq % 255) + 1
@@ -282,7 +279,7 @@ class LecroyVicpDso:
         self._sock.settimeout(self.timeout_s)
         return data
 
-    # public SCPI interface ───────────────────────────────────────────────────
+    # Public SCPI interface
     def write(self, cmd: str, delay: float = 0.05) -> None:
         self._vicp_write(cmd)
         if delay > 0:
@@ -303,14 +300,14 @@ class LecroyVicpDso:
         except Exception:
             return b""
 
-    # capture ─────────────────────────────────────────────────────────────────
+    # Capture
     def capture(
         self, channel: str = "C1", fallback_fs: float = 40e9
     ) -> tuple[np.ndarray, np.ndarray, float]:
         ch  = _norm_lecroy_ch(channel)
         fs  = fallback_fs
 
-        # ── Sample rate ───────────────────────────────────────────────────────
+        # Sample rate
         sara = self.query("SARA?", timeout_s=5.0)
         try:
             # LeCroy returns e.g. "2.5000000E+010 Sa/s"
@@ -318,10 +315,10 @@ class LecroyVicpDso:
         except Exception:
             pass
 
-        # ── Transfer all samples ──────────────────────────────────────────────
+        # Transfer all samples
         self.write("WAVEFORM_SETUP SP,0,NP,0,FP,0,SN,0", delay=0.15)
 
-        # ── Scaling from WAVEDESC ─────────────────────────────────────────────
+        # Scaling from WAVEDESC
         vert_gain   = 1.0
         vert_offset = 0.0
         try:
@@ -336,7 +333,7 @@ class LecroyVicpDso:
         except Exception as exc:
             print(f"[LeCroy] WAVEDESC parse warning: {exc}")
 
-        # ── Waveform data ─────────────────────────────────────────────────────
+        # Waveform data
         dat1_raw = self.query_binary(f"{ch}:WF DAT1", timeout_s=60.0)
         dat1     = _parse_ieee488_block(dat1_raw)
 
@@ -354,10 +351,10 @@ class LecroyVicpDso:
         return t, voltage, fs
 
 
-# ── Dummy (offline testing only) ─────────────────────────────────────────────
+# Dummy (offline testing only)
 class DummyDsoController:
     """
-    Simulated DSO — returns a noisy sine wave.
+    Simulated DSO - returns a noisy sine wave.
     NOT returned by create_dso_controller() for real DSO types.
     """
 
@@ -365,7 +362,7 @@ class DummyDsoController:
         self._idn = f"DUMMY,{dso_type.upper()},{host},{timeout_ms}"
 
     def __enter__(self) -> "DummyDsoController":
-        print("[DummyDSO] Using simulated DSO — not real hardware.")
+        print("[DummyDSO] Using simulated DSO - not real hardware.")
         return self
 
     def __exit__(self, *_) -> None:
@@ -385,15 +382,15 @@ class DummyDsoController:
         return t, sig, fs
 
 
-# ── Public factory ───────────────────────────────────────────────────────────
+# Public factory
 def create_dso_controller(dso_type: str, host: str, timeout_ms: int):
     """
-    Factory function — returns the real DSO controller for the given type.
+    Factory function - returns the real DSO controller for the given type.
 
-    dso_type values  →  controller
-    "lecroy"          →  LecroyVicpDso   (port 1861, VICP)
-    "keysight_uxr"    →  KeysightUxrDso  (port 5025, raw SCPI)
-    anything else     →  KeysightUxrDso  (safe default)
+    dso_type values -> controller
+    "lecroy"       -> LecroyVicpDso   (port 1861, VICP)
+    "keysight_uxr" -> KeysightUxrDso  (port 5025, raw SCPI)
+    anything else  -> KeysightUxrDso  (safe default)
     """
     t = dso_type.lower().strip()
     if t in ("lecroy", "teledyne", "teledyne_lecroy"):
@@ -404,7 +401,7 @@ def create_dso_controller(dso_type: str, host: str, timeout_ms: int):
         return KeysightUxrDso(host, timeout_ms)
 
 
-# ── Utility functions used by GUI ────────────────────────────────────────────
+# Utility functions used by GUI
 def fft_resample_complex(sig: np.ndarray, fs_in: float, fs_out: float) -> np.ndarray:
     from fractions import Fraction
     frac = Fraction(fs_out / fs_in).limit_denominator(100000)

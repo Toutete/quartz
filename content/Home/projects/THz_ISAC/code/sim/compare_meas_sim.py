@@ -24,8 +24,8 @@ def db20(x, floor_db=-140.0):
 def main():
     # 경로 설정
     base_dir = Path(__file__).resolve().parent.parent
-    data_dir = base_dir / "data"
-    omt_dir = base_dir / "OMT"
+    data_dir = base_dir / "data" / "omt_meas_PM5"
+    omt_dir = Path(__file__).resolve().parent
 
     # 1. Thru 측정 결과 읽기 (Reference)
     thru_file = data_dir / "new_thru_0dbm_2.csv"
@@ -53,8 +53,8 @@ def main():
 
     # 180deg 측정 데이터 파일
     file_1to3_180 = data_dir / "long_1TO3_180deg_1.csv"
-    file_1to4_180 = data_dir / "long_1TO4_180deg_1.csv"
-    file_1to2_180 = data_dir / "long_1TO2_180deg_1.csv" # Isolation
+    file_1to4_180 = data_dir / "long_1TO4_180deg_2.csv"
+    file_1to2_180 = data_dir / "1to2_180deg_2.csv" # Isolation
 
     fig1, axes1 = plt.subplots(1, 2, figsize=(14, 5))
     fig1.suptitle("180deg Setup: EM Simulation vs Measurement", fontsize=14)

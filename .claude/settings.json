@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git restore *)",
+      "Bash(python -m py_compile isac_unified_gui.py functions/dsp_functions.py)",
+      "Bash(python \"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-user-quartz\\\\545dabd6-af27-4869-8cfa-ac6ddc039b48\\\\scratchpad\\\\test_lfm_sro.py\")",
+      "Bash(python -)",
+      "Bash(python -m py_compile isac_unified_gui.py)",
+      "Bash(python \"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-user-quartz\\\\545dabd6-af27-4869-8cfa-ac6ddc039b48\\\\scratchpad\\\\test_lfm_sro_cfo.py\")",
+      "Bash(awk 'NR>=6040 && NR<=6145 && /h_est/' content/Home/projects/THz_ISAC/code/isac_unified_gui.py)",
+      "Bash(python \"C:\\\\Users\\\\user\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-user-quartz\\\\545dabd6-af27-4869-8cfa-ac6ddc039b48\\\\scratchpad\\\\test_lfm_freqsel.py\")"
+    ]
+  }
+}

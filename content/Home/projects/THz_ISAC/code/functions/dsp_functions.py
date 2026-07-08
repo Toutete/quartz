@@ -15,33 +15,124 @@ def rrc_filter(span_sym, alpha, ts, fs):
 def bits_per_symbol(modulation: str) -> int:
     """Returns the number of bits per symbol for a given modulation."""
     mod = modulation.strip().upper()
+    if '64QAM' in mod:
+        return 6
+    if '32QAM' in mod:
+        return 5
     if '16QAM' in mod:
         return 4
+    elif '8PSK' in mod:
+        return 3
     elif 'QPSK' in mod:
         return 2
     return 1
 
+# Standard 3-bit Gray sequence: natural binary index -> Gray-coded phase index,
+# so adjacent 8PSK constellation points differ by exactly one bit.
+_PSK8_GRAY_LUT = np.array([0, 1, 3, 2, 6, 7, 5, 4], dtype=np.int64)
+_PSK8_GRAY_INV = np.zeros(8, dtype=np.int64)
+_PSK8_GRAY_INV[_PSK8_GRAY_LUT] = np.arange(8)
+
+def _gray_to_binary_int(gray: np.ndarray) -> np.ndarray:
+    out = np.asarray(gray, dtype=np.int64).copy()
+    shift = 1
+    while shift < 64:
+        out ^= out >> shift
+        shift <<= 1
+    return out
+
+def _bits_to_rect_qam_symbols(b: np.ndarray, i_bits: int, q_bits: int) -> np.ndarray:
+    i_word = np.zeros(len(b), dtype=np.int64)
+    q_word = np.zeros(len(b), dtype=np.int64)
+    for k in range(i_bits):
+        i_word = (i_word << 1) | b[:, k].astype(np.int64)
+    for k in range(q_bits):
+        q_word = (q_word << 1) | b[:, i_bits + k].astype(np.int64)
+
+    i_idx = _gray_to_binary_int(i_word)
+    q_idx = _gray_to_binary_int(q_word)
+    i_levels = np.arange(-(2 ** i_bits - 1), 2 ** i_bits, 2, dtype=np.float64)
+    q_levels = np.arange(-(2 ** q_bits - 1), 2 ** q_bits, 2, dtype=np.float64)
+    syms = i_levels[i_idx] + 1j * q_levels[q_idx]
+    grid = (i_levels[:, None] + 1j * q_levels[None, :]).reshape(-1)
+    norm = np.sqrt(np.mean(np.abs(grid) ** 2))
+    return (syms / norm).astype(np.complex128)
+
+def _qam32_cross_points() -> np.ndarray:
+    rows = (
+        (5.0, (-3.0, -1.0, 1.0, 3.0)),
+        (3.0, (-5.0, -3.0, -1.0, 1.0, 3.0, 5.0)),
+        (1.0, (-5.0, -3.0, -1.0, 1.0, 3.0, 5.0)),
+        (-1.0, (-5.0, -3.0, -1.0, 1.0, 3.0, 5.0)),
+        (-3.0, (-5.0, -3.0, -1.0, 1.0, 3.0, 5.0)),
+        (-5.0, (-3.0, -1.0, 1.0, 3.0)),
+    )
+    pts = np.array([i + 1j * q for q, i_vals in rows for i in i_vals], dtype=np.complex128)
+    return pts / np.sqrt(np.mean(np.abs(pts) ** 2))
+
+def _bits_to_32cross_qam_symbols(b: np.ndarray) -> np.ndarray:
+    b = np.asarray(b, dtype=np.uint8)
+    if b.size == 0:
+        return np.array([], dtype=np.complex128)
+    if b.ndim != 2 or b.shape[1] != 5:
+        b = b.reshape(-1, 5)
+    idx = (
+        (b[:, 0].astype(np.int64) << 4)
+        | (b[:, 1].astype(np.int64) << 3)
+        | (b[:, 2].astype(np.int64) << 2)
+        | (b[:, 3].astype(np.int64) << 1)
+        | b[:, 4].astype(np.int64)
+    )
+    return _qam32_cross_points()[idx]
+
+def _hard_bits_from_32cross_qam(symbols: np.ndarray) -> np.ndarray:
+    syms = np.asarray(symbols, dtype=np.complex128)
+    const = _qam32_cross_points()
+    dist = np.abs(syms[:, None] - const[None, :])
+    idx = np.argmin(dist, axis=1).astype(np.int64)
+    bits = np.empty(5 * len(syms), dtype=np.uint8)
+    bits[0::5] = (idx >> 4) & 1
+    bits[1::5] = (idx >> 3) & 1
+    bits[2::5] = (idx >> 2) & 1
+    bits[3::5] = (idx >> 1) & 1
+    bits[4::5] = idx & 1
+    return bits
+
 def prbs_bits_lfsr(n: int, length: int) -> np.ndarray:
-    """Generates PRBS bits using a simple LFSR simulation."""
+    """Generate deterministic maximum-length PRBS bits.
+
+    The previous PRBS11 implementation used a tap/orientation combination
+    that only produced eight 16QAM nibbles when grouped four bits per symbol.
+    Use the standard polynomial taps and one consistent Fibonacci orientation
+    so higher-order QAM sees the full constellation.
+    """
     if n not in [7, 9, 11, 15, 20, 23]:
         n = 11 # Default
     
-    # Simple LFSR taps for common PRBS
-    taps = {7: [6, 5], 9: [8, 4], 11: [10, 8], 15: [14, 13], 20: [19, 2], 23: [22, 17]}
+    taps = {
+        7: (7, 6),
+        9: (9, 5),
+        11: (11, 9),
+        15: (15, 14),
+        20: (20, 3),
+        23: (23, 18),
+    }
     
     state = np.ones(n, dtype=np.uint8)
     bits = np.zeros(length, dtype=np.uint8)
     
     for i in range(length):
         bits[i] = state[-1]
-        feedback = np.bitwise_xor.reduce([state[t-1] for t in taps[n]])
-        state = np.roll(state, 1)
-        state[0] = feedback
+        feedback = np.uint8(0)
+        for tap in taps[n]:
+            feedback ^= state[n - tap]
+        state[:-1] = state[1:]
+        state[-1] = feedback
         
     return bits
 
 def bits_to_qam_symbols(bits: np.ndarray, modulation: str) -> np.ndarray:
-    """Gray-coded QAM symbol mapping for BPSK, QPSK, and 16QAM."""
+    """Gray-coded symbol mapping for BPSK, QPSK, 8PSK, 16/32/64QAM."""
     mod = modulation.strip().upper()
     bps = bits_per_symbol(mod)
     n_sym = len(bits) // bps
@@ -59,6 +150,14 @@ def bits_to_qam_symbols(bits: np.ndarray, modulation: str) -> np.ndarray:
         Q = (1.0 - 2.0 * b[:, 1].astype(np.float64)) / np.sqrt(2.0)
         return (I + 1j * Q).astype(np.complex128)
 
+    if '8PSK' in mod:
+        # Gray-coded 8PSK: 3 bits -> natural binary index -> Gray-mapped phase
+        # index k -> phase = 2*pi*k/8, unit modulus (constant envelope).
+        bits_int = (b[:, 0].astype(np.int64) << 2) | (b[:, 1].astype(np.int64) << 1) | b[:, 2].astype(np.int64)
+        phase_idx = _PSK8_GRAY_LUT[bits_int]
+        phase = 2.0 * np.pi * phase_idx.astype(np.float64) / 8.0
+        return np.exp(1j * phase).astype(np.complex128)
+
     if '16QAM' in mod:
         # Gray map per axis: (MSB,LSB)=(0,0)→-3, (0,1)→-1, (1,1)→+1, (1,0)→+3
         # Normalized by √10 so average power = 1
@@ -70,11 +169,37 @@ def bits_to_qam_symbols(bits: np.ndarray, modulation: str) -> np.ndarray:
         Q = _gray_to_level(b[:, 2], b[:, 3])
         return (I + 1j * Q).astype(np.complex128)
 
+    if '32QAM' in mod:
+        return _bits_to_32cross_qam_symbols(b)
+
+    if '64QAM' in mod:
+        return _bits_to_rect_qam_symbols(b, i_bits=3, q_bits=3)
+
     # Fallback: BPSK
     return (1.0 - 2.0 * b[:, 0].astype(np.float64)).astype(np.complex128)
 
+def _rect_qam_hard_bits(symbols: np.ndarray, i_bits: int, q_bits: int) -> np.ndarray:
+    syms = np.asarray(symbols, dtype=np.complex128)
+    i_levels = np.arange(-(2 ** i_bits - 1), 2 ** i_bits, 2, dtype=np.float64)
+    q_levels = np.arange(-(2 ** q_bits - 1), 2 ** q_bits, 2, dtype=np.float64)
+    grid = (i_levels[:, None] + 1j * q_levels[None, :]).reshape(-1)
+    norm = np.sqrt(np.mean(np.abs(grid) ** 2))
+    I = np.real(syms) * norm
+    Q = np.imag(syms) * norm
+    i_idx = np.argmin(np.abs(I[:, None] - i_levels[None, :]), axis=1).astype(np.int64)
+    q_idx = np.argmin(np.abs(Q[:, None] - q_levels[None, :]), axis=1).astype(np.int64)
+    i_gray = i_idx ^ (i_idx >> 1)
+    q_gray = q_idx ^ (q_idx >> 1)
+    bps = i_bits + q_bits
+    bits = np.empty(bps * len(syms), dtype=np.uint8)
+    for k in range(i_bits):
+        bits[k::bps] = (i_gray >> (i_bits - 1 - k)) & 1
+    for k in range(q_bits):
+        bits[i_bits + k::bps] = (q_gray >> (q_bits - 1 - k)) & 1
+    return bits
+
 def hard_bits_from_symbols(symbols: np.ndarray, modulation: str) -> np.ndarray:
-    """Hard decision demapping (minimum-distance) for BPSK, QPSK, and 16QAM."""
+    """Hard-decision demapping for BPSK, QPSK, 8PSK, 16/32/64QAM."""
     mod = modulation.strip().upper()
     syms = np.asarray(symbols, dtype=np.complex128)
 
@@ -85,6 +210,17 @@ def hard_bits_from_symbols(symbols: np.ndarray, modulation: str) -> np.ndarray:
         b0 = (np.real(syms) < 0.0).astype(np.uint8)
         b1 = (np.imag(syms) < 0.0).astype(np.uint8)
         return np.stack([b0, b1], axis=1).reshape(-1)
+
+    if '8PSK' in mod:
+        phase = np.mod(np.angle(syms), 2.0 * np.pi)
+        phase_idx = np.round(phase / (2.0 * np.pi / 8.0)).astype(np.int64) % 8
+        bits_int = _PSK8_GRAY_INV[phase_idx]
+        n = len(syms)
+        bits = np.empty(3 * n, dtype=np.uint8)
+        bits[0::3] = (bits_int >> 2) & 1
+        bits[1::3] = (bits_int >> 1) & 1
+        bits[2::3] = bits_int & 1
+        return bits
 
     if '16QAM' in mod:
         # Undo normalization: decision thresholds at 0 and ±2/√10
@@ -106,6 +242,12 @@ def hard_bits_from_symbols(symbols: np.ndarray, modulation: str) -> np.ndarray:
         bits[2::4] = bq0
         bits[3::4] = bq1
         return bits
+
+    if '32QAM' in mod:
+        return _hard_bits_from_32cross_qam(syms)
+
+    if '64QAM' in mod:
+        return _rect_qam_hard_bits(syms, i_bits=3, q_bits=3)
 
     return (np.real(syms) < 0.0).astype(np.uint8)
 
@@ -160,13 +302,13 @@ def align_symbols_for_ber(ref_symbols: np.ndarray, est_symbols: np.ndarray, max_
             n_ov = min(len(ref) - lag, len(est))
             if n_ov < 4:
                 continue
-            n = min(n_ov, 128)
+            n = min(n_ov, 1024)
             c = float(np.abs(np.dot(ref[lag:lag + n], np.conj(est[:n]))))
         else:
             n_ov = min(len(ref), len(est) + lag)   # lag<0 so +lag = -|lag|
             if n_ov < 4:
                 continue
-            n = min(n_ov, 128)
+            n = min(n_ov, 1024)
             c = float(np.abs(np.dot(ref[:n], np.conj(est[-lag:-lag + n]))))
         if c > best_c:
             best_c = c
@@ -184,55 +326,68 @@ def align_symbols_for_ber(ref_symbols: np.ndarray, est_symbols: np.ndarray, max_
 
 def sc_fde_equalizer(rx_symbols, ref_symbols, num_taps=21, enable=True):
     import numpy as np
-    from scipy.signal import lfilter
 
-    if not enable or len(rx_symbols) == 0 or len(ref_symbols) == 0:
-        return rx_symbols
+    rx = np.asarray(rx_symbols, dtype=np.complex128).reshape(-1)
+    ref = np.asarray(ref_symbols, dtype=np.complex128).reshape(-1)
+    if not enable or len(rx) == 0 or len(ref) == 0:
+        return rx
+
+    num_taps = max(1, int(num_taps))
         
-    n_train = min(len(rx_symbols), len(ref_symbols))
+    n_train = min(len(rx), len(ref))
     if n_train < num_taps * 2:
-        return rx_symbols
+        return rx
         
-    rx_train = rx_symbols[:n_train]
-    tx_train = ref_symbols[:n_train]
+    rx_train = rx[:n_train]
+    tx_train = ref[:n_train]
     
     if num_taps <= 1:
-        a = np.vdot(rx_train, tx_train) / (np.vdot(rx_train, rx_train) + 1e-15)
-        return a * rx_symbols
+        a = np.vdot(rx_train, tx_train) / (np.vdot(rx_train, rx_train).real + 1e-15)
+        return a * rx
 
-    # Optimal MMSE Linear Equalizer via Time-Domain Least Squares
-    # To make the filter non-causal (handling precursors), we offset the target by delay
-    delay = (num_taps - 1) // 2
-    
-    # We want to estimate tx[t - delay] using rx[t], rx[t-1], ..., rx[t - num_taps + 1]
-    # valid t must be >= num_taps - 1. 
-    t_start = num_taps - 1
-    t_end = n_train
-    num_eq_samples = t_end - t_start
-    
-    if num_eq_samples < num_taps:
-        return rx_symbols
-        
-    X = np.zeros((num_eq_samples, num_taps), dtype=np.complex128)
-    for i in range(num_taps):
-        start_idx = t_start - i
-        X[:, i] = rx_train[start_idx : start_idx + num_eq_samples]
-        
-    target_start = t_start - delay
-    target_end = target_start + num_eq_samples
-    d = tx_train[target_start : target_end]
-    
-    w, _, _, _ = np.linalg.lstsq(X, d, rcond=None)
-    
-    # Pad signal to avoid edge transients
-    pad = num_taps
-    rx_pad = np.pad(rx_symbols, (pad, pad), mode='reflect')
-    
-    from scipy.signal import fftconvolve
-    eq_sig_pad = fftconvolve(rx_pad, w, mode='same')
-    
-    # Return the valid portion. mode='same' naturally aligns the center tap.
-    return eq_sig_pad[pad : -pad]
+    # Centered feed-forward equalizer.  Row n estimates ref[n] from
+    # rx[n-delay] ... rx[n+post], so the returned stream stays sample-aligned.
+    delay = num_taps // 2
+    post = num_taps - delay - 1
+    row_start = delay
+    row_stop = n_train - post
+    n_rows = row_stop - row_start
+    if n_rows < max(num_taps, 8):
+        return rx
+
+    X = np.empty((n_rows, num_taps), dtype=np.complex128)
+    for tap in range(num_taps):
+        src_start = row_start - delay + tap
+        X[:, tap] = rx_train[src_start:src_start + n_rows]
+    d = tx_train[row_start:row_start + n_rows]
+
+    # Small diagonal loading keeps the LS solution stable when the training
+    # sequence has deep spectral notches or when decision-directed refs are used.
+    xhx = X.conj().T @ X
+    xhd = X.conj().T @ d
+    reg = 1e-4 * (float(np.trace(xhx).real) / max(num_taps, 1) + 1e-15)
+    try:
+        w = np.linalg.solve(xhx + reg * np.eye(num_taps, dtype=np.complex128), xhd)
+    except np.linalg.LinAlgError:
+        w, _, _, _ = np.linalg.lstsq(X, d, rcond=None)
+
+    left = delay
+    right = post
+    if len(rx) > 1:
+        rx_pad = np.pad(rx, (left, right), mode="edge")
+    else:
+        rx_pad = np.pad(rx, (left, right), mode="constant")
+
+    try:
+        windows = np.lib.stride_tricks.sliding_window_view(rx_pad, num_taps)
+        y = windows @ w
+    except Exception:
+        y = np.empty_like(rx)
+        for n in range(len(rx)):
+            y[n] = np.dot(rx_pad[n:n + num_taps], w)
+
+    a = np.vdot(y[:n_train], ref[:n_train]) / (np.vdot(y[:n_train], y[:n_train]).real + 1e-15)
+    return a * y
 
 def lfm_qam_rx_dsp_chain(rx_signal, fs, baud_rate, if_freq, chirp_signal=None, tx_ref_symbols=None, rrc_alpha=0.25, rx_mode="Mixer", sc_fde_enable=True, sc_fde_taps=1):
     import numpy as np
