@@ -62,14 +62,14 @@ python rx\dso_demod.py --mode sim       # 오프라인 복조 테스트
 
 ### 하드웨어 요약
 
-| Block | Model | Key specs |
-|-------|-------|-----------|
-| MZM | iXblue **MXAN-LN-40** | Vπ,DC ≈ 6.5 V; Vπ,RF@10GHz ≈ 6 V; X-cut; IL 3.5 dB; ER 25 dB; abs-max: optical +20 dBm, RF +28 dBm, bias ±20 V |
-| UTC-PD | NICT **IOD-PMJ-13001** | J-band (270 GHz); 역방향 바이어스 ≈ −1 V (데이터시트 필수 확인); 현재 ~−7 mA, ~−10 dBm THz 출력 |
-| ZBD | VDI **WR3.4ZBD** | 영바이어스; 감도 ≈ 2200 V/W; WR3.4 도파관 (220–330 GHz) |
-| AWG | Keysight **M8194A** | 120 GSa/s; 45 GHz BW; 8-bit; ≤ 0.8 Vpp(se) / 1.6 Vpp(diff) |
-| DSO | Keysight **UXR0404A** | 40 GHz BW; 256 GSa/s (4채널 동시, 속도 손실 없음); 10-bit; ENOB ≤ 8.7; 최대 2 Gpts |
-| Lasers | 2× free-running DFB | f1 − f2 = 270 GHz (예: 193.410 THz & 193.140 THz) |
+| Block  | Model                  | Key specs                                                                                                      |
+| ------ | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
+| MZM    | iXblue **MXAN-LN-40**  | Vπ,DC ≈ 6.5 V; Vπ,RF@10GHz ≈ 6 V; X-cut; IL 3.5 dB; ER 25 dB; abs-max: optical +20 dBm, RF +28 dBm, bias ±20 V |
+| UTC-PD | NICT **IOD-PMJ-13001** | J-band (270 GHz); 역방향 바이어스 ≈ −1 V (데이터시트 필수 확인); 현재 ~−7 mA, ~−10 dBm THz 출력                                    |
+| ZBD    | VDI **WR3.4ZBD**       | 영바이어스; 감도 ≈ 2200 V/W; WR3.4 도파관 (220–330 GHz)                                                                  |
+| AWG    | Keysight **M8194A**    | 120 GSa/s; 45 GHz BW; 8-bit; ≤ 0.8 Vpp(se) / 1.6 Vpp(diff)                                                     |
+| DSO    | Keysight **UXR0404A**  | 40 GHz BW; 256 GSa/s (4채널 동시, 속도 손실 없음); 10-bit; ENOB ≤ 8.7; 최대 2 Gpts                                         |
+| Lasers | 2× free-running DFB    | f1 − f2 = 270 GHz (예: 193.410 THz & 193.140 THz)                                                               |
 
 ### 신호 체인
 

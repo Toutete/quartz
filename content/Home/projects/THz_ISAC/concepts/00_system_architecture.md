@@ -2,6 +2,58 @@
 title: THz ISAC 시스템 구조
 is_public: false
 ---
+본 논문의 핵심
+1. CP generation 
+2. Full-duplex THz ISAC 실증 (ISAC waveform 으로 통신/radar 동시 입증)
+3. Free-running lasers + ZBD (SIM)
+
+fig. 1. V2X senario of Full-duplex monostatic THz ISAC
+fig. 2. 제안하는 THz ISAC 시스템의 block diagram
+![[Pasted image 20260708160638.png]]
+Fig. 3. 측정 셋업 + 사진 (DSP, optical spectrum (SSB), electrical spectrum (SSBI를 피할 수 있고 DC block 등으로 ADC 포화 방지) + 2 CH 동시 결과 사진?
+fig. 4. OMT simulation 및 측정 결과 (안테나)
+fig. 5. 측졍 결과 1
+fig. 6. 측졍 결과 2
+fig. 7. 측졍 결과 3
+
+
+Simulation 결과
+1. PAPR (OFDM vs DFT-s-OFDM vs LFM-QAM) for UTC-PD (Pin vs Pout curve), 16QAM 이상
+2. DFT-s-OFDM 통신 성능 vs amplitude ratio rho
+
+
+
+
+측정 결과
+1. EVM + range resolution vs Bandwidth ? bandwidth 로 보여줄게 있나?
+	1. Trade-off 를 보여줄 수 있음, low symbol rate: high EVM, low resolution
+2. EVM vs photocurrent (16QAM, 32QAM)
+	1. SNR-limited 시스템 > PA, 고이득 안테나로 더 장거리가 가능함, 또한 고효율 소자 개발의 필요성 제시
+3. 거리에 따른 SNR (통신, Radar) 
+	1. 이것을 통해 통신은 SNR limited 됨, 반면 radar는 processing gain 으로 인해 더 먼 거리에 대해 가능함 (DFT-s-OFDM 의 단점이 있음에도)
+4. 2 Gbaud vs 20 Gbaud rate 에 대한 range profile 비교 (7 mm RX 이동을 detection 가능함)
+5. EVM vs FDE taps 개수
+
+
+TX: two free-running lasers - UTC-PD - OMT - TX Antenna 
+
+RX1 (C1): RX1 Antenna - OMT - THz LNA - ZBD - (bias tee + adaptor) - Drive Amp -cable - DSO 
+
+RX2 (C2): RX1 Antenna으로부터 반사된 신호 - TX Antenna - OMT - THz LNA - ZBD - cable - Drive Amp - cable - DSO
+
+
+
+
+
+
+
+
+Introduction
+2025 TVT (Millimeter-Wave Dual-Circularly Polarized Wide-Angle Scanning Antenna Array for Vehicular Communication Systems)
+What’s more, it is well known that satellite signals are easily interfered by useless signals when crossing the atmosphere, resulting in a poor transmission quality. Therefore, circularly polarized (CP) antennas are usually used in vehicle-to-satellite communication because they can receive electromagnetic waves of arbitrary polarization, avoiding polarization mismatch between the receiver and transmitter, and have a significant effect in resisting multipath fading [9], [10]. Therefore, the study of highperformance CP phased array antenna provides great technical support for current and future vehicle-to-satellite communication systems. At present, narrow axial ratio bandwidth (ARBW), impedance bandwidth (IMBW) and poor scanning performance are still the main limitations in practical applications, which should be carefully addressed.
+
+
+
 
 # THz ISAC 시스템 구조
 
