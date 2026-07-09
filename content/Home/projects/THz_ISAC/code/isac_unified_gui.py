@@ -2122,8 +2122,8 @@ class SimConfig:
     tx_ant_gain_dbi: float = 30.0
     rx_ant_gain_dbi: float = 30.0
     target_rcs_sqm: float = 1.0
-    c2_echo_cal_db: float = 0.0
     target_dist_m: float = 1.0  # Default 1m
+    sim_seed: int | None = None
     syms_per_chirp: int = 1024
     pilot_rho: float = 0.20
     rrc_beta: float = 0.20
@@ -2449,6 +2449,8 @@ def estimate_measured_evm_percent(evm_db):
     return np.nan
 
 def run_isac_sim(cfg: SimConfig):
+    if cfg.sim_seed is not None:
+        np.random.seed(int(cfg.sim_seed))
     fs = cfg.fs_gsps * 1e9
     frame_len, num_frames = int(cfg.frame_len), int(cfg.num_frames)
     step = max(int(fs * cfg.step_ns * 1e-9), 1)
@@ -2641,7 +2643,7 @@ def run_isac_sim(cfg: SimConfig):
 
     #
     alpha_si = 10**(-cfg.omt_iso_db / 20.0)
-    beta_echo = 10**((-radar_path_loss_db + float(cfg.c2_echo_cal_db)) / 20.0)
+    beta_echo = 10**(-radar_path_loss_db / 20.0)
     delay_samp = int(delay_ns * 1e-9 * fs)
 
     v_si = v_tx_out * alpha_si if cfg.si_enable else np.zeros_like(v_tx_out)
@@ -2704,11 +2706,11 @@ def run_isac_sim(cfg: SimConfig):
     # 7. Range Profile & Delay Estimation
     c2_sic_for_metrics = v_dso_in
     if cfg.rx_mode == 'ZBD':
-        # ZBD destroys RF phase. Must correlate intensity envelopes!
-        ref_sig = np.abs(v_tx_out)**2
-        ref_sig = ref_sig - np.mean(ref_sig)
-
-        #
+        # ZBD produces an IF term through carrier/sideband beating. Use the
+        # same real-IF TX reference that the DSO DSP uses, not |TX|^2, which
+        # mainly emphasizes DC/2IF envelope terms and gives unstable range
+        # sidelobes for communication-bearing waveforms.
+        ref_sig = x_if_real - np.mean(x_if_real)
         ref_sig_filt = np.real(np.fft.ifft(np.fft.fft(ref_sig) * amp_mask)) * c2_if_gain_lin
 
         # Apply Digital Self-Interference Cancellation (SIC) for ZBD
@@ -2724,30 +2726,29 @@ def run_isac_sim(cfg: SimConfig):
         ref_sig = ref_sig_filt
     else:
         # Mixer is coherent. Correlate complex RF envelopes.
-        ref_sig = v_tx_out
+        ref_sig = np.real(x_if_real)
         radar_input = v_dso_in
 
-    N = len(radar_input)
-    N_fft = 1
-    while N_fft < 2 * N: N_fft *= 2
+    radar_input = np.asarray(radar_input, dtype=np.float64).reshape(-1)
+    ref_sig = np.asarray(ref_sig, dtype=np.float64).reshape(-1)
+    radar_input = radar_input - float(np.mean(radar_input)) if len(radar_input) else radar_input
+    ref_sig = ref_sig - float(np.mean(ref_sig)) if len(ref_sig) else ref_sig
+    sync_corr_full = np.abs(fftconvolve(radar_input, ref_sig[::-1], mode="full"))
+    lags_full = np.arange(-(len(ref_sig) - 1), len(radar_input), dtype=np.int64)
 
-    tx_fft = np.fft.fft(ref_sig, N_fft)
-    rx_fft = np.fft.fft(radar_input, N_fft)
-    sync_corr = np.abs(np.fft.ifft(rx_fft * np.conj(tx_fft)))[:N]
-
-    best_delay = int(np.argmax(sync_corr))
+    best_delay = int(lags_full[int(np.argmax(sync_corr_full))]) if len(sync_corr_full) else 0
 
     if cfg.si_enable:
         demod_delay = 0  # Dominant signal is SI
     else:
         demod_delay = best_delay  # Dominant signal is Echo
 
-    corr_db = 20.0 * np.log10(sync_corr + 1e-20)
+    corr_db = 20.0 * np.log10(sync_corr_full + 1e-20)
     corr_db = corr_db - np.max(corr_db)
 
-    range_axis = np.arange(N) * (3e8 / 2.0 / fs)
-    valid_range = range_axis <= 4.0
-    range_axis = range_axis[valid_range]
+    range_axis_full = lags_full.astype(np.float64) * (3e8 / 2.0 / fs)
+    valid_range = (range_axis_full >= 0.0) & (range_axis_full <= 4.0)
+    range_axis = range_axis_full[valid_range]
     range_profile_db = corr_db[valid_range]
     proc_gain_db = 10.0 * np.log10(max(len(ref_sig), 1))
     radar_snr_db = float("nan")
@@ -2756,7 +2757,7 @@ def run_isac_sim(cfg: SimConfig):
     self_interference_range_m = float("nan")
     zero_guard_m = float("nan")
     if len(range_profile_db) > 8:
-        prof_lin = sync_corr[valid_range]
+        prof_lin = sync_corr_full[valid_range]
         si_idx = int(np.argmax(prof_lin))
         self_interference_range_m = float(range_axis[si_idx])
         if len(range_axis) > 1:
@@ -3287,18 +3288,17 @@ class PhotonicIsacSimPanel:
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
         add_p(27, "rcs_sqm",      "Target RCS [m^2]",       "0.01")
-        add_p(28, "c2_echo_cal_db", "C2 Echo Cal [dB]",      "0.0")
 
-        ttk.Label(grp, text="Target Dist [m]").grid(row=29, column=0, sticky="w", pady=2)
+        ttk.Label(grp, text="Target Dist [m]").grid(row=28, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
-        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=29, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=28, column=1, sticky="w")
 
         self.sc_fde_enable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=30, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Post-EQ Taps").grid(row=31, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=29, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Post-EQ Taps").grid(row=30, column=0, sticky="w", pady=2)
         self.sc_fde_taps_var = tk.StringVar(value="1")
-        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=31, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=30, column=1, sticky="w")
 
         # Plot on right
         self.fig = Figure(figsize=(8, 8), dpi=100)
@@ -3368,7 +3368,7 @@ class PhotonicIsacSimPanel:
             )
             delay_ns = link["delay_ns"]
             loss_db = link["radar_path_loss_db"]
-            echo_dbm = link["c2_rf_dbm"] + self._param_float("c2_echo_cal_db", 0.0)
+            echo_dbm = link["c2_rf_dbm"]
             si_enable = bool(self.si_enable_var.get())
             si_dbm = tx_dbm - self._param_float("omt_iso_db", 25.0) if si_enable else -300.0
             lna_gain_db = self._param_float("lna_gain_db", 13.0)
@@ -3518,7 +3518,6 @@ class PhotonicIsacSimPanel:
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
             target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
-            c2_echo_cal_db=self._param_float("c2_echo_cal_db", 0.0),
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
