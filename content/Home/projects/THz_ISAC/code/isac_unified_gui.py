@@ -2122,6 +2122,7 @@ class SimConfig:
     tx_ant_gain_dbi: float = 30.0
     rx_ant_gain_dbi: float = 30.0
     target_rcs_sqm: float = 1.0
+    c2_echo_cal_db: float = 0.0
     target_dist_m: float = 1.0  # Default 1m
     syms_per_chirp: int = 1024
     pilot_rho: float = 0.20
@@ -2144,11 +2145,13 @@ def generate_phase_noise(n, lw, fs):
     return np.cumsum(np.random.normal(0, np.sqrt(2 * np.pi * lw / fs), n))
 
 def calc_psd(sig, fs):
-    f, p = welch(sig, fs, nperseg=min(8192, len(sig)), return_onesided=False)
-    p_v2hz = np.fft.fftshift(p)
-    p_w_hz = p_v2hz / 50.0
-    p_dbm_hz = 10 * np.log10(p_w_hz * 1e3 + 1e-30)
-    return np.fft.fftshift(f), p_dbm_hz
+    """DSO-tab compatible single-sided PSD in dBm/Hz."""
+    x = np.asarray(sig, dtype=np.float64).reshape(-1)
+    if len(x) == 0 or fs <= 0:
+        return np.array([0.0]), np.array([-300.0])
+    f, pxx = welch(np.real(x), fs=fs, nperseg=min(4096, len(x)), scaling="density")
+    p_dbm_hz = 10.0 * np.log10(np.maximum(pxx / 50.0 / 1e-3, 1e-30))
+    return f, p_dbm_hz
 
 def calc_power_dbm(sig, R=50.0):
     """Time-domain RMS power calculation into 50 ohms."""
@@ -2168,13 +2171,15 @@ def w_to_dbm(p_w: float) -> float:
     return 10.0 * np.log10(max(float(p_w), 1e-30) * 1e3)
 
 def effective_cspr_db(cfg: SimConfig) -> float:
-    # The measured 20 dB CSPR is the reference at AWG CH1 power = -10 dBm.
-    # Increasing AWG RF power raises the DSB optical signal power, reducing CSPR.
-    return float(cfg.cspr_db) - (float(cfg.awg_rf_power_dbm) - float(cfg.awg_ref_power_dbm))
+    # Use the measured/entered CSPR directly. The earlier model inferred CSPR
+    # from AWG IF power, which made lower IF power look cleaner even without a
+    # measured compression mechanism. In the current setup -10 to -5 dBm IF is
+    # still in the linear region, so IF power should not silently change CSPR.
+    return float(cfg.cspr_db)
 
 def calc_mzm_drive_metrics(awg_rf_dbm: float, drive_gain_db: float, cspr_ref_db: float, awg_ref_dbm: float) -> dict[str, float]:
     rf_in_dbm = float(awg_rf_dbm) + float(drive_gain_db)
-    eff_cspr = float(cspr_ref_db) - (float(awg_rf_dbm) - float(awg_ref_dbm))
+    eff_cspr = float(cspr_ref_db)
     return {
         "rf_in_dbm": rf_in_dbm,
         "effective_cspr_db": float(eff_cspr),
@@ -2636,7 +2641,7 @@ def run_isac_sim(cfg: SimConfig):
 
     #
     alpha_si = 10**(-cfg.omt_iso_db / 20.0)
-    beta_echo = 10**(-radar_path_loss_db / 20.0)
+    beta_echo = 10**((-radar_path_loss_db + float(cfg.c2_echo_cal_db)) / 20.0)
     delay_samp = int(delay_ns * 1e-9 * fs)
 
     v_si = v_tx_out * alpha_si if cfg.si_enable else np.zeros_like(v_tx_out)
@@ -2747,11 +2752,41 @@ def run_isac_sim(cfg: SimConfig):
     proc_gain_db = 10.0 * np.log10(max(len(ref_sig), 1))
     radar_snr_db = float("nan")
     pslr_db = float("nan")
+    selected_range_m = float("nan")
+    self_interference_range_m = float("nan")
+    zero_guard_m = float("nan")
     if len(range_profile_db) > 8:
-        pk = int(np.argmax(range_profile_db))
-        guard = max(3, int(0.002 * len(range_profile_db)))
+        prof_lin = sync_corr[valid_range]
+        si_idx = int(np.argmax(prof_lin))
+        self_interference_range_m = float(range_axis[si_idx])
+        if len(range_axis) > 1:
+            dr_m = float(np.median(np.diff(range_axis)))
+        else:
+            dr_m = 3e8 / 2.0 / fs
+        range_res_m = 3e8 / (2.0 * max(float(occupied_bw_hz), 1.0))
+        zero_guard_m = max(0.05, 2.0 * range_res_m)
+        target_window_m = max(0.05, 2.0 * range_res_m)
+
+        target_mask = (
+            np.isfinite(range_axis)
+            & (np.abs(range_axis - float(cfg.target_dist_m)) <= target_window_m)
+            & (range_axis > zero_guard_m)
+        )
+        if np.any(target_mask):
+            target_indices = np.flatnonzero(target_mask)
+            pk = int(target_indices[int(np.argmax(prof_lin[target_mask]))])
+        else:
+            link_mask = np.isfinite(range_axis) & (range_axis > zero_guard_m)
+            if np.any(link_mask):
+                link_indices = np.flatnonzero(link_mask)
+                pk = int(link_indices[int(np.argmax(prof_lin[link_mask]))])
+            else:
+                pk = si_idx
+        selected_range_m = float(range_axis[pk])
+        guard = max(3, int(np.ceil(max(zero_guard_m, 2.0 * dr_m) / max(dr_m, 1e-12))))
         side = np.ones(len(range_profile_db), dtype=bool)
         side[max(0, pk - guard):min(len(side), pk + guard + 1)] = False
+        side &= ~(np.isfinite(range_axis) & (np.abs(range_axis) <= zero_guard_m))
         if np.any(side):
             side_max = float(np.max(range_profile_db[side]))
             noise_med = float(np.median(range_profile_db[side]))
@@ -2762,7 +2797,12 @@ def run_isac_sim(cfg: SimConfig):
     #
     d = d_link
     path_loss_com_db = one_way_path_loss_db
-    beta_com = 10**(-path_loss_com_db / 20.0)
+    effective_one_way_loss_db = (
+        path_loss_com_db
+        - float(cfg.tx_ant_gain_dbi)
+        - float(cfg.rx_ant_gain_dbi)
+    )
+    beta_com = 10**(-effective_one_way_loss_db / 20.0)
     delay_samp_com = int((d / 3e8 * 1e9) * 1e-9 * fs)
 
     v_com = np.zeros_like(v_tx_out)
@@ -3018,6 +3058,9 @@ def run_isac_sim(cfg: SimConfig):
         "range_axis_m": range_axis, "range_profile_db": range_profile_db,
         "c1_band_metrics": c1_band_metrics, "c2_band_metrics": c2_band_metrics,
         "radar_snr_db": radar_snr_db, "pslr_db": pslr_db, "processing_gain_db": proc_gain_db,
+        "selected_range_m": selected_range_m,
+        "self_interference_range_m": self_interference_range_m,
+        "zero_guard_m": zero_guard_m,
         "dso_noise_vrms": dso_noise_vrms,
         "optical_power_w": p_opt_total_w,
         "optical_data_laser_w": p_data_laser_w,
@@ -3131,7 +3174,7 @@ class PhotonicIsacSimPanel:
             "osa_tones": self.table.insert("", "end", text="Optical Tones",       values=("auto / 193.410", "THz")),
             "osa_lines": self.table.insert("", "end", text="UTC-PD Tone / DSB",   values=("N/A", "dBm")),
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
-            "obs_cspr":  self.table.insert("", "end", text="Effective CSPR",      values=("20.0", "dB")),
+            "obs_cspr":  self.table.insert("", "end", text="Measured CSPR",       values=("20.0", "dB")),
             "uxr_noise": self.table.insert("", "end", text="UXR Noise",         values=("0.00", "mVrms")),
             "delay":     self.table.insert("", "end", text="Radar Echo Delay",  values=("0.00", "ns")),
             "loss":      self.table.insert("", "end", text="C2 Radar Loss (1/R^4)", values=("0.00", "dB")),
@@ -3211,7 +3254,7 @@ class PhotonicIsacSimPanel:
 
         # removed fs_gsps
         add_p(1, "linewidth_mhz", "Laser Linewidth [MHz]", "0.015")
-        add_p(2, "cspr_db", "CSPR @ AWG -10 dBm [dB]", "20.0")
+        add_p(2, "cspr_db", "Measured CSPR [dB]", "20.0")
         add_p(3, "opt_center_thz", "Opt Tone Center [THz]", "193.41")
         add_p(4, "mzm_drive_gain_db", "MZM Drive Amp [dB]", "8.0")
         add_p(5, "utcpd_resp_aw", "UTC-PD Resp. [A/W]", "0.24")
@@ -3244,17 +3287,18 @@ class PhotonicIsacSimPanel:
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
         add_p(27, "rcs_sqm",      "Target RCS [m^2]",       "0.01")
+        add_p(28, "c2_echo_cal_db", "C2 Echo Cal [dB]",      "0.0")
 
-        ttk.Label(grp, text="Target Dist [m]").grid(row=28, column=0, sticky="w", pady=2)
+        ttk.Label(grp, text="Target Dist [m]").grid(row=29, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
-        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=28, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=29, column=1, sticky="w")
 
         self.sc_fde_enable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=29, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Post-EQ Taps").grid(row=30, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=30, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Post-EQ Taps").grid(row=31, column=0, sticky="w", pady=2)
         self.sc_fde_taps_var = tk.StringVar(value="1")
-        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=30, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=31, column=1, sticky="w")
 
         # Plot on right
         self.fig = Figure(figsize=(8, 8), dpi=100)
@@ -3324,7 +3368,7 @@ class PhotonicIsacSimPanel:
             )
             delay_ns = link["delay_ns"]
             loss_db = link["radar_path_loss_db"]
-            echo_dbm = link["c2_rf_dbm"]
+            echo_dbm = link["c2_rf_dbm"] + self._param_float("c2_echo_cal_db", 0.0)
             si_enable = bool(self.si_enable_var.get())
             si_dbm = tx_dbm - self._param_float("omt_iso_db", 25.0) if si_enable else -300.0
             lna_gain_db = self._param_float("lna_gain_db", 13.0)
@@ -3474,6 +3518,7 @@ class PhotonicIsacSimPanel:
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
             target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
+            c2_echo_cal_db=self._param_float("c2_echo_cal_db", 0.0),
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
@@ -3510,8 +3555,9 @@ class PhotonicIsacSimPanel:
         for i, ax in enumerate(self.axes):
             line, = ax.plot([], [], lw=1.5, color=colors[i], label="Signal")
             if i == 2:
-                self.l_si, = ax.plot([], [], lw=1.2, color="green", linestyle="--", label="SI")
-                self.l_echo, = ax.plot([], [], lw=1.2, color="magenta", linestyle=":", label="Echo")
+                self.l_c2_band, = ax.plot([], [], lw=1.0, color="#dc2626", alpha=0.90, label="In-band raw")
+            if i == 3:
+                self.l_c1_band, = ax.plot([], [], lw=1.0, color="#dc2626", alpha=0.90, label="In-band raw")
             ax.legend(loc="upper right", fontsize=8)
             self.lines.append(line)
             ax.set_title(titles[i])
@@ -3544,6 +3590,7 @@ class PhotonicIsacSimPanel:
             #
             #
             c = cfg.rf_carrier_ghz
+            fs = self.data["fs"]
             #
             span = cfg.if_ghz + (cfg.baud_gbaud / 2.0) + 5.0
             zbd_span = min(
@@ -3555,13 +3602,13 @@ class PhotonicIsacSimPanel:
             opt_center = cfg.optical_center_freq_thz
             self.axes[0].set_xlim(opt_center - cfg.rf_carrier_ghz / 1000.0 - 0.03, opt_center + cfg.if_ghz / 1000.0 + 0.03)
             self.axes[1].set_xlim(c - span, c + span)
-            self.axes[2].set_xlim(0.0, zbd_span)
-            self.axes[3].set_xlim(0.0, zbd_span)
+            spec_fmax_ghz = min(25.0, cfg.dso_bandwidth_ghz, 0.5 * fs / 1e9)
+            self.axes[2].set_xlim(0.0, spec_fmax_ghz)
+            self.axes[3].set_xlim(0.0, spec_fmax_ghz)
 
             #
             #
             #
-            fs = self.data["fs"]
             bw_db = 10 * np.log10(fs)
             p_tx_dbm = cfg.utcpd_target_dbm
             p_si_dbm = p_tx_dbm - cfg.omt_iso_db
@@ -3594,6 +3641,15 @@ class PhotonicIsacSimPanel:
             # data instead of the RF link-budget formula, or the curve clips.
             _, p_com_probe = calc_psd(self.data["v_rec_com"], fs)
             self.axes[3].set_ylim(-150.0, -90.0)
+
+            analysis_bw_hz = max(float(self.data.get("occupied_bw_hz", cfg.baud_gbaud * 1e9)) * 1.2, 1.0)
+            f1_ghz = max(0.0, cfg.if_ghz - 0.5 * analysis_bw_hz / 1e9)
+            f2_ghz = min(spec_fmax_ghz, cfg.if_ghz + 0.5 * analysis_bw_hz / 1e9)
+            for ax in (self.axes[2], self.axes[3]):
+                ax.axvspan(f1_ghz, f2_ghz, alpha=0.13, color="orange")
+                ax.axvline(f1_ghz, color="orange", lw=0.8, linestyle="--")
+                ax.axvline(f2_ghz, color="orange", lw=0.8, linestyle="--")
+                ax.axvline(cfg.if_ghz, color="red", lw=0.9, linestyle=":")
 
             c1m = self.data.get("c1_band_metrics", {})
             c2m = self.data.get("c2_band_metrics", {})
@@ -3671,6 +3727,12 @@ class PhotonicIsacSimPanel:
             max_range = 4.0
             m = rng <= max_range
             self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3)
+            sel_m = float(self.data.get("selected_range_m", float("nan")))
+            if np.isfinite(sel_m) and np.any(m):
+                idx = int(np.argmin(np.abs(rng - sel_m)))
+                if 0 <= idx < len(prof):
+                    self.ax_range.axvline(sel_m, color="#dc2626", linestyle="--", lw=1.0, label=f"Target {sel_m:.2f} m")
+                    self.ax_range.legend(loc="upper right", fontsize=8)
             self.ax_range.set_xlim(0.0, max_range)
             max_prof = np.max(prof[m]) if np.any(m) else 0.0
             self.ax_range.set_ylim(-40.0, max_prof + 10.0)
@@ -3700,10 +3762,14 @@ class PhotonicIsacSimPanel:
         # but the raw trace lets SI and SSBI around 2*IF remain visible.
         c2_plot = self.data.get("v_rec_c2_raw", self.data["v_rec_c2"])
         f, p_c2 = calc_psd(c2_plot[s:e], fs)
-        pos = f >= 0
-        self.lines[2].set_data(f[pos]/1e9, p_c2[pos])
-        self.l_si.set_data([], [])
-        self.l_echo.set_data([], [])
+        f_ghz = f / 1e9
+        fmax_ghz = float(self.axes[2].get_xlim()[1])
+        mask = f_ghz <= fmax_ghz
+        self.lines[2].set_data(f_ghz[mask], p_c2[mask])
+        f1_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 - 0.5 * 1.2 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
+        f2_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 + 0.5 * 1.2 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
+        band = mask & (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz)
+        self.l_c2_band.set_data(f_ghz[band], p_c2[band])
         c2m = self.data.get("c2_band_metrics", {})
         self.lines[2].set_label(f"C2 raw; P(SI-canc.)={float(c2m.get('band_power_dbm', np.nan)):.1f} dBm")
         self.axes[1].legend(loc="upper right", fontsize=8)
@@ -3711,7 +3777,12 @@ class PhotonicIsacSimPanel:
 
         # Plot 4: C1 DSO IF spectrum
         f, p_bb = calc_psd(self.data["v_rec_c1"][s:e], fs)
-        self.lines[3].set_data(f[f>=0]/1e9, p_bb[f>=0])
+        f_ghz = f / 1e9
+        fmax_ghz = float(self.axes[3].get_xlim()[1])
+        mask = f_ghz <= fmax_ghz
+        self.lines[3].set_data(f_ghz[mask], p_bb[mask])
+        band = mask & (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz)
+        self.l_c1_band.set_data(f_ghz[band], p_bb[band])
         c1m = self.data.get("c1_band_metrics", {})
         self.lines[3].set_label(f"C1 IF P={float(c1m.get('band_power_dbm', np.nan)):.1f} dBm")
         self.axes[3].legend(loc="upper right", fontsize=8)
@@ -7346,21 +7417,23 @@ class DsoPanel:
                 item = self._rx_multi.get(ch)
                 if not item:
                     continue
+                range_row = self._range_row_for_channel(ch, row)
                 range_items.append(self._compute_isac_range_profile_for_signal(
                     np.asarray(item["sig"], dtype=np.float64),
                     float(item["fs"]),
                     pl,
                     ch_label=ch,
-                    row=row,
+                    row=range_row,
                 ))
         if not range_items and self._rx_sig is not None:
             ch_label = self.ch_var.get().strip().upper() or "C1"
+            range_row = self._range_row_for_channel(ch_label, 0)
             range_items.append(self._compute_isac_range_profile_for_signal(
                 np.asarray(self._rx_sig, dtype=np.float64),
                 float(self._rx_fs),
                 pl,
                 ch_label=ch_label,
-                row=0,
+                row=range_row,
             ))
         return range_items
 
@@ -10015,6 +10088,15 @@ class DsoPanel:
     def _range_mode_for_row(row: int) -> str:
         return "One-way LOS (c)" if int(row) == 0 else "Monostatic radar (c/2)"
 
+    @staticmethod
+    def _range_row_for_channel(ch_label: str, row: int) -> int:
+        ch = str(ch_label or "").strip().upper()
+        if ch == "C2":
+            return 1
+        if ch == "C1":
+            return 0
+        return int(row)
+
     def _range_delay_scale_m_per_s(self, mode: str | None = None, row: int | None = None) -> float:
         if mode is None and row is not None:
             mode = self._range_mode_for_row(row)
@@ -11089,6 +11171,7 @@ class DsoPanel:
                         if zero_ch in display_channels_now
                         else 0
                     )
+                    row = self._range_row_for_channel(zero_ch, row)
                     range_mode = self._range_mode_for_row(row)
                     range_scale = self._range_delay_scale_m_per_s(mode=range_mode)
                     try:
