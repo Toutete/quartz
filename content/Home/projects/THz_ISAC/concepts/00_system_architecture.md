@@ -21,9 +21,6 @@ Simulation 결과
 1. PAPR (OFDM vs DFT-s-OFDM vs LFM-QAM) for UTC-PD (Pin vs Pout curve), 16QAM 이상
 2. DFT-s-OFDM 통신 성능 vs amplitude ratio rho
 
-
-
-
 측정 결과
 1. EVM + range resolution vs Bandwidth ? bandwidth 로 보여줄게 있나?
 	1. Trade-off 를 보여줄 수 있음, low symbol rate: high EVM, low resolution

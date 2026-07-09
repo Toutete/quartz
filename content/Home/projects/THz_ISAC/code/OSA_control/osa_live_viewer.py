@@ -99,7 +99,11 @@ class OSALiveViewerApp(tk.Tk):
         
         # Save Button
         self.btn_save = ttk.Button(control_frame, text="Save Data (.csv & .png)", command=self.save_data, state=tk.DISABLED)
-        self.btn_save.pack(fill=tk.X, pady=5)
+        self.btn_save.pack(fill=tk.X, pady=(5, 0))
+        
+        # Load Button
+        self.btn_load = ttk.Button(control_frame, text="Load Data (.csv)", command=self.load_data)
+        self.btn_load.pack(fill=tk.X, pady=(5, 10))
         
         # Right Panel for Plot
         plot_frame = ttk.Frame(main_frame)
@@ -341,6 +345,22 @@ class OSALiveViewerApp(tk.Tk):
         
         self.ax.legend(loc="upper right")
         
+        # Setup marker elements
+        self.marker_anno = self.ax.annotate(
+            "", xy=(0, 0), xytext=(10, 10),
+            textcoords="offset points",
+            fontsize=9,
+            bbox=dict(boxstyle="round", facecolor="yellow", alpha=0.8, edgecolor="#d97706"),
+            arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
+            visible=False
+        )
+        self.marker_line = self.ax.axvline(x=0, color='#d97706', linestyle=':', visible=False)
+        self.marker_point, = self.ax.plot([], [], marker='o', color='#d97706', visible=False)
+        
+        if hasattr(self, 'cid_click'):
+            self.canvas.mpl_disconnect(self.cid_click)
+        self.cid_click = self.canvas.mpl_connect('button_press_event', self.on_click_plot)
+        
         # Add secondary axis for Wavelength
         try:
             self.ax.secondary_xaxis("top", functions=(
@@ -385,6 +405,89 @@ class OSALiveViewerApp(tk.Tk):
             messagebox.showinfo("Saved", f"Data and plot saved successfully:\n{file_path}\n{png_path}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save data: {e}")
+
+    def load_data(self):
+        from tkinter import filedialog
+        import csv
+        
+        file_path = filedialog.askopenfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Load Spectrum Data"
+        )
+        if not file_path:
+            return
+            
+        try:
+            freqs, wls, powers = [], [], []
+            with open(file_path, mode='r') as f:
+                reader = csv.reader(f)
+                header = next(reader, None) # skip header
+                for row in reader:
+                    if len(row) >= 3:
+                        try:
+                            f_val = float(row[0])
+                            w_val = float(row[1])
+                            p_val = float(row[2])
+                            freqs.append(f_val)
+                            wls.append(w_val)
+                            powers.append(p_val)
+                        except ValueError:
+                            continue
+            
+            if not freqs:
+                raise ValueError("No valid data found in the CSV.")
+                
+            freq_thz = np.array(freqs)
+            wavelength_nm = np.array(wls)
+            power_dbm = np.array(powers)
+            
+            # Infer center frequency and span roughly from the data range
+            data_span = freq_thz.max() - freq_thz.min()
+            center_freq = (freq_thz.min() + freq_thz.max()) / 2.0
+            
+            # Update GUI to reflect loaded data roughly
+            self.center_freq_var.set(round(center_freq, 4))
+            self.span_thz_var.set(round(data_span, 4))
+            
+            self._plot_data(wavelength_nm, power_dbm, center_freq)
+            self._log_debug(f"Loaded data from {file_path}")
+            messagebox.showinfo("Load Success", f"Loaded data from:\n{file_path}\n(Left click on graph to show marker, right click to clear)")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load data: {e}")
+            self._log_debug(f"ERROR: {e}")
+
+    def on_click_plot(self, event):
+        if not event.inaxes == self.ax:
+            return
+        if not hasattr(self, 'last_freq_thz') or len(self.last_freq_thz) == 0:
+            return
+            
+        # Left click to set marker, right click to clear
+        if event.button == 3: # Right click
+            self.marker_point.set_visible(False)
+            self.marker_line.set_visible(False)
+            self.marker_anno.set_visible(False)
+            self.canvas.draw_idle()
+            return
+            
+        x_click = event.xdata
+        idx = np.argmin(np.abs(self.last_freq_thz - x_click))
+        x_nearest = self.last_freq_thz[idx]
+        y_nearest = self.last_power_dbm[idx]
+        
+        self.marker_point.set_data([x_nearest], [y_nearest])
+        self.marker_point.set_visible(True)
+        
+        self.marker_line.set_xdata([x_nearest, x_nearest])
+        self.marker_line.set_visible(True)
+        
+        self.marker_anno.xy = (x_nearest, y_nearest)
+        self.marker_anno.set_text(f"{x_nearest:.3f} THz\n{y_nearest:.1f} dBm")
+        self.marker_anno.set_visible(True)
+        
+        self.canvas.draw_idle()
 
 if __name__ == "__main__":
     app = OSALiveViewerApp()
