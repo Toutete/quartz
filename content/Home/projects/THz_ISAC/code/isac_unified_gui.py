@@ -194,7 +194,7 @@ class IsacTxSimPanel:
                 self.waveform_var = tk.StringVar(value="DFT-s-OFDM")
                 ttk.Label(sig_grp, text="Waveform").grid(row=2, column=0, sticky="w", pady=(5, 0))
                 ttk.Combobox(sig_grp, textvariable=self.waveform_var,
-                             values=["Tone", "LFM-QAM", "DFT-s-OFDM", "QAM", "FMCW"],
+                             values=["Tone", "SC", "OFDM", "DFT-s-OFDM", "FMCW"],
                              state="readonly", width=10).grid(row=2, column=1, sticky="w", pady=(5, 0))
 
                 self.pilot_rho_var = tk.StringVar(value="0.20")
@@ -223,8 +223,8 @@ class IsacTxSimPanel:
                 ttk.Label(pwr_grp, text="CH1 Power (dBm)").grid(row=0, column=0, sticky="w")
                 ttk.Entry(pwr_grp, textvariable=self.power_dbm_var, width=10).grid(row=0, column=1, sticky="w", padx=(4, 0))
 
-                self.vpp_ch1_var = tk.StringVar(value="0.2")
-                self.vpp_ch2_var = tk.StringVar(value="0.2")
+                self.vpp_ch1_var = tk.StringVar(value="0.1")
+                self.vpp_ch2_var = tk.StringVar(value="0.1")
                 self.vpp_var = self.vpp_ch1_var  # compatibility for simulation panels
                 ttk.Label(pwr_grp, text="CH1 Vpp").grid(row=0, column=2, sticky="w", padx=(10, 0))
                 ttk.Entry(pwr_grp, textvariable=self.vpp_ch1_var, width=10).grid(row=0, column=3, sticky="w", padx=(4, 0))
@@ -2081,7 +2081,7 @@ class SimConfig:
 
     linewidth_mhz: float = 0.015
     baud_gbaud: float = 10.0
-    if_ghz: float = 10.0
+    if_ghz: float = 12.0
     rf_carrier_ghz: float = 270.0
     waveform: str = "16QAM"
     modulation: str = "16QAM"
@@ -2091,20 +2091,21 @@ class SimConfig:
     rx_mode: str = "Mixer"
     si_enable: bool = True
     carrier_wander_enable: bool = False
-    carrier_wander_mhz: float = 300.0
+    carrier_wander_mhz: float = 0.0
     sc_fde_enable: bool = True
     sc_fde_taps: int = 21
 
-    #
+    # Optical front-end / MZM settings. UTC-PD photocurrent sets absolute
+    # optical power; AWG RF power moves the signal-to-carrier ratio.
+    awg_rf_power_dbm: float = -10.0
+    awg_ref_power_dbm: float = -10.0
+    mzm_drive_gain_db: float = 8.0
+    mzm_insertion_loss_db: float = 3.5
+    optical_center_freq_thz: float = 193.41
     utcpd_photocurrent_ma: float = 7.0
-    utcpd_target_dbm: float = -25.0
+    utcpd_target_dbm: float = -10.0
     utcpd_responsivity_a_per_w: float = 0.24
-    cspr_db: float = 10.0
-    mzm_rf_vpi_v: float = 7.0
-    awg_drive_dbm: float = -10.0
-    mzm_drive_amp_gain_db: float = 8.0
-    osa_sideband_gap_db: float = 20.0
-    cspr_auto: bool = False
+    cspr_db: float = 20.0
     lna_gain_db: float = 13.0
     lna_nf_db: float = 8.0
     zbd_responsivity_vpw: float = 1700.0
@@ -2117,11 +2118,14 @@ class SimConfig:
     dso_vscale_mv: float = 100.0
     dso_bandwidth_ghz: float = 40.0
     omt_iso_db: float = 25.0
-    ant_gain_dbi: float = 25.0
+    ant_gain_dbi: float = 30.0
     tx_ant_gain_dbi: float = 30.0
     rx_ant_gain_dbi: float = 30.0
     target_rcs_sqm: float = 1.0
     target_dist_m: float = 1.0  # Default 1m
+    syms_per_chirp: int = 1024
+    pilot_rho: float = 0.20
+    rrc_beta: float = 0.20
     # Derived link parameters.
     tx_power_dbm: float = 0.0
     path_loss_db: float = 0.0
@@ -2140,7 +2144,7 @@ def generate_phase_noise(n, lw, fs):
     return np.cumsum(np.random.normal(0, np.sqrt(2 * np.pi * lw / fs), n))
 
 def calc_psd(sig, fs):
-    f, p = welch(sig, fs, nperseg=min(2048, len(sig)), return_onesided=False)
+    f, p = welch(sig, fs, nperseg=min(8192, len(sig)), return_onesided=False)
     p_v2hz = np.fft.fftshift(p)
     p_w_hz = p_v2hz / 50.0
     p_dbm_hz = 10 * np.log10(p_w_hz * 1e3 + 1e-30)
@@ -2157,34 +2161,184 @@ def calc_utcpd_output_dbm(photocurrent_ma: float) -> float:
     i_ref_ma, p_ref_dbm = 7.0, -10.0
     return p_ref_dbm + 20.0 * np.log10(max(photocurrent_ma, 1e-6) / i_ref_ma)
 
-def calc_mzm_cspr_db(awg_drive_dbm: float, mzm_rf_vpi_v: float) -> float:
-    """Small-signal intensity-modulator CSPR from RF drive into 50 ohm."""
-    p_w = 1e-3 * 10.0 ** (float(awg_drive_dbm) / 10.0)
-    vrms = np.sqrt(max(p_w * 50.0, 1e-30))
-    vpi = max(float(mzm_rf_vpi_v), 1e-12)
-    cspr_lin = 4.0 * vpi * vpi / (np.pi * np.pi * vrms * vrms)
-    return 10.0 * np.log10(max(cspr_lin, 1e-30))
+def dbm_to_w(p_dbm: float) -> float:
+    return 1e-3 * (10.0 ** (float(p_dbm) / 10.0))
 
-def calc_total_cspr_from_osa_sideband_gap_db(sideband_gap_db: float) -> float:
-    """Convert OSA carrier-to-one-sideband gap to carrier-to-total-DSB CSPR."""
-    return float(sideband_gap_db) - 10.0 * np.log10(2.0)
+def w_to_dbm(p_w: float) -> float:
+    return 10.0 * np.log10(max(float(p_w), 1e-30) * 1e3)
 
-def calc_osa_sideband_gap_from_total_cspr_db(cspr_db: float) -> float:
-    """Convert carrier-to-total-DSB CSPR to OSA carrier-to-one-sideband gap."""
-    return float(cspr_db) + 10.0 * np.log10(2.0)
+def effective_cspr_db(cfg: SimConfig) -> float:
+    # The measured 20 dB CSPR is the reference at AWG CH1 power = -10 dBm.
+    # Increasing AWG RF power raises the DSB optical signal power, reducing CSPR.
+    return float(cfg.cspr_db) - (float(cfg.awg_rf_power_dbm) - float(cfg.awg_ref_power_dbm))
 
-def calc_data_power_ratio_db(cspr_db: float) -> float:
-    """Fraction of optical data-laser power in DSB signal sidebands."""
-    cspr_lin = 10.0 ** (float(cspr_db) / 10.0)
-    return -10.0 * np.log10(1.0 + cspr_lin)
+def calc_mzm_drive_metrics(awg_rf_dbm: float, drive_gain_db: float, cspr_ref_db: float, awg_ref_dbm: float) -> dict[str, float]:
+    rf_in_dbm = float(awg_rf_dbm) + float(drive_gain_db)
+    eff_cspr = float(cspr_ref_db) - (float(awg_rf_dbm) - float(awg_ref_dbm))
+    return {
+        "rf_in_dbm": rf_in_dbm,
+        "effective_cspr_db": float(eff_cspr),
+    }
 
-def calc_effective_snr_from_evm_db(evm_db: float) -> float:
-    """EVM-derived effective SNR for AWGN-limited demodulated symbols."""
-    try:
-        v = float(evm_db)
-    except Exception:
-        return float("nan")
-    return -v if np.isfinite(v) else float("nan")
+def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
+    """Infer UTC-PD input optical line powers from photocurrent and CSPR."""
+    p_total_w = max(
+        (float(cfg.utcpd_photocurrent_ma) * 1e-3)
+        / max(float(cfg.utcpd_responsivity_a_per_w), 1e-12),
+        1e-15,
+    )
+    cspr_eff_db = effective_cspr_db(cfg)
+    cspr_lin = max(10.0 ** (abs(cspr_eff_db) / 10.0), 1e-12)
+    p_mzm_carrier_w = p_total_w / max(2.0 + 2.0 / cspr_lin, 1e-30)
+    p_tone1_w = p_mzm_carrier_w
+    p_sideband_each_w = p_mzm_carrier_w / cspr_lin
+    p_dsb_total_w = 2.0 * p_sideband_each_w
+    return {
+        "total_w": p_total_w,
+        "tone1_w": p_tone1_w,
+        "mzm_carrier_w": p_mzm_carrier_w,
+        "sideband_each_w": p_sideband_each_w,
+        "dsb_total_w": p_dsb_total_w,
+        "mzm_branch_w": p_mzm_carrier_w + p_dsb_total_w,
+        "tone_ratio": 1.0,
+        "effective_cspr_db": float(cspr_eff_db),
+        "total_dbm": w_to_dbm(p_total_w),
+        "tone1_dbm": w_to_dbm(p_tone1_w),
+        "mzm_carrier_dbm": w_to_dbm(p_mzm_carrier_w),
+        "sideband_each_dbm": w_to_dbm(p_sideband_each_w),
+        "dsb_total_dbm": w_to_dbm(p_dsb_total_w),
+    }
+
+def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
+    """Expected UTC-PD RF line powers after photomixing, normalized to TX power."""
+    total_rf_w = dbm_to_w(cfg.utcpd_target_dbm)
+    cspr_lin = max(10.0 ** (abs(effective_cspr_db(cfg)) / 10.0), 1e-12)
+    carrier_w = total_rf_w / max(1.0 + 2.0 / cspr_lin, 1e-30)
+    sideband_each_w = carrier_w / cspr_lin
+    return {
+        "total_w": total_rf_w,
+        "carrier_w": carrier_w,
+        "sideband_each_w": sideband_each_w,
+        "dsb_total_w": 2.0 * sideband_each_w,
+        "total_dbm": w_to_dbm(total_rf_w),
+        "carrier_dbm": w_to_dbm(carrier_w),
+        "sideband_each_dbm": w_to_dbm(sideband_each_w),
+        "dsb_total_dbm": w_to_dbm(2.0 * sideband_each_w),
+    }
+
+def add_display_line_mw(
+    freq_axis: np.ndarray,
+    accum_mw: np.ndarray,
+    center: float,
+    power_dbm: float,
+    fwhm: float,
+) -> None:
+    sigma = max(float(fwhm) / 2.354820045, np.finfo(float).eps)
+    accum_mw += dbm_to_w(power_dbm) * 1e3 * np.exp(-0.5 * ((freq_axis - center) / sigma) ** 2)
+
+def classify_isac_waveform(waveform: str) -> str:
+    w = str(waveform or "").strip().upper().replace("_", "-")
+    if w in {"TONE", "CW"}:
+        return "Tone"
+    if w in {"OFDM", "OFDM-16QAM"}:
+        return "OFDM"
+    if w in {"DFT-S-OFDM", "DFTS-OFDM", "SC-FDMA"}:
+        return "DFT-s-OFDM"
+    if "FMCW" in w:
+        return "FMCW"
+    if "LFM" in w:
+        return "LFM-QAM"
+    return "SC"
+
+def next_pow2(n: int) -> int:
+    return 1 << int(np.ceil(np.log2(max(int(n), 1))))
+
+def estimate_waveform_bandwidth_hz(cfg: SimConfig, waveform_kind: str | None = None) -> float:
+    kind = classify_isac_waveform(cfg.waveform) if waveform_kind is None else waveform_kind
+    baud = max(float(cfg.baud_gbaud) * 1e9, 1.0)
+    rrc = max(float(cfg.rrc_beta), 0.0)
+    if kind == "Tone":
+        return max(0.05e9, min(0.5e9, 0.25 * baud))
+    if kind == "FMCW":
+        return max(float(cfg.chirp_bw_ghz) * 1e9, 0.05e9)
+    if kind == "LFM-QAM":
+        return max(float(cfg.chirp_bw_ghz) * 1e9 + baud * (1.0 + rrc), baud)
+    if kind in {"OFDM", "DFT-s-OFDM"}:
+        return baud
+    return baud * (1.0 + rrc)
+
+def make_bandpass_mask(f_axis: np.ndarray, f_if_hz: float, bandwidth_hz: float) -> np.ndarray:
+    half_bw = 0.5 * max(float(bandwidth_hz), 1.0)
+    low = max(30e3, float(f_if_hz) - half_bw)
+    high = min(30e9, float(f_if_hz) + half_bw)
+    if high <= low:
+        high = min(30e9, max(low * 1.01, float(f_if_hz) + 1e6))
+    af = np.abs(f_axis)
+    return (af >= low) & (af <= high)
+
+def make_osa_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
+    """UTC-PD input optical line display inferred from photocurrent and CSPR."""
+    f2 = float(cfg.optical_center_freq_thz)
+    f1 = f2 - float(cfg.rf_carrier_ghz) / 1000.0
+    f_if_thz = float(cfg.if_ghz) / 1000.0
+    lo = min(f1, f2 - f_if_thz) - 0.03
+    hi = max(f1, f2 + f_if_thz) + 0.03
+    f = np.linspace(lo, hi, 8000)
+    optical_lines = calc_utcpd_optical_line_powers(cfg)
+    floor_dbm = float(optical_lines["sideband_each_dbm"]) - 45.0
+    p_mw = np.full_like(f, dbm_to_w(floor_dbm) * 1e3)
+
+    # This is a display-only OSA trace width. The physical laser linewidth is
+    # much narrower than the plotted span, so using it directly makes the
+    # carrier miss FFT/display bins and falsely appear below the DSB.
+    display_fwhm_thz = 0.0015
+
+    tone1_dbm = float(optical_lines["tone1_dbm"])
+    carrier_dbm = float(optical_lines["mzm_carrier_dbm"])
+    sideband_dbm = float(optical_lines["sideband_each_dbm"])
+    add_display_line_mw(f, p_mw, f2, carrier_dbm, display_fwhm_thz)
+    add_display_line_mw(f, p_mw, f2 - f_if_thz, sideband_dbm, display_fwhm_thz)
+    add_display_line_mw(f, p_mw, f2 + f_if_thz, sideband_dbm, display_fwhm_thz)
+
+    sig_mw = p_mw.copy()
+    lo_mw = np.full_like(f, dbm_to_w(floor_dbm) * 1e3)
+    add_display_line_mw(f, lo_mw, f1, tone1_dbm, display_fwhm_thz)
+    return {
+        "freq_thz": f,
+        "signal_dbm": 10.0 * np.log10(np.maximum(sig_mw, 1e-30)),
+        "lo_dbm": 10.0 * np.log10(np.maximum(lo_mw, 1e-30)),
+        "tone1_freq_thz": np.asarray(f1),
+        "tone2_freq_thz": np.asarray(f2),
+        "tone1_power_dbm": np.asarray(tone1_dbm),
+        "carrier_power_dbm": np.asarray(carrier_dbm),
+        "sideband_power_dbm": np.asarray(sideband_dbm),
+        "total_optical_power_dbm": np.asarray(float(optical_lines["total_dbm"])),
+    }
+
+def make_utcpd_rf_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
+    """Display UTC-PD output as carrier + DSB RF line powers in dBm."""
+    rf = float(cfg.rf_carrier_ghz)
+    f_if = float(cfg.if_ghz)
+    bw = max(float(cfg.baud_gbaud), 0.2)
+    span = f_if + 0.5 * bw + 5.0
+    f = np.linspace(rf - span, rf + span, 6000)
+    rf_lines = calc_utcpd_rf_line_powers(cfg)
+    floor_dbm = float(rf_lines["sideband_each_dbm"]) - 55.0
+    p_mw = np.full_like(f, dbm_to_w(floor_dbm) * 1e3)
+    line_fwhm_ghz = 0.12 if classify_isac_waveform(cfg.waveform) == "Tone" else max(0.35, bw / 3.0)
+    add_display_line_mw(f, p_mw, rf, float(rf_lines["carrier_dbm"]), line_fwhm_ghz)
+    add_display_line_mw(f, p_mw, rf - f_if, float(rf_lines["sideband_each_dbm"]), line_fwhm_ghz)
+    add_display_line_mw(f, p_mw, rf + f_if, float(rf_lines["sideband_each_dbm"]), line_fwhm_ghz)
+    return {
+        "freq_ghz": f,
+        "power_dbm": 10.0 * np.log10(np.maximum(p_mw, 1e-30)),
+        "carrier_freq_ghz": np.asarray(rf),
+        "sideband_lo_ghz": np.asarray(rf - f_if),
+        "sideband_hi_ghz": np.asarray(rf + f_if),
+        "carrier_power_dbm": np.asarray(float(rf_lines["carrier_dbm"])),
+        "sideband_each_dbm": np.asarray(float(rf_lines["sideband_each_dbm"])),
+        "total_power_dbm": np.asarray(float(rf_lines["total_dbm"])),
+    }
 
 def calc_isac_link_budget(
     distance_m: float,
@@ -2250,13 +2404,26 @@ def calc_if_band_metrics(sig: np.ndarray, fs: float, f_if_hz: float, bandwidth_h
         return {"band_power_dbm": float("nan"), "snr_db": float("nan"), "noise_dbm": float("nan")}
     df = float(f[1] - f[0]) if len(f) > 1 else 1.0
     p_mw = float(np.sum(psd_mw_hz[band]) * df)
-    noise_mw = ((float(noise_vrms) ** 2) / 50.0) * 1e3 * (max(hi - lo, 1.0) / max(40e9, hi - lo))
+    guard_hz = max(0.1 * bandwidth_hz, 5.0 * df)
+    noise_band = (
+        (f > max(30e3, 5.0 * df))
+        & (f < 0.95 * 0.5 * fs)
+        & ((f < lo - guard_hz) | (f > hi + guard_hz))
+    )
+    if np.count_nonzero(noise_band) >= 8:
+        noise_density_mw_hz = float(np.median(psd_mw_hz[noise_band]))
+        noise_mw_psd = noise_density_mw_hz * max(hi - lo, 1.0)
+    else:
+        noise_mw_psd = 0.0
+    noise_mw_dso = ((float(noise_vrms) ** 2) / 50.0) * 1e3 * (max(hi - lo, 1.0) / max(40e9, hi - lo))
+    noise_mw = max(noise_mw_psd, noise_mw_dso)
     noise_mw = max(noise_mw, 1e-30)
     sig_mw = max(p_mw - noise_mw, 1e-30)
     return {
         "band_power_dbm": 10.0 * np.log10(sig_mw),
         "raw_band_power_dbm": 10.0 * np.log10(max(p_mw, 1e-30)),
         "noise_dbm": 10.0 * np.log10(noise_mw),
+        "noise_floor_dbm_hz": 10.0 * np.log10(max(noise_mw / max(hi - lo, 1.0), 1e-30)),
         "snr_db": 10.0 * np.log10(sig_mw / noise_mw),
     }
 
@@ -2285,6 +2452,25 @@ def run_isac_sim(cfg: SimConfig):
 
     baud_rate, f_if = cfg.baud_gbaud * 1e9, cfg.if_ghz * 1e9
     samples_per_sym = max(int(fs / baud_rate), 1)
+    d_link = max(float(cfg.target_dist_m), 1e-6)
+    link = calc_isac_link_budget(
+        distance_m=d_link,
+        rf_ghz=cfg.rf_carrier_ghz,
+        tx_dbm=cfg.utcpd_target_dbm,
+        tx_gain_dbi=cfg.tx_ant_gain_dbi,
+        rx_gain_dbi=cfg.rx_ant_gain_dbi,
+        rcs_sqm=cfg.target_rcs_sqm,
+        lna_gain_db=cfg.lna_gain_db,
+        c1_drive_gain_db=cfg.c1_drive_gain_db,
+        c2_drive_gain_db=cfg.c2_drive_gain_db,
+        c1_cable_loss_db=cfg.c1_cable_loss_db,
+        c2_cable_loss_db=cfg.c2_cable_loss_db,
+    )
+    radar_path_loss_db = float(link["radar_path_loss_db"])
+    one_way_path_loss_db = float(link["fspl_one_way_db"])
+    delay_ns = float(link["delay_ns"])
+    cfg.path_loss_db = radar_path_loss_db
+    cfg.delay_ns = delay_ns
 
     # 1. Baseband & IF Upconversion (Real)
     bps = _bits_per_symbol(cfg.modulation)
@@ -2295,18 +2481,30 @@ def run_isac_sim(cfg: SimConfig):
     bit_patterns = list(((all_bits >> i) & 1) for i in range(bps - 1, -1, -1))
     flat_bits = np.hstack(bit_patterns).flatten()
     qam_syms = _bits_to_qam_symbols(flat_bits, cfg.modulation)
+    waveform_kind = classify_isac_waveform(cfg.waveform)
+    occupied_bw_hz = estimate_waveform_bandwidth_hz(cfg, waveform_kind)
+    h_rrc = rrc_filter(200, max(float(cfg.rrc_beta), 0.01), 1/baud_rate, fs)
+    dft_active_bins = None
+    dft_n_data = 0
+    dft_n_fft = 0
+    dft_pilot_active = None
+    dft_tx_blocks = []
+    dft_tx_symbol_blocks = []
+    dft_data_scales = []
+    dft_sr = 0.0
+    dft_sd = 1.0
 
-    if cfg.waveform == "Tone":
+    if waveform_kind == "Tone":
         bb_sig = np.ones(total_samples, dtype=np.complex128)
-        symbols = np.zeros(0, dtype=np.complex128)
-        sym_idx = np.zeros(0, dtype=np.int64)
+        symbols = np.ones(max(total_samples // samples_per_sym, 1), dtype=np.complex128)
+        sym_idx = np.zeros(len(symbols), dtype=np.int64)
         chirp = np.ones_like(t)
-    elif cfg.waveform == "OFDM-16QAM":
+    elif waveform_kind == "OFDM":
         N_fft_ofdm = 2048
         N_cp = 256
         N_sym_total = N_fft_ofdm + N_cp
         num_ofdm_syms = total_samples // N_sym_total + 2
-        active_sc = int((cfg.baud_gbaud * 1e9) / (fs / N_fft_ofdm))
+        active_sc = int(np.clip((cfg.baud_gbaud * 1e9) / (fs / N_fft_ofdm), 8, N_fft_ofdm // 2))
 
         ofdm_bb = np.zeros(num_ofdm_syms * N_sym_total, dtype=complex)
         tx_ofdm_syms = []
@@ -2332,16 +2530,63 @@ def run_isac_sim(cfg: SimConfig):
         symbols = np.concatenate(tx_ofdm_syms)
         sym_idx = np.concatenate(sym_idx_list)
         chirp = np.ones_like(t)
+    elif waveform_kind == "DFT-s-OFDM":
+        n_data = max(8, int(cfg.syms_per_chirp))
+        dft_oversample = max(fs / max(baud_rate, 1.0), 2.0)
+        n_fft_dft = max(64, next_pow2(int(np.ceil(n_data * dft_oversample))))
+        num_blocks = total_samples // n_fft_dft + 2
+        offsets = np.arange(-(n_data // 2), n_data - n_data // 2, dtype=np.int64)
+        active_bins = np.mod(offsets, n_fft_dft).astype(np.int64)
+        dft_active_bins = active_bins
+        dft_n_data = n_data
+        dft_n_fft = n_fft_dft
+
+        def scfdma_block(syms: np.ndarray) -> tuple[np.ndarray, float]:
+            spread = np.fft.fft(syms) / np.sqrt(max(len(syms), 1))
+            X = np.zeros(n_fft_dft, dtype=np.complex128)
+            X[active_bins] = spread
+            x = np.fft.ifft(X)
+            scale = np.sqrt(np.mean(np.abs(x) ** 2)) + 1e-15
+            return x / scale, float(scale)
+
+        sym_idx = np.random.randint(0, num_unique_syms, num_blocks * n_data)
+        symbols = qam_syms[sym_idx]
+        zc = np.asarray(generate_zadoff_chu(n_data, u=1), dtype=np.complex128)
+        pilot_block, _ = scfdma_block(zc)
+        dft_pilot_active = np.fft.fft(pilot_block)[active_bins]
+        rho = float(np.clip(cfg.pilot_rho, 0.0, 0.95))
+        sr = np.sqrt(rho)
+        sd = np.sqrt(max(0.0, 1.0 - rho))
+        dft_sr = float(sr)
+        dft_sd = float(sd)
+        blocks = []
+        for i in range(num_blocks):
+            sym_block = symbols[i * n_data:(i + 1) * n_data]
+            data_block, scale_i = scfdma_block(sym_block)
+            tx_block = sr * pilot_block + sd * data_block
+            blocks.append(tx_block)
+            dft_tx_blocks.append(tx_block)
+            dft_tx_symbol_blocks.append(sym_block)
+            dft_data_scales.append(scale_i)
+        bb_sig = np.concatenate(blocks)[:total_samples]
+        chirp = np.ones_like(t)
+    elif waveform_kind == "FMCW":
+        sweep_bw = max(cfg.chirp_bw_ghz, 0.01) * 1e9
+        t0 = t - np.mean(t)
+        k = sweep_bw / max(t[-1] - t[0], 1.0 / fs)
+        chirp = np.exp(1j * np.pi * k * (t0 ** 2))
+        bb_sig = chirp
+        symbols = np.ones(max(total_samples // samples_per_sym, 1), dtype=np.complex128)
+        sym_idx = np.zeros(len(symbols), dtype=np.int64)
     else:
         sym_idx = np.random.randint(0, num_unique_syms, int(total_samples / samples_per_sym) + 1)
         symbols = qam_syms[sym_idx]
         upsampled = np.zeros(len(symbols) * samples_per_sym, dtype=complex)
         upsampled[::samples_per_sym] = symbols
 
-        h_rrc = rrc_filter(200, 0.1, 1/baud_rate, fs)
         bb_sig = np.convolve(upsampled, h_rrc, mode="same")[:total_samples]
 
-        if "LFM" in cfg.waveform:
+        if waveform_kind == "LFM-QAM":
             sweep_bw = max(cfg.chirp_bw_ghz, 0.01) * 1e9
             t0 = t - np.mean(t)
             k = sweep_bw / max(t[-1] - t[0], 1.0 / fs)
@@ -2353,25 +2598,19 @@ def run_isac_sim(cfg: SimConfig):
     x_if_cplx = bb_sig * np.exp(1j * 2 * np.pi * f_if * t)
     x_if_real = np.real(x_if_cplx)
 
-    # Optical field model: one data laser with carrier + DSB signal and one
-    # free-running optical LO tone.  UTC-PD photocurrent and responsivity set
-    # the total incident optical power; CSPR controls carrier vs DSB power.
+    # Optical field model: one MZM/data tone with carrier + DSB signal and one
+    # second optical tone.  The OSA absolute power depends on coupler routing,
+    # so UTC-PD photocurrent calibrates total optical power while CSPR follows
+    # the observed carrier-to-DSB ratio.
     m = x_if_real / (np.sqrt(np.mean(x_if_real ** 2)) + 1e-12)
-    p_opt_total_w = max((cfg.utcpd_photocurrent_ma * 1e-3) / max(cfg.utcpd_responsivity_a_per_w, 1e-12), 1e-12)
-    p_data_laser_w = 0.5 * p_opt_total_w
-    p_lo_laser_w = 0.5 * p_opt_total_w
-    mzm_input_dbm = cfg.awg_drive_dbm + cfg.mzm_drive_amp_gain_db
-    effective_cspr_db = (
-        calc_mzm_cspr_db(mzm_input_dbm, cfg.mzm_rf_vpi_v)
-        if cfg.cspr_auto
-        else calc_total_cspr_from_osa_sideband_gap_db(cfg.osa_sideband_gap_db)
-    )
-    cfg.cspr_db = effective_cspr_db
-    cspr_lin = 10.0 ** (effective_cspr_db / 10.0)
-    p_dsb_w = p_data_laser_w / (1.0 + cspr_lin)
-    p_carrier_w = p_data_laser_w - p_dsb_w
+    optical_lines = calc_utcpd_optical_line_powers(cfg)
+    p_opt_total_w = optical_lines["total_w"]
+    p_lo_laser_w = optical_lines["tone1_w"]
+    p_carrier_w = optical_lines["mzm_carrier_w"]
+    p_dsb_w = optical_lines["dsb_total_w"]
+    p_data_laser_w = optical_lines["mzm_branch_w"]
+    mzm_metrics = calc_mzm_drive_metrics(cfg.awg_rf_power_dbm, cfg.mzm_drive_gain_db, cfg.cspr_db, cfg.awg_ref_power_dbm)
     e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_dsb_w, 0.0)) * m
-    p_sideband_w = 0.5 * p_dsb_w
 
     #
     lw = cfg.linewidth_mhz * 1e6
@@ -2379,9 +2618,12 @@ def run_isac_sim(cfg: SimConfig):
     phi_2 = generate_phase_noise(total_samples, lw, fs)
     if cfg.coherence_mode == "Self-coherent": phi_2 = phi_1
 
-    wander = np.cumsum(np.random.randn(total_samples))
-    wander = (wander - np.mean(wander)) / (np.std(wander) + 1e-12) * (cfg.carrier_wander_mhz * 1e6 if cfg.carrier_wander_enable else 0)
-    phi_wander = 2 * np.pi * np.cumsum(wander) / fs
+    if cfg.carrier_wander_enable and cfg.carrier_wander_mhz > 0:
+        wander = np.cumsum(np.random.randn(total_samples))
+        wander = (wander - np.mean(wander)) / (np.std(wander) + 1e-12) * (cfg.carrier_wander_mhz * 1e6)
+        phi_wander = 2 * np.pi * np.cumsum(wander) / fs
+    else:
+        phi_wander = np.zeros(total_samples)
 
     e_data = e_mod * np.exp(1j * phi_1)
     e_lo = np.sqrt(p_lo_laser_w) * np.exp(1j * (phi_2 + phi_wander))
@@ -2390,17 +2632,17 @@ def run_isac_sim(cfg: SimConfig):
     beat_raw = e_data * np.conj(e_lo)
     beat_pwr_w = np.mean(np.abs(beat_raw)**2) / 50.0
     target_w = 10**((cfg.utcpd_target_dbm - 30) / 10)
-    v_tx_out = beat_raw * np.sqrt(target_w / beat_pwr_w)
+    v_tx_out = beat_raw * np.sqrt(target_w / max(float(beat_pwr_w), 1e-30))
 
     #
     alpha_si = 10**(-cfg.omt_iso_db / 20.0)
-    beta_echo = 10**(-cfg.path_loss_db / 20.0)
-    delay_samp = int(cfg.delay_ns * 1e-9 * fs)
+    beta_echo = 10**(-radar_path_loss_db / 20.0)
+    delay_samp = int(delay_ns * 1e-9 * fs)
 
     v_si = v_tx_out * alpha_si if cfg.si_enable else np.zeros_like(v_tx_out)
     v_echo = np.zeros_like(v_tx_out)
     #
-    omega_c_tau = 2.0 * np.pi * (cfg.rf_carrier_ghz * 1e9) * (cfg.delay_ns * 1e-9)
+    omega_c_tau = 2.0 * np.pi * (cfg.rf_carrier_ghz * 1e9) * (delay_ns * 1e-9)
     if delay_samp > 0:
         v_echo[delay_samp:] = v_tx_out[:-delay_samp] * beta_echo * np.exp(-1j * omega_c_tau)
     else:
@@ -2410,7 +2652,11 @@ def run_isac_sim(cfg: SimConfig):
     v_lna_in = v_si + v_echo
     lna_gain_lin = 10 ** (cfg.lna_gain_db / 20.0)
     v_lna_sig = v_lna_in * lna_gain_lin
-    n_in_dbm = -174.0 + 10 * np.log10(fs) + cfg.lna_nf_db
+    dso_analog_bw_hz = min(max(float(cfg.dso_bandwidth_ghz) * 1e9, 1.0), 0.5 * fs)
+    if_chain_bw_hz = min(30e9, dso_analog_bw_hz, 0.5 * fs)
+    rf_noise_bw_hz = dso_analog_bw_hz
+    if_noise_bw_hz = if_chain_bw_hz
+    n_in_dbm = -174.0 + 10 * np.log10(rf_noise_bw_hz) + cfg.lna_nf_db
     n_out_w = 10 ** ((n_in_dbm + cfg.lna_gain_db - 30.0) / 10.0)
     n_out_vrms2 = n_out_w * 50.0
     awgn_lna = np.sqrt(n_out_vrms2 / 2.0) * (np.random.randn(total_samples) + 1j * np.random.randn(total_samples))
@@ -2421,7 +2667,7 @@ def run_isac_sim(cfg: SimConfig):
         p_inst_w = (np.abs(v_rx_in) ** 2) / 50.0
         v_det = cfg.zbd_responsivity_vpw * p_inst_w
         nep_w_sqrt_hz = cfg.zbd_nep_pw_sqrt_hz * 1e-12
-        v_nep_rms = cfg.zbd_responsivity_vpw * nep_w_sqrt_hz * np.sqrt(fs / 2.0)
+        v_nep_rms = cfg.zbd_responsivity_vpw * nep_w_sqrt_hz * np.sqrt(if_noise_bw_hz)
         v_det += np.random.normal(0.0, v_nep_rms, total_samples)
         v_rec = v_det - np.mean(v_det)
     else:
@@ -2433,14 +2679,14 @@ def run_isac_sim(cfg: SimConfig):
     f_axis = np.fft.fftfreq(N_f, 1/fs)
 
     #
-    amp_mask = (np.abs(f_axis) > 30e3) & (np.abs(f_axis) < 30e9)
+    amp_mask = (np.abs(f_axis) > 30e3) & (np.abs(f_axis) < if_chain_bw_hz)
     v_rec_filt = np.real(np.fft.ifft(np.fft.fft(v_rec) * amp_mask))
 
     #
     c2_if_gain_lin = 10**((cfg.c2_drive_gain_db - cfg.c2_cable_loss_db) / 20.0)
-    dso_noise_vrms = calc_uxr0404a_noise_vrms(cfg.dso_vscale_mv, cfg.dso_bandwidth_ghz * 1e9)
+    dso_noise_vrms = calc_uxr0404a_noise_vrms(cfg.dso_vscale_mv, dso_analog_bw_hz)
     v_rec_amp = v_rec_filt * c2_if_gain_lin
-    n_if_w_c2 = 10**((-174.0 + 10*np.log10(fs) + cfg.if_amp_nf_db + cfg.c2_drive_gain_db - 30.0) / 10.0)
+    n_if_w_c2 = 10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c2_drive_gain_db - 30.0) / 10.0)
     v_dso_in = (
         v_rec_amp
         + np.sqrt(n_if_w_c2 * 50.0 / 2.0) * np.random.randn(N_f)
@@ -2451,6 +2697,7 @@ def run_isac_sim(cfg: SimConfig):
     v_demod = hilbert(v_dso_in) if cfg.rx_mode == 'Mixer' else v_dso_in.astype(np.complex128)
 
     # 7. Range Profile & Delay Estimation
+    c2_sic_for_metrics = v_dso_in
     if cfg.rx_mode == 'ZBD':
         # ZBD destroys RF phase. Must correlate intensity envelopes!
         ref_sig = np.abs(v_tx_out)**2
@@ -2464,7 +2711,8 @@ def run_isac_sim(cfg: SimConfig):
             v_si_zbd_raw = cfg.zbd_responsivity_vpw * (np.abs(v_si * lna_gain_lin)**2) / 50.0
             v_si_zbd = v_si_zbd_raw - np.mean(v_si_zbd_raw)
             v_si_zbd = np.real(np.fft.ifft(np.fft.fft(v_si_zbd_raw) * amp_mask)) * c2_if_gain_lin
-            radar_input = v_dso_in - v_si_zbd
+            c2_sic_for_metrics = v_dso_in - v_si_zbd
+            radar_input = v_dso_in
         else:
             radar_input = v_dso_in
 
@@ -2493,7 +2741,7 @@ def run_isac_sim(cfg: SimConfig):
     corr_db = corr_db - np.max(corr_db)
 
     range_axis = np.arange(N) * (3e8 / 2.0 / fs)
-    valid_range = range_axis <= max(20.0, float(cfg.target_dist_m) * 2.5)
+    valid_range = range_axis <= 4.0
     range_axis = range_axis[valid_range]
     range_profile_db = corr_db[valid_range]
     proc_gain_db = 10.0 * np.log10(max(len(ref_sig), 1))
@@ -2512,12 +2760,8 @@ def run_isac_sim(cfg: SimConfig):
 
     # 8. Remote Comm Receiver (1-way Comm Path + DSP)
     #
-    d = cfg.target_dist_m
-    lam = 3e8 / (cfg.rf_carrier_ghz * 1e9)
-    gt_lin = 10 ** (cfg.tx_ant_gain_dbi / 10.0)
-    gr_lin = 10 ** (cfg.rx_ant_gain_dbi / 10.0)
-    loss_com_lin = ((4 * np.pi) ** 2 * d ** 2) / (gt_lin * gr_lin * lam ** 2)
-    path_loss_com_db = 10 * np.log10(loss_com_lin + 1e-30)
+    d = d_link
+    path_loss_com_db = one_way_path_loss_db
     beta_com = 10**(-path_loss_com_db / 20.0)
     delay_samp_com = int((d / 3e8 * 1e9) * 1e-9 * fs)
 
@@ -2544,31 +2788,37 @@ def run_isac_sim(cfg: SimConfig):
         else:
             lw_remote = cfg.linewidth_mhz * 1e6
             phi_remote = generate_phase_noise(total_samples, lw_remote, fs)
-            wander_remote = np.cumsum(np.random.randn(total_samples))
-            wander_remote = (wander_remote - np.mean(wander_remote)) / (np.std(wander_remote) + 1e-12) * (cfg.carrier_wander_mhz * 1e6 if cfg.carrier_wander_enable else 0)
-            phi_remote_total = phi_remote + 2 * np.pi * np.cumsum(wander_remote) / fs
+            if cfg.carrier_wander_enable and cfg.carrier_wander_mhz > 0:
+                wander_remote = np.cumsum(np.random.randn(total_samples))
+                wander_remote = (wander_remote - np.mean(wander_remote)) / (np.std(wander_remote) + 1e-12) * (cfg.carrier_wander_mhz * 1e6)
+                phi_remote_total = phi_remote + 2 * np.pi * np.cumsum(wander_remote) / fs
+            else:
+                phi_remote_total = phi_remote
         v_mix_in_com = v_rx_in_com * np.exp(-1j * phi_remote_total)
         v_rec_com = np.real(v_mix_in_com)
 
     N_f_com = len(v_rec_com)
     f_axis_com = np.fft.fftfreq(N_f_com, 1/fs)
-    amp_mask_com = (np.abs(f_axis_com) > 30e3) & (np.abs(f_axis_com) < 30e9)
+    amp_mask_com = (np.abs(f_axis_com) > 30e3) & (np.abs(f_axis_com) < if_chain_bw_hz)
     v_rec_filt_com = np.real(np.fft.ifft(np.fft.fft(v_rec_com) * amp_mask_com))
     c1_if_gain_lin = 10**((cfg.c1_drive_gain_db - cfg.c1_cable_loss_db) / 20.0)
-    n_if_w_c1 = 10**((-174.0 + 10*np.log10(fs) + cfg.if_amp_nf_db + cfg.c1_drive_gain_db - 30.0) / 10.0)
+    n_if_w_c1 = 10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c1_drive_gain_db - 30.0) / 10.0)
     v_dso_in_com = (
         v_rec_filt_com * c1_if_gain_lin
         + np.sqrt(n_if_w_c1 * 50.0 / 2.0) * np.random.randn(N_f_com)
         + dso_noise_vrms * np.random.randn(N_f_com)
     )
     v_demod_com = hilbert(v_dso_in_com) if cfg.rx_mode == "Mixer" else v_dso_in_com.astype(np.complex128)
-    analysis_bw_hz = max(baud_rate * 1.2, 1.0)
+    analysis_bw_hz = max(occupied_bw_hz * 1.2, 1.0)
     c1_band_metrics = calc_if_band_metrics(v_dso_in_com, fs, f_if, analysis_bw_hz, dso_noise_vrms)
-    c2_band_metrics = calc_if_band_metrics(v_dso_in, fs, f_if, analysis_bw_hz, dso_noise_vrms)
+    c2_band_metrics = calc_if_band_metrics(c2_sic_for_metrics, fs, f_if, analysis_bw_hz, dso_noise_vrms)
 
     # 9. Demodulation (Remote Comm)
     lo_if = np.exp(-1j * 2 * np.pi * f_if * t)
     rx_bb_raw = v_demod_com * lo_if
+    bb_cutoff_hz = min(0.45 * fs, max(0.5 * occupied_bw_hz * 1.35, 0.2e9))
+    bb_freq = np.fft.fftfreq(len(rx_bb_raw), 1 / fs)
+    rx_bb_raw = np.fft.ifft(np.fft.fft(rx_bb_raw) * (np.abs(bb_freq) <= bb_cutoff_hz))
     demod_delay = delay_samp_com
 
     evm_db, ser = float('nan'), float('nan')
@@ -2577,9 +2827,7 @@ def run_isac_sim(cfg: SimConfig):
     sym_tx = np.zeros(0, dtype=np.complex128)
     best_metric = np.inf
 
-    if cfg.waveform == "Tone":
-        pass
-    elif cfg.waveform == "OFDM-16QAM":
+    if waveform_kind == "OFDM":
         lag_candidates = range(max(0, demod_delay - 5), demod_delay + 5)
         for lag in lag_candidates:
             temp_eq, temp_tx, temp_idx = [], [], []
@@ -2619,9 +2867,44 @@ def run_isac_sim(cfg: SimConfig):
                     best_metric = nmse
                     best_eq, best_tx, best_idx = teq, ttx, tidx
 
-    else:
+    elif waveform_kind == "DFT-s-OFDM" and dft_active_bins is not None and dft_pilot_active is not None:
+        lag_candidates = range(max(0, demod_delay - 8), demod_delay + 9)
+        for lag in lag_candidates:
+            rec_syms = []
+            ref_syms = []
+            ref_idx = []
+            for i, tx_block in enumerate(dft_tx_blocks):
+                start_idx = i * dft_n_fft + lag
+                if start_idx + dft_n_fft > len(rx_bb_raw):
+                    break
+                y = rx_bb_raw[start_idx:start_idx + dft_n_fft]
+                h_blk = np.vdot(tx_block, y) / (np.vdot(tx_block, tx_block) + 1e-15)
+                y_eq = y / (h_blk + 1e-15)
+                active = np.fft.fft(y_eq)[dft_active_bins]
+                data_active = (active - dft_sr * dft_pilot_active) / max(dft_sd, 1e-12)
+                scale_i = dft_data_scales[i] if i < len(dft_data_scales) else 1.0
+                sy_est = np.fft.ifft(data_active * scale_i * np.sqrt(max(dft_n_data, 1)))
+                sy_ref = dft_tx_symbol_blocks[i]
+                if len(sy_est) == len(sy_ref):
+                    rec_syms.append(sy_est)
+                    ref_syms.append(sy_ref)
+                    ref_idx.append(sym_idx[i * dft_n_data:(i + 1) * dft_n_data])
+            if rec_syms:
+                teq = np.concatenate(rec_syms)
+                ttx = np.concatenate(ref_syms)
+                tidx = np.concatenate(ref_idx)
+                scale = np.sqrt(np.mean(np.abs(ttx) ** 2) / (np.mean(np.abs(teq) ** 2) + 1e-15))
+                teq = teq * scale
+                ph = np.vdot(teq, ttx)
+                teq = teq * np.exp(-1j * np.angle(ph + 1e-15))
+                nmse = np.mean(np.abs(teq - ttx) ** 2) / (np.mean(np.abs(ttx) ** 2) + 1e-15)
+                if nmse < best_metric:
+                    best_metric = nmse
+                    best_eq, best_tx, best_idx = teq, ttx, tidx
+
+    elif waveform_kind not in {"Tone", "FMCW"}:
         # QAM / LFM-QAM processing
-        if "LFM" in cfg.waveform:
+        if waveform_kind == "LFM-QAM":
             local_chirp = np.zeros_like(chirp)
             if demod_delay > 0:
                 local_chirp[demod_delay:] = chirp[:-demod_delay]
@@ -2710,14 +2993,28 @@ def run_isac_sim(cfg: SimConfig):
         evm_db = 20 * np.log10(evm + 1e-15)
         rx_idx = qam_hard_demod(sym_eq, cfg.modulation)
         ser = float(np.mean(best_idx != rx_idx))
-    effective_snr_db = calc_effective_snr_from_evm_db(evm_db)
+    elif waveform_kind in {"Tone", "FMCW"}:
+        sym_eq = np.zeros(0, dtype=np.complex128)
+        sym_tx = np.zeros(0, dtype=np.complex128)
 
+    osa_display = make_osa_display_spectrum(cfg)
+    rf_display = make_utcpd_rf_display_spectrum(cfg)
+    rf_line_powers = calc_utcpd_rf_line_powers(cfg)
     return {
         "bb_sig": bb_sig, "fs": fs, "rf_c": cfg.rf_carrier_ghz * 1e9, "step": step, "frame_len": frame_len, "num_frames": num_frames,
+        "waveform_kind": waveform_kind,
+        "occupied_bw_hz": occupied_bw_hz,
+        "if_center_hz": f_if,
+        "radar_path_loss_db": radar_path_loss_db,
+        "one_way_fspl_db": one_way_path_loss_db,
+        "rf_noise_bw_hz": rf_noise_bw_hz,
+        "if_noise_bw_hz": if_noise_bw_hz,
+        "optical_center_freq_thz": cfg.optical_center_freq_thz,
         "e_data": e_data, "e_lo": e_lo, "v_tx_out": v_tx_out,
         "v_rx_in_rad": v_rx_in, "v_si": v_si, "v_echo": v_echo,
-        "v_rec_com": v_dso_in_com, "v_rec_c1": v_dso_in_com, "v_rec_c2": v_dso_in,
-        "sym_tx": sym_tx, "sym_eq": sym_eq, "evm_db": evm_db, "effective_snr_db": effective_snr_db, "ser": ser,
+        "v_rec_com": v_dso_in_com, "v_rec_c1": v_dso_in_com, "v_rec_c2": c2_sic_for_metrics,
+        "v_rec_c2_raw": v_dso_in,
+        "sym_tx": sym_tx, "sym_eq": sym_eq, "evm_db": evm_db, "ser": ser,
         "range_axis_m": range_axis, "range_profile_db": range_profile_db,
         "c1_band_metrics": c1_band_metrics, "c2_band_metrics": c2_band_metrics,
         "radar_snr_db": radar_snr_db, "pslr_db": pslr_db, "processing_gain_db": proc_gain_db,
@@ -2727,23 +3024,13 @@ def run_isac_sim(cfg: SimConfig):
         "optical_lo_laser_w": p_lo_laser_w,
         "optical_carrier_w": p_carrier_w,
         "optical_dsb_w": p_dsb_w,
-        "optical_sideband_w": p_sideband_w,
-        "cspr_db": effective_cspr_db,
-        "osa_sideband_gap_db": calc_osa_sideband_gap_from_total_cspr_db(effective_cspr_db),
-        "data_power_ratio_db": calc_data_power_ratio_db(effective_cspr_db),
-        "mzm_input_dbm": mzm_input_dbm,
-        "optical_spectrum_thz": np.asarray([
-            193.4 - cfg.if_ghz / 1000.0,
-            193.4,
-            193.4 + cfg.if_ghz / 1000.0,
-            193.4 + cfg.rf_carrier_ghz / 1000.0,
-        ], dtype=np.float64),
-        "optical_spectrum_dbm": 10.0 * np.log10(np.maximum(np.asarray([
-            p_sideband_w,
-            p_carrier_w,
-            p_sideband_w,
-            p_lo_laser_w,
-        ], dtype=np.float64), 1e-30) / 1e-3),
+        "optical_sideband_each_w": optical_lines["sideband_each_w"],
+        "optical_line_powers": optical_lines,
+        "utcpd_rf_line_powers": rf_line_powers,
+        "mzm_metrics": mzm_metrics,
+        "observed_cspr_db": cfg.cspr_db,
+        "osa_display": osa_display,
+        "utcpd_rf_display": rf_display,
     }
 
 class PhotonicIsacSimPanel:
@@ -2772,6 +3059,25 @@ class PhotonicIsacSimPanel:
         self._build_ui()
         self._init_plot()
         self._update_table()
+
+    def _param_float(self, key: str, default: float) -> float:
+        try:
+            raw = self.params[key].get().strip()
+            if raw == "":
+                return float(default)
+            return float(raw)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _var_float(var, default: float) -> float:
+        try:
+            raw = var.get().strip()
+            if raw == "":
+                return float(default)
+            return float(raw)
+        except Exception:
+            return float(default)
 
     def _build_ui(self):
         # LEFT PANEL (parameters)
@@ -2820,31 +3126,35 @@ class PhotonicIsacSimPanel:
 
         self.rows = {
             "tx":        self.table.insert("", "end", text="UTC-PD Output (TX)", values=("0.00", "dBm")),
+            "tx_lines":  self.table.insert("", "end", text="TX Carrier / DSB",   values=("N/A", "dBm")),
             "opt_pwr":   self.table.insert("", "end", text="UTC-PD Optical In", values=("0.00", "mW")),
+            "osa_tones": self.table.insert("", "end", text="Optical Tones",       values=("auto / 193.410", "THz")),
+            "osa_lines": self.table.insert("", "end", text="UTC-PD Tone / DSB",   values=("N/A", "dBm")),
+            "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
+            "obs_cspr":  self.table.insert("", "end", text="Effective CSPR",      values=("20.0", "dB")),
             "uxr_noise": self.table.insert("", "end", text="UXR Noise",         values=("0.00", "mVrms")),
             "delay":     self.table.insert("", "end", text="Radar Echo Delay",  values=("0.00", "ns")),
-            "loss":      self.table.insert("", "end", text="C2 Radar Path Loss", values=("0.00", "dB")),
+            "loss":      self.table.insert("", "end", text="C2 Radar Loss (1/R^4)", values=("0.00", "dB")),
             "echo":      self.table.insert("", "end", text="C2 RF Echo Power",  values=("0.00", "dBm")),
             "si":        self.table.insert("", "end", text="Local SI Power",    values=("0.00", "dBm")),
             "lna":       self.table.insert("", "end", text="LNA Out (Sig)",     values=("0.00", "dBm")),
             "lna_total": self.table.insert("", "end", text="LNA Out (Total)",   values=("0.00", "dBm")),
             "sinr":      self.table.insert("", "end", text="Radar SINR",        values=("0.00", "dB")),
-            "comm_loss": self.table.insert("", "end", text="C1 One-way FSPL",   values=("0.00", "dB")),
+            "comm_loss": self.table.insert("", "end", text="C1 FSPL (1/R^2)",   values=("0.00", "dB")),
             "comm_rx":   self.table.insert("", "end", text="C1 RF Rx Power",    values=("0.00", "dBm")),
             "if_chain":  self.table.insert("", "end", text="C1/C2 IF Gain",     values=("0/0", "dB")),
             "c1_if":     self.table.insert("", "end", text="C1 IF Band Est.",   values=("0.00", "dBm")),
             "c2_if":     self.table.insert("", "end", text="C2 IF Band Est.",   values=("0.00", "dBm")),
             "c1_band":   self.table.insert("", "end", text="C1 Band Power",     values=("N/A", "dBm")),
             "c2_band":   self.table.insert("", "end", text="C2 Band Power",     values=("N/A", "dBm")),
-            "comm_snr":  self.table.insert("", "end", text="C1 Spectrum SNR",   values=("0.00", "dB")),
-            "eff_snr":   self.table.insert("", "end", text="C1 Effective SNR",  values=("N/A", "dB")),
+            "c1_noise":  self.table.insert("", "end", text="C1 Noise Power",    values=("N/A", "dBm")),
+            "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
+            "comm_snr":  self.table.insert("", "end", text="C1 Comm SNR",       values=("0.00", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
             "proc_gain": self.table.insert("", "end", text="Processing Gain",   values=("N/A", "dB")),
-            "cspr":      self.table.insert("", "end", text="OSA SB Gap",        values=("N/A", "dBc/line")),
-            "data_ratio": self.table.insert("", "end", text="DSB/Data Ratio",   values=("N/A", "dB")),
-            "evm_db":    self.table.insert("", "end", text="Comm EVM",          values=("N/A", "dB")),
             "evm_pct":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "%")),
+            "evm_snr":   self.table.insert("", "end", text="EVM-implied SNR",    values=("N/A", "dB")),
         }
 
         # Left parameters
@@ -2901,53 +3211,50 @@ class PhotonicIsacSimPanel:
 
         # removed fs_gsps
         add_p(1, "linewidth_mhz", "Laser Linewidth [MHz]", "0.015")
-        add_p(2, "cspr_auto", "Auto CSPR [1/0]", "0")
-        add_p(3, "cspr_db", "Manual CSPR [dB]", "17.0")
-        add_p(4, "mzm_rf_vpi_v", "MZM RF Vpi [V]", "7.0")
-        add_p(5, "awg_drive_dbm", "AWG Output [dBm]", "-10.0")
-        add_p(6, "mzm_drive_amp_gain_db", "MZM Drive Amp [dB]", "8.0")
-        add_p(7, "osa_sideband_gap_db", "OSA SB Gap [dB]", "20.0")
-        add_p(8, "utcpd_resp_aw", "UTC-PD Resp. [A/W]", "0.24")
+        add_p(2, "cspr_db", "CSPR @ AWG -10 dBm [dB]", "20.0")
+        add_p(3, "opt_center_thz", "Opt Tone Center [THz]", "193.41")
+        add_p(4, "mzm_drive_gain_db", "MZM Drive Amp [dB]", "8.0")
+        add_p(5, "utcpd_resp_aw", "UTC-PD Resp. [A/W]", "0.24")
         # removed baud_gbaud
         # removed if_ghz
         self.waveform_var = tk.StringVar(value="16QAM") # Hidden, managed by awg
         # removed chirp_bw_ghz
 
-        ttk.Checkbutton(grp, text="Enable Carrier Wander", variable=self.carrier_wander_enable_var).grid(row=9, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=10, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Coherence Mode").grid(row=11, column=0, sticky="w", pady=2)
-        ttk.Combobox(grp, textvariable=self.coherence_var, values=["Free-running", "Self-coherent"], width=12).grid(row=11, column=1)
-        ttk.Label(grp, text="RX Front-end").grid(row=12, column=0, sticky="w", pady=2)
-        ttk.Combobox(grp, textvariable=self.rx_mode_var, values=["Mixer", "ZBD"], width=12).grid(row=12, column=1)
+        ttk.Checkbutton(grp, text="Enable Carrier Wander", variable=self.carrier_wander_enable_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Coherence Mode").grid(row=9, column=0, sticky="w", pady=2)
+        ttk.Combobox(grp, textvariable=self.coherence_var, values=["Free-running", "Self-coherent"], width=12).grid(row=9, column=1)
+        ttk.Label(grp, text="RX Front-end").grid(row=10, column=0, sticky="w", pady=2)
+        ttk.Combobox(grp, textvariable=self.rx_mode_var, values=["Mixer", "ZBD"], width=12).grid(row=10, column=1)
 
-        ttk.Separator(grp, orient="horizontal").grid(row=13, column=0, columnspan=2, sticky="ew", pady=5)
-        add_p(14, "utcpd_photocurrent_ma", "UTC-PD Photocurrent [mA]", "7.0")
-        add_p(15, "lna_gain_db",  "THz LNA Gain [dB]",      "13.0")
-        add_p(16, "lna_nf_db",    "LNA NF [dB]",            "8.0")
-        add_p(17, "zbd_resp_vpw", "VDI ZBD Resp. [V/W]",    "1700")
-        add_p(18, "zbd_nep_pw",   "VDI ZBD NEP [pW/sqrtHz]","4.8")
-        add_p(19, "c1_drive_gain_db","C1 Drive Amp [dB]",   "30.0")
-        add_p(20, "if_amp_nf_db", "IF Amp NF [dB]",         "5.0")
-        add_p(21, "c2_drive_gain_db","C2 Drive Amp [dB]",   "24.0")
-        add_p(22, "tx_ant_gain_dbi", "TX Ant Gain [dBi]",   "25.0")
-        add_p(23, "rx_ant_gain_dbi", "RX Ant Gain [dBi]",   "25.0")
-        add_p(24, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "0.0")
-        add_p(25, "c2_cable_loss_db", "C2 Cable Loss [dB]", "0.0")
-        add_p(26, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
-        add_p(27, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
-        add_p(28, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
-        add_p(29, "rcs_sqm",      "Target RCS [m^2]",       "1.0")
+        ttk.Separator(grp, orient="horizontal").grid(row=11, column=0, columnspan=2, sticky="ew", pady=5)
+        add_p(12, "utcpd_photocurrent_ma", "UTC-PD Photocurrent [mA]", "7.0")
+        add_p(13, "lna_gain_db",  "THz LNA Gain [dB]",      "13.0")
+        add_p(14, "lna_nf_db",    "LNA NF [dB]",            "8.0")
+        add_p(15, "zbd_resp_vpw", "VDI ZBD Resp. [V/W]",    "1700")
+        add_p(16, "zbd_nep_pw",   "VDI ZBD NEP [pW/sqrtHz]","4.8")
+        add_p(17, "c1_drive_gain_db","C1 Drive Amp [dB]",   "30.0")
+        add_p(18, "if_amp_nf_db", "IF Amp NF [dB]",         "5.0")
+        add_p(19, "c2_drive_gain_db","C2 Drive Amp [dB]",   "24.0")
+        add_p(20, "tx_ant_gain_dbi", "TX Ant Gain [dBi]",   "30.0")
+        add_p(21, "rx_ant_gain_dbi", "RX Ant Gain [dBi]",   "30.0")
+        add_p(22, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "0.0")
+        add_p(23, "c2_cable_loss_db", "C2 Cable Loss [dB]", "0.0")
+        add_p(24, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
+        add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
+        add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
+        add_p(27, "rcs_sqm",      "Target RCS [m^2]",       "0.01")
 
-        ttk.Label(grp, text="Target Dist [m]").grid(row=30, column=0, sticky="w", pady=2)
+        ttk.Label(grp, text="Target Dist [m]").grid(row=28, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
-        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=30, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=28, column=1, sticky="w")
 
         self.sc_fde_enable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=31, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Post-EQ Taps").grid(row=32, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=29, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Post-EQ Taps").grid(row=30, column=0, sticky="w", pady=2)
         self.sc_fde_taps_var = tk.StringVar(value="1")
-        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=32, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=30, column=1, sticky="w")
 
         # Plot on right
         self.fig = Figure(figsize=(8, 8), dpi=100)
@@ -2957,45 +3264,51 @@ class PhotonicIsacSimPanel:
 
     def _update_table(self, *args):
         try:
-            def _float_or(raw, default: float) -> float:
-                try:
-                    s = str(raw).strip()
-                    return float(s) if s else float(default)
-                except Exception:
-                    return float(default)
-
-            d = float(self.params["target_dist_m"].get())
-            tx_dbm = calc_utcpd_output_dbm(float(self.params["utcpd_photocurrent_ma"].get()))
+            d = self._param_float("target_dist_m", 1.0)
+            photocurrent_ma = self._param_float("utcpd_photocurrent_ma", 7.0)
+            utcpd_resp = self._param_float("utcpd_resp_aw", 0.24)
+            tx_dbm = calc_utcpd_output_dbm(photocurrent_ma)
             opt_mw = (
-                float(self.params["utcpd_photocurrent_ma"].get())
-                / max(float(self.params["utcpd_resp_aw"].get()), 1e-12)
+                photocurrent_ma
+                / max(utcpd_resp, 1e-12)
+            )
+            cspr_db = self._param_float("cspr_db", 20.0)
+            opt_center = self._param_float("opt_center_thz", 193.41)
+            try:
+                rf_ghz = self._var_float(self.awg_source.rf_var, 280.0) if getattr(self, "awg_source", None) else 280.0
+            except Exception:
+                rf_ghz = 280.0
+            opt_tone2 = opt_center
+            opt_tone1 = opt_center - rf_ghz / 1000.0
+            try:
+                awg_rf_power_dbm = self._var_float(self.awg_source.power_dbm_var, -10.0) if getattr(self, "awg_source", None) else -10.0
+            except Exception:
+                awg_rf_power_dbm = -10.0
+            optical_cfg = SimConfig(
+                optical_center_freq_thz=opt_center,
+                rf_carrier_ghz=rf_ghz,
+                cspr_db=cspr_db,
+                awg_rf_power_dbm=awg_rf_power_dbm,
+                awg_ref_power_dbm=-10.0,
+                utcpd_photocurrent_ma=photocurrent_ma,
+                utcpd_responsivity_a_per_w=utcpd_resp,
+                utcpd_target_dbm=tx_dbm,
+            )
+            optical_lines = calc_utcpd_optical_line_powers(optical_cfg)
+            rf_lines = calc_utcpd_rf_line_powers(optical_cfg)
+            mzm_metrics = calc_mzm_drive_metrics(
+                awg_rf_power_dbm,
+                self._param_float("mzm_drive_gain_db", 8.0),
+                cspr_db,
+                -10.0,
             )
             uxr_noise_mv = calc_uxr0404a_noise_vrms(
-                float(self.params["dso_vscale_mv"].get()),
-                float(self.params["dso_bw_ghz"].get()) * 1e9,
+                self._param_float("dso_vscale_mv", 100.0),
+                self._param_float("dso_bw_ghz", 40.0) * 1e9,
             ) * 1e3
-            try:
-                rf_ghz = float(self.awg_source.rf_var.get()) if getattr(self, "awg_source", None) else 270.0
-            except Exception:
-                rf_ghz = 270.0
-            tx_gain = float(self.params.get("tx_ant_gain_dbi", tk.StringVar(value="25.0")).get())
-            rx_gain = float(self.params.get("rx_ant_gain_dbi", tk.StringVar(value="25.0")).get())
-            rcs = float(self.params["rcs_sqm"].get())
-            try:
-                awg_output_dbm = _float_or(self.awg_source.power_dbm_var.get(), -10.0) if getattr(self, "awg_source", None) else _float_or(self.params["awg_drive_dbm"].get(), -10.0)
-            except Exception:
-                awg_output_dbm = _float_or(self.params["awg_drive_dbm"].get(), -10.0)
-            drive_amp_gain_db = _float_or(self.params["mzm_drive_amp_gain_db"].get(), 8.0)
-            mzm_input_dbm = awg_output_dbm + drive_amp_gain_db
-            mzm_vpi = _float_or(self.params["mzm_rf_vpi_v"].get(), 7.0)
-            cspr_auto = _float_or(self.params["cspr_auto"].get(), 0.0) >= 0.5
-            cspr_db = (
-                calc_mzm_cspr_db(mzm_input_dbm, mzm_vpi)
-                if cspr_auto
-                else calc_total_cspr_from_osa_sideband_gap_db(_float_or(self.params["osa_sideband_gap_db"].get(), 20.0))
-            )
-            sideband_gap_db = calc_osa_sideband_gap_from_total_cspr_db(cspr_db)
-            data_pwr_ratio_db = calc_data_power_ratio_db(cspr_db)
+            tx_gain = self._param_float("tx_ant_gain_dbi", 30.0)
+            rx_gain = self._param_float("rx_ant_gain_dbi", 30.0)
+            rcs = self._param_float("rcs_sqm", 0.01)
             link = calc_isac_link_budget(
                 distance_m=d,
                 rf_ghz=rf_ghz,
@@ -3003,47 +3316,63 @@ class PhotonicIsacSimPanel:
                 tx_gain_dbi=tx_gain,
                 rx_gain_dbi=rx_gain,
                 rcs_sqm=rcs,
-                lna_gain_db=float(self.params["lna_gain_db"].get()),
-                c1_drive_gain_db=float(self.params["c1_drive_gain_db"].get()),
-                c2_drive_gain_db=float(self.params["c2_drive_gain_db"].get()),
-                c1_cable_loss_db=float(self.params["c1_cable_loss_db"].get()),
-                c2_cable_loss_db=float(self.params["c2_cable_loss_db"].get()),
+                lna_gain_db=self._param_float("lna_gain_db", 13.0),
+                c1_drive_gain_db=self._param_float("c1_drive_gain_db", 30.0),
+                c2_drive_gain_db=self._param_float("c2_drive_gain_db", 24.0),
+                c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
+                c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
             )
             delay_ns = link["delay_ns"]
             loss_db = link["radar_path_loss_db"]
             echo_dbm = link["c2_rf_dbm"]
             si_enable = bool(self.si_enable_var.get())
-            si_dbm = tx_dbm - float(self.params["omt_iso_db"].get()) if si_enable else -300.0
-            lna_out_dbm = max(echo_dbm, si_dbm) + float(self.params["lna_gain_db"].get())
-            # Use AWG fs for bandwidth approximation since fs_gsps param was removed
-            if getattr(self, "awg_fs_var", None):
-                rx_bw_hz = float(self.awg_fs_var.get()) * 1e9
-            else:
-                rx_bw_hz = 120e9
+            si_dbm = tx_dbm - self._param_float("omt_iso_db", 25.0) if si_enable else -300.0
+            lna_gain_db = self._param_float("lna_gain_db", 13.0)
+            lna_nf_db = self._param_float("lna_nf_db", 8.0)
+            lna_out_dbm = max(echo_dbm, si_dbm) + lna_gain_db
+            try:
+                waveform_kind = classify_isac_waveform(self.awg_source.waveform_var.get()) if getattr(self, "awg_source", None) else "LFM-QAM"
+                baud_for_bw = self._var_float(self.awg_source.symbol_rate_var, 10.0) if getattr(self, "awg_source", None) else 10.0
+                chirp_for_bw = baud_for_bw
+                rrc_for_bw = self._var_float(self.awg_source.rrc_beta_var, 0.20) if getattr(self, "awg_source", None) else 0.20
+            except Exception:
+                waveform_kind, baud_for_bw, chirp_for_bw, rrc_for_bw = "LFM-QAM", 10.0, 10.0, 0.20
+            bw_cfg = SimConfig(
+                waveform=waveform_kind,
+                baud_gbaud=baud_for_bw,
+                chirp_bw_ghz=chirp_for_bw,
+                rrc_beta=rrc_for_bw,
+            )
+            occupied_bw_hz = estimate_waveform_bandwidth_hz(bw_cfg, waveform_kind)
+            dso_bw_hz = self._param_float("dso_bw_ghz", 40.0) * 1e9
+            rx_bw_hz = max(dso_bw_hz, 1.0)
+            if_noise_bw_hz = min(30e9, rx_bw_hz)
 
-            lna_noise_dbm = -174.0 + 10 * np.log10(rx_bw_hz) + float(self.params["lna_nf_db"].get()) + float(self.params["lna_gain_db"].get())
-            zbd_noise_v = float(self.params["zbd_resp_vpw"].get()) * float(self.params["zbd_nep_pw"].get()) * 1e-12 * np.sqrt(rx_bw_hz / 2.0)
+            lna_noise_dbm = -174.0 + 10 * np.log10(rx_bw_hz) + lna_nf_db + lna_gain_db
+            zbd_noise_v = self._param_float("zbd_resp_vpw", 1700.0) * self._param_float("zbd_nep_pw", 4.8) * 1e-12 * np.sqrt(if_noise_bw_hz)
 
             # Link-budget SINR approximation
+            #
+            data_pwr_ratio_db = -abs(cspr_db)
             p_echo_lin = 10 ** ((echo_dbm + data_pwr_ratio_db) / 10.0)
             p_si_lin = 10 ** ((si_dbm + data_pwr_ratio_db) / 10.0)
 
             #
             try:
                 if getattr(self, "awg_source", None):
-                    baud_rate_hz = float(self.awg_source.symbol_rate_var.get()) * 1e9
+                    baud_rate_hz = self._var_float(self.awg_source.symbol_rate_var, 10.0) * 1e9
                 else:
                     baud_rate_hz = 10e9
             except:
                 baud_rate_hz = 10e9
-            p_noise_in_dbm = -174.0 + 10 * np.log10(baud_rate_hz) + float(self.params["lna_nf_db"].get())
+            p_noise_in_dbm = -174.0 + 10 * np.log10(baud_rate_hz) + lna_nf_db
             p_noise_lin = 10 ** (p_noise_in_dbm / 10.0)
 
             sinr_lin = p_echo_lin / (p_si_lin + p_noise_lin + 1e-30)
             sinr_db = 10 * np.log10(sinr_lin + 1e-30)
 
-            p_echo_out_lin = 10 ** (echo_dbm / 10.0) * 10 ** (float(self.params["lna_gain_db"].get()) / 10.0)
-            p_si_out_lin = 10 ** (si_dbm / 10.0) * 10 ** (float(self.params["lna_gain_db"].get()) / 10.0)
+            p_echo_out_lin = 10 ** (echo_dbm / 10.0) * 10 ** (lna_gain_db / 10.0)
+            p_si_out_lin = 10 ** (si_dbm / 10.0) * 10 ** (lna_gain_db / 10.0)
             p_noise_out_lin = 10 ** (lna_noise_dbm / 10.0)
             lna_total_dbm = 10 * np.log10(p_echo_out_lin + p_si_out_lin + p_noise_out_lin + 1e-30)
 
@@ -3056,14 +3385,23 @@ class PhotonicIsacSimPanel:
             # Measured EVM is updated after simulation run.
 
             self.table.item(self.rows["tx"], values=(f"{tx_dbm:.1f}", "dBm"))
+            if "tx_lines" in self.rows:
+                self.table.item(self.rows["tx_lines"], values=(f"{rf_lines['carrier_dbm']:.1f} / {rf_lines['sideband_each_dbm']:.1f}", "dBm"))
             if "opt_pwr" in self.rows:
                 self.table.item(self.rows["opt_pwr"], values=(f"{opt_mw:.2f}", "mW"))
+            if "osa_tones" in self.rows:
+                self.table.item(self.rows["osa_tones"], values=(f"{opt_tone1:.3f} / {opt_tone2:.3f}", "THz"))
+            if "osa_lines" in self.rows:
+                self.table.item(
+                    self.rows["osa_lines"],
+                    values=(f"{optical_lines['mzm_carrier_dbm']:.1f} / {optical_lines['sideband_each_dbm']:.1f}", "dBm"),
+                )
+            if "mzm_rf" in self.rows:
+                self.table.item(self.rows["mzm_rf"], values=(f"{mzm_metrics['rf_in_dbm']:.1f}", "dBm"))
+            if "obs_cspr" in self.rows:
+                self.table.item(self.rows["obs_cspr"], values=(f"{mzm_metrics['effective_cspr_db']:.1f}", "dB"))
             if "uxr_noise" in self.rows:
                 self.table.item(self.rows["uxr_noise"], values=(f"{uxr_noise_mv:.3f}", "mVrms"))
-            if "cspr" in self.rows:
-                self.table.item(self.rows["cspr"], values=(f"{sideband_gap_db:.2f}", "dBc/line"))
-            if "data_ratio" in self.rows:
-                self.table.item(self.rows["data_ratio"], values=(f"{data_pwr_ratio_db:.2f}", "dB"))
             self.table.item(self.rows["delay"], values=(f"{delay_ns:.2f}", "ns"))
             self.table.item(self.rows["loss"], values=(f"{loss_db:.1f}", "dB"))
             self.table.item(self.rows["echo"], values=(f"{echo_dbm:.1f}", "dBm"))
@@ -3088,51 +3426,58 @@ class PhotonicIsacSimPanel:
 
     def _cfg_from_ui(self) -> SimConfig:
         awg = self.awg_source
-        try:
-            awg_drive_dbm = float(awg.power_dbm_var.get()) if awg else float(self.params["awg_drive_dbm"].get())
-        except Exception:
-            awg_drive_dbm = float(self.params["awg_drive_dbm"].get())
-        cspr_auto = float(self.params["cspr_auto"].get()) >= 0.5
+        def _awg_float(attr: str, fallback: float) -> float:
+            try:
+                var = getattr(awg, attr)
+                raw = var.get().strip()
+                if raw == "":
+                    return float(fallback)
+                return float(raw)
+            except Exception:
+                return float(fallback)
+        awg_rf_dbm = _awg_float("power_dbm_var", -10.0) if awg else -10.0
+        rf_ghz = _awg_float("rf_var", 280.0) if awg else 280.0
         cfg = SimConfig(
-            fs_gsps=float(awg.fs_var.get()) if awg else 100.0,
-            linewidth_mhz=float(self.params["linewidth_mhz"].get()),
-            baud_gbaud=float(awg.symbol_rate_var.get()) if awg else 10.0,
-            if_ghz=float(awg.if_var.get()) if awg else 10.0,
-            rf_carrier_ghz=float(awg.rf_var.get()) if awg else 270.0,
+            fs_gsps=_awg_float("fs_var", 100.0) if awg else 100.0,
+            linewidth_mhz=self._param_float("linewidth_mhz", 0.015),
+            baud_gbaud=_awg_float("symbol_rate_var", 10.0) if awg else 10.0,
+            if_ghz=_awg_float("if_var", 12.0) if awg else 12.0,
+            rf_carrier_ghz=rf_ghz,
             waveform=awg.waveform_var.get().strip() if awg else "LFM-QAM",
             modulation=awg.modulation_var.get().strip() if awg else "16QAM",
-            chirp_bw_ghz=float(awg.symbol_rate_var.get()) if awg else 2.0,
+            chirp_bw_ghz=_awg_float("symbol_rate_var", 2.0) if awg else 2.0,
             coherence_mode=self.coherence_var.get().strip(),
             rx_mode=self.rx_mode_var.get().strip(),
             si_enable=bool(self.si_enable_var.get()),
             carrier_wander_enable=bool(self.carrier_wander_enable_var.get()),
-            carrier_wander_mhz=300.0,
-            utcpd_photocurrent_ma=float(self.params["utcpd_photocurrent_ma"].get()),
-            utcpd_target_dbm=calc_utcpd_output_dbm(float(self.params["utcpd_photocurrent_ma"].get())),
-            utcpd_responsivity_a_per_w=float(self.params["utcpd_resp_aw"].get()),
-            cspr_db=float(self.params["cspr_db"].get()),
-            mzm_rf_vpi_v=float(self.params["mzm_rf_vpi_v"].get()),
-            awg_drive_dbm=awg_drive_dbm,
-            mzm_drive_amp_gain_db=float(self.params["mzm_drive_amp_gain_db"].get()),
-            osa_sideband_gap_db=float(self.params["osa_sideband_gap_db"].get()),
-            cspr_auto=cspr_auto,
-            lna_gain_db=float(self.params["lna_gain_db"].get()),
-            lna_nf_db=float(self.params["lna_nf_db"].get()),
-            zbd_responsivity_vpw=float(self.params["zbd_resp_vpw"].get()),
-            zbd_nep_pw_sqrt_hz=float(self.params["zbd_nep_pw"].get()),
-            c1_drive_gain_db=float(self.params["c1_drive_gain_db"].get()),
-            c2_drive_gain_db=float(self.params["c2_drive_gain_db"].get()),
-            if_amp_nf_db=float(self.params["if_amp_nf_db"].get()),
-            dso_vscale_mv=float(self.params["dso_vscale_mv"].get()),
-            dso_bandwidth_ghz=float(self.params["dso_bw_ghz"].get()),
-            omt_iso_db=float(self.params["omt_iso_db"].get()),
-            ant_gain_dbi=float(self.params["tx_ant_gain_dbi"].get()),
-            tx_ant_gain_dbi=float(self.params["tx_ant_gain_dbi"].get()),
-            rx_ant_gain_dbi=float(self.params["rx_ant_gain_dbi"].get()),
-            c1_cable_loss_db=float(self.params["c1_cable_loss_db"].get()),
-            c2_cable_loss_db=float(self.params["c2_cable_loss_db"].get()),
-            target_rcs_sqm=float(self.params["rcs_sqm"].get()),
-            target_dist_m=max(float(self.params["target_dist_m"].get()), 0.1),
+            carrier_wander_mhz=10.0 if self.carrier_wander_enable_var.get() else 0.0,
+            optical_center_freq_thz=self._param_float("opt_center_thz", 193.41),
+            awg_rf_power_dbm=awg_rf_dbm,
+            mzm_drive_gain_db=self._param_float("mzm_drive_gain_db", 8.0),
+            utcpd_photocurrent_ma=self._param_float("utcpd_photocurrent_ma", 7.0),
+            utcpd_target_dbm=calc_utcpd_output_dbm(self._param_float("utcpd_photocurrent_ma", 7.0)),
+            utcpd_responsivity_a_per_w=self._param_float("utcpd_resp_aw", 0.24),
+            cspr_db=self._param_float("cspr_db", 20.0),
+            lna_gain_db=self._param_float("lna_gain_db", 13.0),
+            lna_nf_db=self._param_float("lna_nf_db", 8.0),
+            zbd_responsivity_vpw=self._param_float("zbd_resp_vpw", 1700.0),
+            zbd_nep_pw_sqrt_hz=self._param_float("zbd_nep_pw", 4.8),
+            c1_drive_gain_db=self._param_float("c1_drive_gain_db", 30.0),
+            c2_drive_gain_db=self._param_float("c2_drive_gain_db", 24.0),
+            if_amp_nf_db=self._param_float("if_amp_nf_db", 5.0),
+            dso_vscale_mv=self._param_float("dso_vscale_mv", 100.0),
+            dso_bandwidth_ghz=self._param_float("dso_bw_ghz", 40.0),
+            omt_iso_db=self._param_float("omt_iso_db", 25.0),
+            ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
+            tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
+            rx_ant_gain_dbi=self._param_float("rx_ant_gain_dbi", 30.0),
+            c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
+            c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
+            target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
+            target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
+            syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
+            pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
+            rrc_beta=float(np.clip(_awg_float("rrc_beta_var", 0.20), 0.01, 1.0)),
         )
 
         cfg.delay_ns = (2.0 * cfg.target_dist_m) / 3e8 * 1e9
@@ -3171,7 +3516,7 @@ class PhotonicIsacSimPanel:
             self.lines.append(line)
             ax.set_title(titles[i])
             ax.grid(True, alpha=0.45)
-            ax.set_ylabel("PSD [dBm/Hz]")
+            ax.set_ylabel("Power [dBm]" if i < 2 else "PSD [dBm/Hz]")
 
         self.l_lo, = self.axes[0].plot([], [], lw=1.2, color="black", label="Opt. LO")
         self.axes[0].legend(loc="upper right", fontsize=8)
@@ -3179,7 +3524,7 @@ class PhotonicIsacSimPanel:
         self.ax_range.set_xlabel("Range [m]")
         self.ax_range.set_ylabel("Magnitude [dB]")
         self.ax_range.grid(True, alpha=0.45)
-        self.ax_range.set_xlim(0, 10)
+        self.ax_range.set_xlim(0, 4)
 
         self.ax_const.set_title("6) Constellation")
         self.ax_const.set_xlim(-1.8, 1.8); self.ax_const.set_ylim(-1.8, 1.8)
@@ -3201,12 +3546,17 @@ class PhotonicIsacSimPanel:
             c = cfg.rf_carrier_ghz
             #
             span = cfg.if_ghz + (cfg.baud_gbaud / 2.0) + 5.0
+            zbd_span = min(
+                30.0,
+                max(span, 2.0 * cfg.if_ghz + cfg.baud_gbaud + 3.0),
+            )
 
             #
-            self.axes[0].set_xlim(193.35, 193.40 + (c / 1000.0) + 0.05)
+            opt_center = cfg.optical_center_freq_thz
+            self.axes[0].set_xlim(opt_center - cfg.rf_carrier_ghz / 1000.0 - 0.03, opt_center + cfg.if_ghz / 1000.0 + 0.03)
             self.axes[1].set_xlim(c - span, c + span)
-            self.axes[2].set_xlim(0.0, span)
-            self.axes[3].set_xlim(0.0, span)
+            self.axes[2].set_xlim(0.0, zbd_span)
+            self.axes[3].set_xlim(0.0, zbd_span)
 
             #
             #
@@ -3224,25 +3574,26 @@ class PhotonicIsacSimPanel:
             lna_sig_psd_dbmhz = p_lna_sig_dbm - bw_db
             lna_noise_psd_dbmhz = p_lna_noise_dbm - bw_db
 
-            opt_dbm = np.asarray(self.data.get("optical_spectrum_dbm", []), dtype=np.float64)
-            if opt_dbm.size > 0 and np.any(np.isfinite(opt_dbm)):
-                self.axes[0].set_ylim(float(np.nanmin(opt_dbm)) - 10.0, float(np.nanmax(opt_dbm)) + 10.0)
-            else:
-                self.axes[0].set_ylim(tx_psd_dbmhz - 80, tx_psd_dbmhz + 20)
-            self.axes[1].set_ylim(tx_psd_dbmhz - 80, tx_psd_dbmhz + 20)
+            optical_lines = self.data.get("optical_line_powers", {})
+            opt_hi = max(
+                float(optical_lines.get("tone1_dbm", -10.0)),
+                float(optical_lines.get("mzm_carrier_dbm", -10.0)),
+            )
+            opt_lo = float(optical_lines.get("sideband_each_dbm", opt_hi - 20.0))
+            self.axes[0].set_ylim(opt_lo - 45.0, opt_hi + 8.0)
+            rf_lines = self.data.get("utcpd_rf_line_powers", {})
+            rf_hi = float(rf_lines.get("carrier_dbm", cfg.utcpd_target_dbm))
+            rf_lo = float(rf_lines.get("sideband_each_dbm", rf_hi - 20.0))
+            self.axes[1].set_ylim(rf_lo - 45.0, rf_hi + 8.0)
             _, p_c2_probe = calc_psd(self.data["v_rec_c2"], fs)
-            c2_pk_dbmhz = float(np.max(p_c2_probe))
-            c2_floor_dbmhz = float(np.percentile(p_c2_probe, 5))
-            self.axes[2].set_ylim(c2_floor_dbmhz - 10, c2_pk_dbmhz + 10)
+            self.axes[2].set_ylim(-150.0, -90.0)
 
             # Plot 4 shows the detector's (ZBD/Mixer) output, which lives on a
             # different power scale than the RF chain above (e.g. ZBD's V/W
             # responsivity gain) — derive its y-range from the actual detected
             # data instead of the RF link-budget formula, or the curve clips.
             _, p_com_probe = calc_psd(self.data["v_rec_com"], fs)
-            com_pk_dbmhz = float(np.max(p_com_probe))
-            com_floor_dbmhz = float(np.percentile(p_com_probe, 5))
-            self.axes[3].set_ylim(com_floor_dbmhz - 10, com_pk_dbmhz + 10)
+            self.axes[3].set_ylim(-150.0, -90.0)
 
             c1m = self.data.get("c1_band_metrics", {})
             c2m = self.data.get("c2_band_metrics", {})
@@ -3250,6 +3601,10 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["c1_band"], values=(f"{float(c1m.get('band_power_dbm', np.nan)):.2f}", "dBm"))
             if "c2_band" in self.rows:
                 self.table.item(self.rows["c2_band"], values=(f"{float(c2m.get('band_power_dbm', np.nan)):.2f}", "dBm"))
+            if "c1_noise" in self.rows:
+                self.table.item(self.rows["c1_noise"], values=(f"{float(c1m.get('noise_dbm', np.nan)):.2f}", "dBm"))
+            if "c2_noise" in self.rows:
+                self.table.item(self.rows["c2_noise"], values=(f"{float(c2m.get('noise_dbm', np.nan)):.2f}", "dBm"))
             if "comm_snr" in self.rows:
                 self.table.item(self.rows["comm_snr"], values=(f"{float(c1m.get('snr_db', np.nan)):.2f}", "dB"))
             if "radar_snr" in self.rows:
@@ -3258,10 +3613,6 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["pslr"], values=(f"{float(self.data.get('pslr_db', np.nan)):.2f}", "dB"))
             if "proc_gain" in self.rows:
                 self.table.item(self.rows["proc_gain"], values=(f"{float(self.data.get('processing_gain_db', np.nan)):.2f}", "dB"))
-            if "cspr" in self.rows:
-                self.table.item(self.rows["cspr"], values=(f"{float(self.data.get('osa_sideband_gap_db', np.nan)):.2f}", "dBc/line"))
-            if "data_ratio" in self.rows:
-                self.table.item(self.rows["data_ratio"], values=(f"{float(self.data.get('data_power_ratio_db', np.nan)):.2f}", "dB"))
 
             #
             #
@@ -3285,15 +3636,15 @@ class PhotonicIsacSimPanel:
 
             #
             evm_db = float(self.data.get("evm_db", float('nan')))
-            effective_snr_db = float(self.data.get("effective_snr_db", float('nan')))
             ser = float(self.data.get("ser", float('nan')))
 
             if np.isfinite(evm_db):
-                self.demod_var.set(f"{cfg.modulation} Demod: EVM={evm_db:.1f} dB | Eff. SNR={effective_snr_db:.1f} dB | SER={ser:.4f}")
+                evm_snr_db = -evm_db
+                self.demod_var.set(f"{cfg.modulation} Demod: EVM={evm_db:.1f} dB | EVM-SNR={evm_snr_db:.1f} dB | SER={ser:.4f}")
                 evm_pct = estimate_measured_evm_percent(evm_db)
-                self.table.item(self.rows["evm_db"], values=(f"{evm_db:.2f}", "dB"))
                 self.table.item(self.rows["evm_pct"], values=(f"{evm_pct:.2f}", "%"))
-                self.table.item(self.rows["eff_snr"], values=(f"{effective_snr_db:.2f}", "dB"))
+                if "evm_snr" in self.rows:
+                    self.table.item(self.rows["evm_snr"], values=(f"{evm_snr_db:.2f}", "dB"))
             else:
                 self.demod_var.set(f"Comm Demod: N/A ({cfg.rx_mode})")
 
@@ -3317,7 +3668,7 @@ class PhotonicIsacSimPanel:
         rng = np.asarray(self.data.get("range_axis_m", []))
         prof = np.asarray(self.data.get("range_profile_db", []))
         if len(rng) > 0:
-            max_range = max(10.0, float(np.max(rng)))
+            max_range = 4.0
             m = rng <= max_range
             self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3)
             self.ax_range.set_xlim(0.0, max_range)
@@ -3329,41 +3680,32 @@ class PhotonicIsacSimPanel:
         fs, rf_c, step, flen = self.data["fs"], self.data["rf_c"], self.data["step"], self.data["frame_len"]
         s, e = self.frame_idx * step, self.frame_idx * step + flen
 
-        # Plot 1: OSA-style optical line spectrum.  Keep this fixed across
-        # animation frames; an OSA averages optical line powers and should not
-        # show the short-window phase-noise jitter of the simulation field.
-        opt_f = np.asarray(self.data.get("optical_spectrum_thz", []), dtype=np.float64)
-        opt_p = np.asarray(self.data.get("optical_spectrum_dbm", []), dtype=np.float64)
-        if len(opt_f) >= 4 and len(opt_p) >= 4:
-            self.lines[0].set_data(opt_f[:3], opt_p[:3])
-            self.lines[0].set_marker("o")
-            self.lines[0].set_linestyle("")
-            self.lines[0].set_label("Data tone + DSB")
-            self.l_lo.set_data(opt_f[3:], opt_p[3:])
-            self.l_lo.set_marker("o")
-            self.l_lo.set_linestyle("")
-            self.l_lo.set_label("Opt. LO tone")
-            self.axes[0].legend(loc="upper right", fontsize=8)
-        else:
-            f, p_mzm = calc_psd(self.data["e_data"][s:e], fs)
-            _, p_lo = calc_psd(self.data["e_lo"][s:e], fs)
-            self.lines[0].set_data((f + 193.4e12)/1e12, p_mzm)
-            self.l_lo.set_data((f + 193.4e12 + rf_c)/1e12, p_lo)
+        # Plot 1: OSA-like optical power trace. CSPR is a line/band-power
+        # relation, so plotting optical Welch PSD can make narrow carriers look
+        # artificially lower than spread DSB content.
+        osa = self.data.get("osa_display", {})
+        self.lines[0].set_data(osa.get("freq_thz", []), osa.get("signal_dbm", []))
+        self.lines[0].set_label("MZM carrier + DSB")
+        self.l_lo.set_data(osa.get("freq_thz", []), osa.get("lo_dbm", []))
+        self.l_lo.set_label("Optical tone")
+        self.axes[0].legend(loc="upper right", fontsize=8)
 
-        # Plot 2: UTC-PD Output
-        f, p_tx = calc_psd(self.data["v_tx_out"][s:e], fs)
+        # Plot 2: RF spectrum analyzer-like UTC-PD output power trace.
+        rf_disp = self.data.get("utcpd_rf_display", {})
         pwr_tx = calc_power_dbm(self.data["v_tx_out"][s:e])
-        self.lines[1].set_data((f + rf_c)/1e9, p_tx)
+        self.lines[1].set_data(rf_disp.get("freq_ghz", []), rf_disp.get("power_dbm", []))
         self.lines[1].set_label(f"UTC-PD Out ({pwr_tx:.1f} dBm)")
 
-        # Plot 3: C2 DSO IF spectrum
-        f, p_c2 = calc_psd(self.data["v_rec_c2"][s:e], fs)
+        # Plot 3: C2 raw DSO IF spectrum. Metrics still use SI-cancelled C2,
+        # but the raw trace lets SI and SSBI around 2*IF remain visible.
+        c2_plot = self.data.get("v_rec_c2_raw", self.data["v_rec_c2"])
+        f, p_c2 = calc_psd(c2_plot[s:e], fs)
         pos = f >= 0
         self.lines[2].set_data(f[pos]/1e9, p_c2[pos])
         self.l_si.set_data([], [])
         self.l_echo.set_data([], [])
         c2m = self.data.get("c2_band_metrics", {})
-        self.lines[2].set_label(f"C2 IF P={float(c2m.get('band_power_dbm', np.nan)):.1f} dBm")
+        self.lines[2].set_label(f"C2 raw; P(SI-canc.)={float(c2m.get('band_power_dbm', np.nan)):.1f} dBm")
         self.axes[1].legend(loc="upper right", fontsize=8)
         self.axes[2].legend(loc="upper right", fontsize=8)
 
@@ -3795,8 +4137,7 @@ class DsoPanel:
         summary_font = tkfont.Font(family="Segoe UI", size=11, weight="bold")
         summary_items = [
             ("band_power_dbm", "Band Power"),
-            ("snr_eff_db", "Eff. SNR"),
-            ("snr_com_db", "Spec. SNR"),
+            ("snr_com_db", "SNR"),
             ("evm_db", "EVM"),
             ("ber", "BER"),
             ("range_peak_mm", "Range"),
@@ -4173,15 +4514,14 @@ class DsoPanel:
             ("bandwidth_hz", "Bandwidth Bw", "GHz", "System", "Occupied measurement band used for SNR/DIR."),
             ("band_power_dbm", "Band Power", "dBm", "Comm", "Noise-subtracted in-band power."),
             ("noise_floor_dbmhz", "Noise Floor", "dBm/Hz", "Comm", "Stored or capture-derived DSO noise density."),
-            ("snr_com_db", "SNR_spec", "dB", "Comm", "Spectrum SNR from in-band power and noise floor; may include carrier, SI, or pilot energy."),
-            ("snr_eff_db", "SNR_eff", "dB", "Comm", "Effective demodulated-symbol SNR from EVM, SNR_eff=-EVM_dB for AWGN-limited symbols."),
+            ("snr_com_db", "SNR_com", "dB", "Comm", "Communication SNR from band power and noise floor."),
             ("sinr_com_db", "SINR_com", "dB", "Comm", "Equals SNR if interference is not separately estimated."),
-            ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+SNR_spec); use SNR_eff for EVM-limited demod quality."),
+            ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+SNR_com)."),
             ("evm_db", "EVM", "dB", "Comm", "Measured demodulation EVM."),
             ("evm_pct", "EVM", "%", "Comm", "Measured demodulation EVM."),
             ("ber", "BER", "", "Comm", "Measured pre-FEC BER when PRBS/reference lock is valid."),
             ("symbols", "Symbols", "", "Comm", "Symbols used for BER/EVM."),
-            ("snr_rad_db", "SNR_rad", "dB", "Radar", "Radar SNR; uses spectrum SNR when no separate radar SNR is available."),
+            ("snr_rad_db", "SNR_rad", "dB", "Radar", "Radar SNR; uses SNR_com when no separate radar SNR is available."),
             ("mi_rad_mbps", "MI_rad", "Mbit/s", "Radar", "0.5/Tsig*log2(1+SNR_rad)."),
             ("crlb_range_std_mm", "Range CRLB std", "mm", "Radar", "AWGN delay CRLB using occupied bandwidth RMS proxy."),
             ("pslr_db", "PSLR", "dB", "Radar", "Peak-to-sidelobe ratio from latest range profile."),
@@ -4250,7 +4590,7 @@ class DsoPanel:
         if np.isfinite(snr_db) and not self._metric_is_finite(self._metric_float("sinr_com_db")):
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
-                "No separate clutter/interference estimate; using spectrum SNR."
+                "No separate clutter/interference estimate; using SNR_com."
             )
         sinr_db = self._metric_float("sinr_com_db")
         if np.isfinite(snr_db) and np.isfinite(bw_hz) and bw_hz > 0:
@@ -4260,7 +4600,7 @@ class DsoPanel:
         rad_snr_db = self._metric_float("snr_rad_db")
         if not np.isfinite(rad_snr_db) and np.isfinite(snr_db):
             rad_snr_db = snr_db
-            self._set_metric("snr_rad_db", "SNR_rad", rad_snr_db, "dB", "Using spectrum SNR as radar SNR proxy.")
+            self._set_metric("snr_rad_db", "SNR_rad", rad_snr_db, "dB", "Using SNR_com as radar SNR proxy.")
         if np.isfinite(rad_snr_db):
             rad_snr_lin = 10.0 ** (rad_snr_db / 10.0)
             try:
@@ -6967,10 +7307,7 @@ class DsoPanel:
             suffix = "" if row == 0 else f" {ch}"
             key_suffix = "" if row == 0 else f"_{ch.lower()}"
             self._set_metric(f"band_power_dbm{key_suffix}", f"Band Power{suffix}", vals["band_power_dbm"], "dBm")
-            self._set_metric(
-                f"snr_com_db{key_suffix}", f"SNR_spec{suffix}", vals["snr_db"], "dB",
-                "Spectrum SNR from in-band power and noise floor."
-            )
+            self._set_metric(f"snr_com_db{key_suffix}", f"SNR{suffix}", vals["snr_db"], "dB")
             self._set_metric(f"noise_floor_dbmhz{key_suffix}", f"Noise Floor{suffix}", vals["noise_floor_dbmhz"], "dBm/Hz")
             if row == 0:
                 self.band_pwr_var.set(f"Band Power:  {vals['band_power_dbm']:.2f} dBm")
@@ -9169,17 +9506,14 @@ class DsoPanel:
 
             self.band_pwr_var.set(f"Band Power:  {p_sig_true_dbm:.2f} dBm")
             self.noise_floor_var.set(f"Noise Floor: {nf_label}")
-            self.snr_var.set(f"SNR_spec:    {snr_db:.2f} dB")
+            self.snr_var.set(f"SNR:         {snr_db:.2f} dB")
             nf_dbmhz = 10.0 * np.log10(max(nf_mwhz, 1e-30))
             self._set_metric("band_power_dbm", "Band Power", p_sig_true_dbm, "dBm")
             self._set_metric("noise_floor_dbmhz", "Noise Floor", nf_dbmhz, "dBm/Hz")
-            self._set_metric(
-                "snr_com_db", "SNR_spec", snr_db, "dB",
-                "Spectrum SNR from in-band power and noise floor."
-            )
+            self._set_metric("snr_com_db", "SNR_com", snr_db, "dB")
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
-                "No separate clutter/interference estimate; using spectrum SNR."
+                "No separate clutter/interference estimate; using SNR_com."
             )
             self._refresh_metrics_table()
 
@@ -12055,8 +12389,7 @@ class DsoPanel:
     def _show_demod_result(self, syms_eq: np.ndarray,
                            evm_db: float, evm_pct: float, ber: float, n_sym: int,
                            modulation: str | None = None) -> None:
-        snr_eff_db = calc_effective_snr_from_evm_db(evm_db)
-        self.evm_var.set(f"EVM:         {evm_db:.2f} dB  ({evm_pct:.1f} %)  SNR_eff={snr_eff_db:.2f} dB")
+        self.evm_var.set(f"EVM:         {evm_db:.2f} dB  ({evm_pct:.1f} %)")
         self.ber_var.set(
             f"BER:         {ber:.2e}" if np.isfinite(ber)
             else "BER:         ---"
@@ -12064,10 +12397,6 @@ class DsoPanel:
         self.sym_count_var.set(f"Symbols:     {n_sym:,}")
         self._set_metric("evm_db", "EVM", evm_db, "dB")
         self._set_metric("evm_pct", "EVM", evm_pct, "%")
-        self._set_metric(
-            "snr_eff_db", "SNR_eff", snr_eff_db, "dB",
-            "EVM-derived effective SNR; for AWGN-limited symbols SNR_eff = -EVM_dB."
-        )
         self._set_metric("ber", "BER", ber if np.isfinite(ber) else float("nan"), "")
         self._set_metric("symbols", "Symbols", int(n_sym), "")
         self._refresh_metrics_table()
