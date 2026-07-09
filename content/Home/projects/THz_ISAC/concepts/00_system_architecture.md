@@ -42,9 +42,6 @@ RX2 (C2): RX1 Antenna으로부터 반사된 신호 - TX Antenna - OMT - THz LNA 
 
 
 
-
-
-
 Introduction
 2025 TVT (Millimeter-Wave Dual-Circularly Polarized Wide-Angle Scanning Antenna Array for Vehicular Communication Systems)
 What’s more, it is well known that satellite signals are easily interfered by useless signals when crossing the atmosphere, resulting in a poor transmission quality. Therefore, circularly polarized (CP) antennas are usually used in vehicle-to-satellite communication because they can receive electromagnetic waves of arbitrary polarization, avoiding polarization mismatch between the receiver and transmitter, and have a significant effect in resisting multipath fading [9], [10]. Therefore, the study of highperformance CP phased array antenna provides great technical support for current and future vehicle-to-satellite communication systems. At present, narrow axial ratio bandwidth (ARBW), impedance bandwidth (IMBW) and poor scanning performance are still the main limitations in practical applications, which should be carefully addressed.

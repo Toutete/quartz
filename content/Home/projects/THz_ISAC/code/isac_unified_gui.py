@@ -2122,6 +2122,9 @@ class SimConfig:
     tx_ant_gain_dbi: float = 30.0
     rx_ant_gain_dbi: float = 30.0
     target_rcs_sqm: float = 1.0
+    target_ant_gain_dbi: float = 25.0
+    target_gamma_mag: float = 1.0
+    target_pol_eff: float = 1.0
     target_dist_m: float = 1.0  # Default 1m
     sim_seed: int | None = None
     syms_per_chirp: int = 1024
@@ -2357,11 +2360,19 @@ def calc_isac_link_budget(
     c2_drive_gain_db: float,
     c1_cable_loss_db: float,
     c2_cable_loss_db: float,
+    target_ant_gain_dbi: float = 0.0,
+    target_gamma_mag: float = 0.0,
+    target_pol_eff: float = 1.0,
 ) -> dict[str, float]:
     d = max(float(distance_m), 1e-9)
     rf_hz = max(float(rf_ghz), 1e-9) * 1e9
     lam = 3e8 / rf_hz
-    sigma = max(float(rcs_sqm), 1e-12)
+    sigma_struct = max(float(rcs_sqm), 0.0)
+    g_target = 10.0 ** (float(target_ant_gain_dbi) / 10.0)
+    gamma_mag = float(np.clip(abs(float(target_gamma_mag)), 0.0, 1.0))
+    pol_eff = float(np.clip(float(target_pol_eff), 0.0, 1.0))
+    sigma_ant = (lam ** 2 * g_target ** 2 * gamma_mag ** 2 * pol_eff) / (4.0 * np.pi)
+    sigma = max(sigma_struct + sigma_ant, 1e-12)
     fspl_one_way_db = 20.0 * np.log10(4.0 * np.pi * d * rf_hz / 3e8)
     c1_rf_dbm = float(tx_dbm + tx_gain_dbi + rx_gain_dbi - fspl_one_way_db)
     radar_loss_db = 10.0 * np.log10(
@@ -2376,6 +2387,9 @@ def calc_isac_link_budget(
         "delay_ns": 2.0 * d / 3e8 * 1e9,
         "fspl_one_way_db": fspl_one_way_db,
         "radar_path_loss_db": radar_loss_db,
+        "structural_rcs_sqm": sigma_struct,
+        "antenna_mode_rcs_sqm": sigma_ant,
+        "effective_rcs_sqm": sigma,
         "c1_rf_dbm": c1_rf_dbm,
         "c2_rf_dbm": c2_rf_dbm,
         "c1_if_chain_db": c1_if_chain_db,
@@ -2472,6 +2486,9 @@ def run_isac_sim(cfg: SimConfig):
         c2_drive_gain_db=cfg.c2_drive_gain_db,
         c1_cable_loss_db=cfg.c1_cable_loss_db,
         c2_cable_loss_db=cfg.c2_cable_loss_db,
+        target_ant_gain_dbi=cfg.target_ant_gain_dbi,
+        target_gamma_mag=cfg.target_gamma_mag,
+        target_pol_eff=cfg.target_pol_eff,
     )
     radar_path_loss_db = float(link["radar_path_loss_db"])
     one_way_path_loss_db = float(link["fspl_one_way_db"])
@@ -3048,6 +3065,9 @@ def run_isac_sim(cfg: SimConfig):
         "if_center_hz": f_if,
         "radar_path_loss_db": radar_path_loss_db,
         "one_way_fspl_db": one_way_path_loss_db,
+        "structural_rcs_sqm": link["structural_rcs_sqm"],
+        "antenna_mode_rcs_sqm": link["antenna_mode_rcs_sqm"],
+        "effective_rcs_sqm": link["effective_rcs_sqm"],
         "rf_noise_bw_hz": rf_noise_bw_hz,
         "if_noise_bw_hz": if_noise_bw_hz,
         "optical_center_freq_thz": cfg.optical_center_freq_thz,
@@ -3177,6 +3197,9 @@ class PhotonicIsacSimPanel:
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
             "obs_cspr":  self.table.insert("", "end", text="Measured CSPR",       values=("20.0", "dB")),
             "uxr_noise": self.table.insert("", "end", text="UXR Noise",         values=("0.00", "mVrms")),
+            "rcs_struct": self.table.insert("", "end", text="Structural RCS",    values=("0.00", "m^2")),
+            "rcs_ant":    self.table.insert("", "end", text="Antenna-mode RCS",  values=("0.00", "m^2")),
+            "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "m^2")),
             "delay":     self.table.insert("", "end", text="Radar Echo Delay",  values=("0.00", "ns")),
             "loss":      self.table.insert("", "end", text="C2 Radar Loss (1/R^4)", values=("0.00", "dB")),
             "echo":      self.table.insert("", "end", text="C2 RF Echo Power",  values=("0.00", "dBm")),
@@ -3287,18 +3310,21 @@ class PhotonicIsacSimPanel:
         add_p(24, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
-        add_p(27, "rcs_sqm",      "Target RCS [m^2]",       "0.01")
+        add_p(27, "rcs_sqm",      "Struct. RCS [m^2]",      "0.01")
+        add_p(28, "target_ant_gain_dbi", "Target Ant Gain [dBi]", "25.0")
+        add_p(29, "target_gamma_mag", "Target |Gamma|",     "1.0")
+        add_p(30, "target_pol_eff", "Target Pol Eff",       "1.0")
 
-        ttk.Label(grp, text="Target Dist [m]").grid(row=28, column=0, sticky="w", pady=2)
+        ttk.Label(grp, text="Target Dist [m]").grid(row=31, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
-        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=28, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=31, column=1, sticky="w")
 
         self.sc_fde_enable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=29, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Post-EQ Taps").grid(row=30, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=32, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Post-EQ Taps").grid(row=33, column=0, sticky="w", pady=2)
         self.sc_fde_taps_var = tk.StringVar(value="1")
-        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=30, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=33, column=1, sticky="w")
 
         # Plot on right
         self.fig = Figure(figsize=(8, 8), dpi=100)
@@ -3353,6 +3379,9 @@ class PhotonicIsacSimPanel:
             tx_gain = self._param_float("tx_ant_gain_dbi", 30.0)
             rx_gain = self._param_float("rx_ant_gain_dbi", 30.0)
             rcs = self._param_float("rcs_sqm", 0.01)
+            target_ant_gain = self._param_float("target_ant_gain_dbi", 25.0)
+            target_gamma = self._param_float("target_gamma_mag", 1.0)
+            target_pol = self._param_float("target_pol_eff", 1.0)
             link = calc_isac_link_budget(
                 distance_m=d,
                 rf_ghz=rf_ghz,
@@ -3365,6 +3394,9 @@ class PhotonicIsacSimPanel:
                 c2_drive_gain_db=self._param_float("c2_drive_gain_db", 24.0),
                 c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
                 c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
+                target_ant_gain_dbi=target_ant_gain,
+                target_gamma_mag=target_gamma,
+                target_pol_eff=target_pol,
             )
             delay_ns = link["delay_ns"]
             loss_db = link["radar_path_loss_db"]
@@ -3446,6 +3478,12 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["obs_cspr"], values=(f"{mzm_metrics['effective_cspr_db']:.1f}", "dB"))
             if "uxr_noise" in self.rows:
                 self.table.item(self.rows["uxr_noise"], values=(f"{uxr_noise_mv:.3f}", "mVrms"))
+            if "rcs_struct" in self.rows:
+                self.table.item(self.rows["rcs_struct"], values=(f"{link['structural_rcs_sqm']:.4g}", "m^2"))
+            if "rcs_ant" in self.rows:
+                self.table.item(self.rows["rcs_ant"], values=(f"{link['antenna_mode_rcs_sqm']:.4g}", "m^2"))
+            if "rcs_eff" in self.rows:
+                self.table.item(self.rows["rcs_eff"], values=(f"{link['effective_rcs_sqm']:.4g}", "m^2"))
             self.table.item(self.rows["delay"], values=(f"{delay_ns:.2f}", "ns"))
             self.table.item(self.rows["loss"], values=(f"{loss_db:.1f}", "dB"))
             self.table.item(self.rows["echo"], values=(f"{echo_dbm:.1f}", "dBm"))
@@ -3518,6 +3556,9 @@ class PhotonicIsacSimPanel:
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
             target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
+            target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", 25.0),
+            target_gamma_mag=self._param_float("target_gamma_mag", 1.0),
+            target_pol_eff=self._param_float("target_pol_eff", 1.0),
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
@@ -3537,6 +3578,9 @@ class PhotonicIsacSimPanel:
             c2_drive_gain_db=cfg.c2_drive_gain_db,
             c1_cable_loss_db=cfg.c1_cable_loss_db,
             c2_cable_loss_db=cfg.c2_cable_loss_db,
+            target_ant_gain_dbi=cfg.target_ant_gain_dbi,
+            target_gamma_mag=cfg.target_gamma_mag,
+            target_pol_eff=cfg.target_pol_eff,
         )["radar_path_loss_db"]
         cfg.tx_power_dbm = cfg.utcpd_target_dbm
         return cfg
