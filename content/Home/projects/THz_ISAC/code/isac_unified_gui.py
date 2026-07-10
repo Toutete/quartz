@@ -2150,10 +2150,26 @@ def generate_phase_noise(n, lw, fs):
 
 def calc_psd(sig, fs):
     """DSO-tab compatible single-sided PSD in dBm/Hz."""
-    x = np.asarray(sig, dtype=np.float64).reshape(-1)
+    x = np.real(np.asarray(sig)).astype(np.float64, copy=False).reshape(-1)
     if len(x) == 0 or fs <= 0:
         return np.array([0.0]), np.array([-300.0])
     f, pxx = welch(np.real(x), fs=fs, nperseg=min(4096, len(x)), scaling="density")
+    p_dbm_hz = 10.0 * np.log10(np.maximum(pxx / 50.0 / 1e-3, 1e-30))
+    return f, p_dbm_hz
+
+def calc_fft_psd(sig, fs):
+    """Single-frame periodogram PSD for comparing against Welch averaging."""
+    x = np.real(np.asarray(sig)).astype(np.float64, copy=False).reshape(-1)
+    if len(x) == 0 or fs <= 0:
+        return np.array([0.0]), np.array([-300.0])
+    x = x - float(np.mean(x))
+    win = np.hanning(len(x))
+    scale = fs * np.sum(win ** 2)
+    X = np.fft.rfft(x * win)
+    pxx = (np.abs(X) ** 2) / max(scale, 1e-30)
+    if len(pxx) > 2:
+        pxx[1:-1] *= 2.0
+    f = np.fft.rfftfreq(len(x), 1.0 / fs)
     p_dbm_hz = 10.0 * np.log10(np.maximum(pxx / 50.0 / 1e-3, 1e-30))
     return f, p_dbm_hz
 
@@ -3189,6 +3205,8 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=False)
         self.si_enable_var = tk.BooleanVar(value=True)
+        self.sim_welch_psd_var = tk.BooleanVar(value=True)
+        self.show_si_norm_range_var = tk.BooleanVar(value=False)
         self.rx_mode_var = tk.StringVar(value="ZBD")
         self.coherence_var = tk.StringVar(value="Free-running")
         if self.awg_source is not None:
@@ -3238,6 +3256,10 @@ class PhotonicIsacSimPanel:
         ttk.Button(ctrl, text="Run Simulation", style="Primary.TButton", command=self.run_simulation).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         self._anim_btn = ttk.Button(ctrl, text="Anim Start", command=self._cmd_toggle_anim)
         self._anim_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Checkbutton(ctrl, text="Welch PSD", variable=self.sim_welch_psd_var,
+                        command=self._update_frame).pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Checkbutton(ctrl, text="SI-norm range", variable=self.show_si_norm_range_var,
+                        command=self._update_range_profile).pack(side=tk.LEFT, padx=2)
 
         # Split left panel into simulation parameters and physics table
         split_pane = ttk.PanedWindow(left, orient=tk.HORIZONTAL)
@@ -3290,6 +3312,8 @@ class PhotonicIsacSimPanel:
             "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
             "comm_snr":  self.table.insert("", "end", text="C1 Comm SNR",       values=("0.00", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
+            "range_detect": self.table.insert("", "end", text="Range Detection", values=("matched-filter raw", "")),
+            "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
             "si_norm_ratio": self.table.insert("", "end", text="SI-norm Target/SI", values=("N/A", "dB")),
             "si_norm_coh": self.table.insert("", "end", text="SI Phase Coherence", values=("N/A", "")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
@@ -3658,10 +3682,11 @@ class PhotonicIsacSimPanel:
         self.ax_const = self.fig.add_subplot(gs[1,2])
         self.lines = []
         titles = ["1) Optical Tones + DSB", "2) UTC-PD Output (TX Antenna)", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
-        colors = ["purple", "red", "orange", "blue"]
+        colors = ["purple", "red", "#2563eb", "#2563eb"]
 
         for i, ax in enumerate(self.axes):
-            line, = ax.plot([], [], lw=1.5, color=colors[i], label="Signal")
+            line_label = "Raw" if i >= 2 else "Signal"
+            line, = ax.plot([], [], lw=1.1 if i >= 2 else 1.5, color=colors[i], label=line_label)
             if i == 2:
                 self.l_c2_band, = ax.plot([], [], lw=1.0, color="#dc2626", alpha=0.90, label="In-band raw")
             if i == 3:
@@ -3670,7 +3695,9 @@ class PhotonicIsacSimPanel:
             self.lines.append(line)
             ax.set_title(titles[i])
             ax.grid(True, alpha=0.45)
-            ax.set_ylabel("Power [dBm]" if i < 2 else "PSD [dBm/Hz]")
+            ax.set_ylabel("Power [dBm]" if i < 2 else "dBm/Hz")
+            if i >= 2:
+                ax.set_xlabel("Frequency (GHz)")
 
         self.l_lo, = self.axes[0].plot([], [], lw=1.2, color="black", label="Opt. LO")
         self.axes[0].legend(loc="upper right", fontsize=8)
@@ -3713,6 +3740,8 @@ class PhotonicIsacSimPanel:
             spec_fmax_ghz = min(25.0, cfg.dso_bandwidth_ghz, 0.5 * fs / 1e9)
             self.axes[2].set_xlim(0.0, spec_fmax_ghz)
             self.axes[3].set_xlim(0.0, spec_fmax_ghz)
+            self.axes[2].set_title(f"C2 Spectrum [0-{spec_fmax_ghz:.0f} GHz]")
+            self.axes[3].set_title(f"C1 Spectrum [0-{spec_fmax_ghz:.0f} GHz]")
 
             #
             #
@@ -3754,10 +3783,10 @@ class PhotonicIsacSimPanel:
             f1_ghz = max(0.0, cfg.if_ghz - 0.5 * analysis_bw_hz / 1e9)
             f2_ghz = min(spec_fmax_ghz, cfg.if_ghz + 0.5 * analysis_bw_hz / 1e9)
             for ax in (self.axes[2], self.axes[3]):
-                ax.axvspan(f1_ghz, f2_ghz, alpha=0.13, color="orange")
-                ax.axvline(f1_ghz, color="orange", lw=0.8, linestyle="--")
-                ax.axvline(f2_ghz, color="orange", lw=0.8, linestyle="--")
-                ax.axvline(cfg.if_ghz, color="red", lw=0.9, linestyle=":")
+                ax.axvspan(f1_ghz, f2_ghz, alpha=0.13, color="#f59e0b")
+                ax.axvline(f1_ghz, color="#f59e0b", lw=1.0, linestyle="--")
+                ax.axvline(f2_ghz, color="#f59e0b", lw=1.0, linestyle="--")
+                ax.axvline(cfg.if_ghz, color="#dc2626", lw=1.0, linestyle=":")
 
             c1m = self.data.get("c1_band_metrics", {})
             c2m = self.data.get("c2_band_metrics", {})
@@ -3773,6 +3802,10 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["comm_snr"], values=(f"{float(c1m.get('snr_db', np.nan)):.2f}", "dB"))
             if "radar_snr" in self.rows:
                 self.table.item(self.rows["radar_snr"], values=(f"{float(self.data.get('radar_snr_db', np.nan)):.2f}", "dB"))
+            if "range_detect" in self.rows:
+                self.table.item(self.rows["range_detect"], values=("matched-filter raw", ""))
+            if "range_sel" in self.rows:
+                self.table.item(self.rows["range_sel"], values=(f"{float(self.data.get('selected_range_m', np.nan)):.3f}", "m"))
             if "si_norm_ratio" in self.rows:
                 self.table.item(self.rows["si_norm_ratio"], values=(f"{float(self.data.get('si_norm_target_over_si_db', np.nan)):.2f}", "dB"))
             if "si_norm_coh" in self.rows:
@@ -3838,25 +3871,43 @@ class PhotonicIsacSimPanel:
         if len(rng) > 0:
             max_range = 4.0
             m = rng <= max_range
-            self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3, label="raw")
+            self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3, label="matched-filter raw")
             rng_norm = np.asarray(self.data.get("si_norm_range_axis_m", []), dtype=np.float64)
             prof_norm = np.asarray(self.data.get("si_norm_range_profile_db", []), dtype=np.float64)
             if len(rng_norm) and len(rng_norm) == len(prof_norm):
                 mn = rng_norm <= max_range
-                if np.any(mn):
+                if bool(self.show_si_norm_range_var.get()) and np.any(mn):
                     self.ax_range.plot(
                         rng_norm[mn],
                         prof_norm[mn],
-                        color="#dc2626",
+                        color="#7c3aed",
                         lw=1.0,
-                        linestyle="--",
+                        linestyle="-.",
                         label="SI-normalized",
                     )
             sel_m = float(self.data.get("selected_range_m", float("nan")))
             if np.isfinite(sel_m) and np.any(m):
                 idx = int(np.argmin(np.abs(rng - sel_m)))
                 if 0 <= idx < len(prof):
-                    self.ax_range.axvline(sel_m, color="#dc2626", linestyle="--", lw=1.0, label=f"Target {sel_m:.2f} m")
+                    self.ax_range.scatter(
+                        [sel_m],
+                        [prof[idx]],
+                        marker="D",
+                        s=32,
+                        color="#f59e0b",
+                        edgecolors="#111827",
+                        linewidths=0.5,
+                        zorder=5,
+                        label=f"Target {sel_m:.2f} m",
+                    )
+                    self.ax_range.annotate(
+                        f"{sel_m:.2f} m",
+                        xy=(sel_m, prof[idx]),
+                        xytext=(6, 8),
+                        textcoords="offset points",
+                        fontsize=8,
+                        color="#111827",
+                    )
             if self.ax_range.get_legend_handles_labels()[0]:
                 self.ax_range.legend(loc="upper right", fontsize=8)
             self.ax_range.set_xlim(0.0, max_range)
@@ -3886,8 +3937,11 @@ class PhotonicIsacSimPanel:
 
         # Plot 3: C2 raw DSO IF spectrum. Metrics still use SI-cancelled C2,
         # but the raw trace lets SI and SSBI around 2*IF remain visible.
-        c2_plot = self.data.get("v_rec_c2_raw", self.data["v_rec_c2"])
-        f, p_c2 = calc_psd(c2_plot[s:e], fs)
+        c2_plot = np.asarray(self.data.get("v_rec_c2_raw", self.data["v_rec_c2"]))
+        if bool(self.sim_welch_psd_var.get()):
+            f, p_c2 = calc_psd(c2_plot, fs)
+        else:
+            f, p_c2 = calc_fft_psd(c2_plot[s:e], fs)
         f_ghz = f / 1e9
         fmax_ghz = float(self.axes[2].get_xlim()[1])
         mask = f_ghz <= fmax_ghz
@@ -3896,21 +3950,23 @@ class PhotonicIsacSimPanel:
         f2_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 + 0.5 * 1.2 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
         band = mask & (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz)
         self.l_c2_band.set_data(f_ghz[band], p_c2[band])
-        c2m = self.data.get("c2_band_metrics", {})
-        self.lines[2].set_label(f"C2 raw; P(SI-canc.)={float(c2m.get('band_power_dbm', np.nan)):.1f} dBm")
+        self.lines[2].set_label("Raw")
         self.axes[1].legend(loc="upper right", fontsize=8)
         self.axes[2].legend(loc="upper right", fontsize=8)
 
         # Plot 4: C1 DSO IF spectrum
-        f, p_bb = calc_psd(self.data["v_rec_c1"][s:e], fs)
+        c1_plot = np.asarray(self.data["v_rec_c1"])
+        if bool(self.sim_welch_psd_var.get()):
+            f, p_bb = calc_psd(c1_plot, fs)
+        else:
+            f, p_bb = calc_fft_psd(c1_plot[s:e], fs)
         f_ghz = f / 1e9
         fmax_ghz = float(self.axes[3].get_xlim()[1])
         mask = f_ghz <= fmax_ghz
         self.lines[3].set_data(f_ghz[mask], p_bb[mask])
         band = mask & (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz)
         self.l_c1_band.set_data(f_ghz[band], p_bb[band])
-        c1m = self.data.get("c1_band_metrics", {})
-        self.lines[3].set_label(f"C1 IF P={float(c1m.get('band_power_dbm', np.nan)):.1f} dBm")
+        self.lines[3].set_label("Raw")
         self.axes[3].legend(loc="upper right", fontsize=8)
 
         self.canvas.draw_idle()
@@ -9486,12 +9542,12 @@ class DsoPanel:
                     # Plot the measured raw PSD inside the analysis band.  Do
                     # not plot a re-filtered waveform here: its hard FFT-mask
                     # edge looks like an artificial spectrum cutoff.
-                    ax_spec.plot(f_ghz[band_mask], psd_db[band_mask], linewidth=1.0,
-                                 color="#dc2626", alpha=0.90, label="In-band raw")
-                ax_spec.axvspan(f1_ghz, f2_ghz, alpha=0.13, color="orange")
-                ax_spec.axvline(f1_ghz, color="orange", lw=0.8, linestyle="--")
-                ax_spec.axvline(f2_ghz, color="orange", lw=0.8, linestyle="--")
-                ax_spec.axvline(fc_ghz, color="red", lw=0.9, linestyle=":")
+                    ax_spec.plot(f_ghz[band_mask], psd_db[band_mask], linewidth=0.8,
+                                 color="#475569", alpha=0.45, label="Band segment")
+                ax_spec.axvspan(f1_ghz, f2_ghz, alpha=0.055, color="#f59e0b")
+                ax_spec.axvline(f1_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
+                ax_spec.axvline(f2_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
+                ax_spec.axvline(fc_ghz, color="#334155", lw=0.7, alpha=0.65, linestyle=":")
                 if self._noise_floor_ref_dbmhz is not None:
                     ax_spec.axhline(self._noise_floor_ref_dbmhz, color="#b0280a",
                                     lw=1.0, linestyle="-.")
@@ -9565,13 +9621,13 @@ class DsoPanel:
             fc_ghz = float(self.fc_var.get())
             band_mask = (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz) & mask_disp
             if bool(self.filter_overlay_var.get()) and np.any(band_mask):
-                self.ax_spec.plot(f_ghz[band_mask], psd_db[band_mask], linewidth=1.0,
-                                  color="#dc2626", alpha=0.90, label="In-band raw")
-            self.ax_spec.axvspan(f1_ghz, f2_ghz, alpha=0.15, color="orange",
+                self.ax_spec.plot(f_ghz[band_mask], psd_db[band_mask], linewidth=0.8,
+                                  color="#475569", alpha=0.45, label="Band segment")
+            self.ax_spec.axvspan(f1_ghz, f2_ghz, alpha=0.055, color="#f59e0b",
                                  label=f"Signal [{f1_ghz:.2f}-{f2_ghz:.2f} GHz]")
-            self.ax_spec.axvline(f1_ghz, color="orange", lw=1.2, linestyle="--")
-            self.ax_spec.axvline(f2_ghz, color="orange", lw=1.2, linestyle="--")
-            self.ax_spec.axvline(fc_ghz, color="red", lw=1.0, linestyle=":",
+            self.ax_spec.axvline(f1_ghz, color="#92400e", lw=0.7, alpha=0.55, linestyle=":")
+            self.ax_spec.axvline(f2_ghz, color="#92400e", lw=0.7, alpha=0.55, linestyle=":")
+            self.ax_spec.axvline(fc_ghz, color="#334155", lw=0.8, alpha=0.65, linestyle=":",
                                  label=f"fc={fc_ghz:.2f} GHz")
             idx_fc = np.argmin(np.abs(f_ghz - fc_ghz))
             if mask_disp[idx_fc]:
@@ -11500,11 +11556,11 @@ class DsoPanel:
                 if len(ib):
                     if len(ib) > 2500:
                         ib = ib[::max(1, len(ib) // 2500)]
-                    ax_mag.plot(rf_ghz[ib], mag_db[ib], color="#dc2626", linewidth=1.1, label="Analysis band")
+                    ax_mag.plot(rf_ghz[ib], mag_db[ib], color="#475569", linewidth=0.8, alpha=0.45, label="Analysis band")
             if np.isfinite(f1_ghz) and np.isfinite(f2_ghz):
-                ax_mag.axvspan(f1_ghz, f2_ghz, alpha=0.12, color="orange")
-                ax_mag.axvline(f1_ghz, color="orange", lw=0.8, linestyle="--")
-                ax_mag.axvline(f2_ghz, color="orange", lw=0.8, linestyle="--")
+                ax_mag.axvspan(f1_ghz, f2_ghz, alpha=0.055, color="#f59e0b")
+                ax_mag.axvline(f1_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
+                ax_mag.axvline(f2_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
             ax_mag.axhline(0.0, color="#64748b", linewidth=0.8, linestyle=":")
             if np.any(plot_mask):
                 vals = mag_db[plot_mask]
@@ -11529,9 +11585,9 @@ class DsoPanel:
                 ax_phase.text(0.5, 0.5, "Phase fit unavailable", ha="center", va="center",
                               transform=ax_phase.transAxes, color="gray")
             if np.isfinite(f1_ghz) and np.isfinite(f2_ghz):
-                ax_phase.axvspan(f1_ghz, f2_ghz, alpha=0.10, color="orange")
-                ax_phase.axvline(f1_ghz, color="orange", lw=0.8, linestyle="--")
-                ax_phase.axvline(f2_ghz, color="orange", lw=0.8, linestyle="--")
+                ax_phase.axvspan(f1_ghz, f2_ghz, alpha=0.05, color="#f59e0b")
+                ax_phase.axvline(f1_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
+                ax_phase.axvline(f2_ghz, color="#92400e", lw=0.6, alpha=0.55, linestyle=":")
             ax_phase.set_xlim(x_lo, x_hi)
             ax_phase.set_xlabel("Frequency (GHz)")
             ax_phase.set_ylabel("Phase residual (rad)")
@@ -11995,7 +12051,7 @@ class DsoPanel:
                         f"display_band={rf_lo:.3f}-{rf_hi:.3f} GHz, "
                         f"bb_lpf={bb_lpf/1e9:.3f} GHz, "
                         f"rx_nyquist={0.5*float(self._rx_fs)/1e9:.3f} GHz. "
-                        "The red spectrum overlay is raw PSD highlighted inside this analysis band."
+                        "The muted spectrum overlay is raw PSD highlighted inside this analysis band."
                     )
 
                 def _recover_dfts_ofdm_once(rx_bb_in: np.ndarray, retry_label: str = "") -> dict:
