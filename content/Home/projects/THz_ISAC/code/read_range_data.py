@@ -128,6 +128,171 @@ def zero_reference_result(loaded: np.lib.npyio.NpzFile, ch: str, index: int = 0)
     return item
 
 
+def differential_delay_from_cfr(
+    freqs: np.ndarray,
+    h_cur: np.ndarray,
+    h_ref: np.ndarray,
+    weight: np.ndarray | None = None,
+) -> tuple[float, float]:
+    """Estimate relative delay from the phase slope of current/reference CFR."""
+    f = np.asarray(freqs, dtype=np.float64).reshape(-1)
+    hc = np.asarray(h_cur, dtype=np.complex128).reshape(-1)
+    hr = np.asarray(h_ref, dtype=np.complex128).reshape(-1)
+    n = min(len(f), len(hc), len(hr))
+    if n < 16:
+        return float("nan"), float("nan")
+    f = f[:n]
+    hc = hc[:n]
+    hr = hr[:n]
+    ratio = hc / (hr + 1e-15)
+    valid = np.isfinite(f) & np.isfinite(ratio.real) & np.isfinite(ratio.imag) & (np.abs(ratio) > 1e-12)
+    if np.count_nonzero(valid) < 16:
+        return float("nan"), float("nan")
+    f = f[valid]
+    hc = hc[valid]
+    hr = hr[valid]
+    ratio = ratio[valid]
+    ph = np.unwrap(np.angle(ratio))
+    if weight is None:
+        w = np.ones(len(f), dtype=np.float64)
+    else:
+        w_full = np.asarray(weight, dtype=np.float64).reshape(-1)[:n]
+        w = np.maximum(w_full[valid], 0.0)
+    if not np.any(w > 0):
+        w = np.ones(len(f), dtype=np.float64)
+    amp_reliability = np.minimum(np.abs(hc), np.abs(hr))
+    amp_reliability = amp_reliability / (np.nanmax(amp_reliability) + 1e-15)
+    w = w * np.clip(amp_reliability, 0.0, 1.0)
+    w = w / (np.max(w) + 1e-15)
+    good = w >= 0.03
+    if np.count_nonzero(good) >= 16:
+        f = f[good]
+        ratio = ratio[good]
+        ph = ph[good]
+        w = w[good]
+
+    def weighted_line(x: np.ndarray, y: np.ndarray, ww: np.ndarray) -> tuple[float, float]:
+        ww = np.maximum(np.asarray(ww, dtype=np.float64), 0.0)
+        if not np.any(ww > 0):
+            ww = np.ones_like(x, dtype=np.float64)
+        x0 = x - np.sum(ww * x) / (np.sum(ww) + 1e-15)
+        y0 = y - np.sum(ww * y) / (np.sum(ww) + 1e-15)
+        slope_i = float(np.sum(ww * x0 * y0) / (np.sum(ww * x0 * x0) + 1e-15))
+        intercept_i = float(np.sum(ww * (y - slope_i * x)) / (np.sum(ww) + 1e-15))
+        return slope_i, intercept_i
+
+    slope, intercept = weighted_line(f, ph, w)
+    resid = ph - (slope * f + intercept)
+    mad = float(np.nanmedian(np.abs(resid - np.nanmedian(resid)))) if len(resid) else float("nan")
+    resid_lim = max(np.pi / 2.0, 4.0 * 1.4826 * mad) if np.isfinite(mad) else np.pi
+    robust = np.isfinite(resid) & (np.abs(resid) <= resid_lim)
+    if np.count_nonzero(robust) >= 16 and np.count_nonzero(robust) < len(f):
+        f = f[robust]
+        ratio = ratio[robust]
+        ph = ph[robust]
+        w = w[robust]
+        slope, intercept = weighted_line(f, ph, w)
+
+    delta_tau = -slope / (2.0 * np.pi)
+    derot = ratio / (np.abs(ratio) + 1e-15) * np.exp(-1j * (slope * f + intercept))
+    coh = float(np.abs(np.sum(w * derot)) / (np.sum(w) + 1e-15))
+    return float(delta_tau), coh
+
+
+def _npz_array(loaded: np.lib.npyio.NpzFile, key: str, dtype: Any) -> np.ndarray:
+    if key not in loaded.files:
+        return np.zeros(0, dtype=dtype)
+    return np.asarray(loaded[key], dtype=dtype).reshape(-1)
+
+
+def _interp_complex(x_new: np.ndarray, x_old: np.ndarray, y_old: np.ndarray) -> np.ndarray:
+    real = np.interp(x_new, x_old, y_old.real)
+    imag = np.interp(x_new, x_old, y_old.imag)
+    return real + 1j * imag
+
+
+def cfr_normalized_result(loaded: np.lib.npyio.NpzFile, result: dict[str, Any]) -> dict[str, float]:
+    """Recompute Store-Zero CFR-normalized range for old and new saved files."""
+    if "cfr_norm_coherence" in result and ("cfr_norm_range_m" in result or "cfr_norm_range_mm" in result):
+        range_m = to_float(result.get("cfr_norm_range_m"))
+        range_mm = to_float(result.get("cfr_norm_range_mm"))
+        if not math.isfinite(range_m) and math.isfinite(range_mm):
+            range_m = range_mm / 1e3
+        if not math.isfinite(range_mm) and math.isfinite(range_m):
+            range_mm = range_m * 1e3
+        return {
+            "delay_s": to_float(result.get("cfr_norm_delay_s")),
+            "range_m": range_m,
+            "range_mm": range_mm,
+            "coherence": to_float(result.get("cfr_norm_coherence")),
+        }
+
+    freqs = np.asarray(result.get("cfr_freqs_hz", []), dtype=np.float64).reshape(-1)
+    h_cur = np.asarray(result.get("cfr_h", []), dtype=np.complex128).reshape(-1)
+    w_cur = np.asarray(result.get("cfr_weight", []), dtype=np.float64).reshape(-1)
+    if len(w_cur) != len(freqs):
+        w_cur = np.ones(len(freqs), dtype=np.float64)
+    if len(freqs) < 16 or len(h_cur) < 16:
+        return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
+    n_cur = min(len(freqs), len(h_cur), len(w_cur))
+    freqs = freqs[:n_cur]
+    h_cur = h_cur[:n_cur]
+    w_cur = w_cur[:n_cur]
+
+    ch = str(result.get("ch", result.get("channel", ""))).strip().upper()
+    prefixes = [f"range_zero__{ch}__", "range_zero__"]
+    ref_freqs = ref_h = ref_w = None
+    for prefix in prefixes:
+        f_key = prefix + "cfr_freqs"
+        h_key = prefix + "cfr_h"
+        if f_key in loaded.files and h_key in loaded.files:
+            ref_freqs = _npz_array(loaded, f_key, np.float64)
+            ref_h = _npz_array(loaded, h_key, np.complex128)
+            ref_w = _npz_array(loaded, prefix + "cfr_weight", np.float64)
+            break
+    if ref_freqs is None or ref_h is None or len(ref_freqs) < 16 or len(ref_h) < 16:
+        return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
+
+    n_ref = min(len(ref_freqs), len(ref_h))
+    ref_freqs = ref_freqs[:n_ref]
+    ref_h = ref_h[:n_ref]
+    order = np.argsort(ref_freqs)
+    ref_freqs = ref_freqs[order]
+    ref_h = ref_h[order]
+    if ref_w is not None and len(ref_w) >= n_ref:
+        ref_w = ref_w[:n_ref][order]
+    if not np.array_equal(freqs[:min(len(freqs), len(ref_freqs))], ref_freqs[:min(len(freqs), len(ref_freqs))]) or len(freqs) != len(ref_freqs):
+        valid_span = (freqs >= np.min(ref_freqs)) & (freqs <= np.max(ref_freqs))
+        if np.count_nonzero(valid_span) < 16:
+            return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
+        freqs_fit = freqs[valid_span]
+        h_fit = h_cur[valid_span]
+        w_fit = w_cur[valid_span]
+        ref_fit = _interp_complex(freqs_fit, ref_freqs, ref_h)
+        if ref_w is not None and len(ref_w):
+            w_fit = w_fit * np.interp(freqs_fit, ref_freqs, ref_w)
+    else:
+        n = min(len(freqs), len(h_cur), len(ref_h), len(w_cur))
+        freqs_fit = freqs[:n]
+        h_fit = h_cur[:n]
+        ref_fit = ref_h[:n]
+        w_fit = w_cur[:n]
+        if ref_w is not None and len(ref_w) >= n:
+            w_fit = w_fit * ref_w[:n]
+
+    delay_s, coherence = differential_delay_from_cfr(freqs_fit, h_fit, ref_fit, w_fit)
+    scale = to_float(result.get("range_scale_m_per_s"))
+    if not math.isfinite(scale):
+        scale = 299_792_458.0 / 2.0
+    range_m = delay_s * scale if math.isfinite(delay_s) else float("nan")
+    return {
+        "delay_s": delay_s,
+        "range_m": range_m,
+        "range_mm": range_m * 1e3 if math.isfinite(range_m) else float("nan"),
+        "coherence": coherence,
+    }
+
+
 def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
     by_result: dict[tuple[int, str], dict[str, Any]] = {}
     for key in loaded.files:
@@ -171,6 +336,11 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
         if "range_summary_diff_cfr_coherence" in loaded.files
         else []
     )
+    cfr_diff_mm = (
+        np.asarray(loaded["range_summary_cfr_diff_range_mm"]).reshape(-1)
+        if "range_summary_cfr_diff_range_mm" in loaded.files
+        else []
+    )
 
     for i, raw_ch in enumerate(channels):
         ch = str(unpack(raw_ch)).strip().upper()
@@ -191,6 +361,10 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
             item["range_diff_mm"] = unpack(diff_mm[i])
         if i < len(coh):
             item["diff_coherence"] = unpack(coh[i])
+            item["cfr_norm_coherence"] = unpack(coh[i])
+        if i < len(cfr_diff_mm):
+            item["cfr_norm_range_mm"] = unpack(cfr_diff_mm[i])
+            item["cfr_norm_range_m"] = to_float(unpack(cfr_diff_mm[i])) / 1e3
 
         zero_item = zero_reference_result(loaded, ch, i)
         for key in ("rng", "prof_db", "reference_range_m"):
@@ -241,6 +415,7 @@ def extract_file(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, 
         rows: list[dict[str, Any]] = []
         for result in ranges:
             channel = result.get("ch", result.get("channel", ""))
+            cfr_norm = cfr_normalized_result(loaded, result)
             row = {
                 "file": str(path),
                 "created": created,
@@ -277,6 +452,10 @@ def extract_file(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                 "processing_gain_db_est": infer_processing_gain_db(result, loaded),
                 "pslr_db": result.get("pslr_db", metrics.get("pslr_db", {}).get("value", float("nan"))),
                 "range_diff_mm": result.get("range_diff_mm", float("nan")),
+                "cfr_norm_delay_s": cfr_norm["delay_s"],
+                "cfr_norm_range_m": cfr_norm["range_m"],
+                "cfr_norm_range_mm": cfr_norm["range_mm"],
+                "cfr_norm_coherence": cfr_norm["coherence"],
                 "range_mode": result.get("range_mode", ""),
                 "range_est_method": result.get("range_est_method", ""),
                 "rng": np.asarray(result.get("rng", []), dtype=float).reshape(-1),
@@ -303,6 +482,8 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "range_peak_mm",
         "reference_range_mm",
         "range_diff_mm",
+        "cfr_norm_range_mm",
+        "cfr_norm_coherence",
         "band_power_dbm",
         "radar_snr_db",
         "comm_snr_db",
@@ -341,6 +522,10 @@ def write_summary_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "processing_gain_db_est",
         "pslr_db",
         "range_diff_mm",
+        "cfr_norm_delay_s",
+        "cfr_norm_range_m",
+        "cfr_norm_range_mm",
+        "cfr_norm_coherence",
         "range_mode",
         "range_est_method",
     ]
@@ -639,25 +824,25 @@ def link_budget_from_row(row: dict[str, Any], params: dict[str, float]) -> list[
     rf_hz = params["rf_ghz"] * 1e9
     gt = params["tx_ant_gain_dbi"]
     gr = params["rx_ant_gain_dbi"]
-    sigma = max(params["rcs_sqm"], 1e-12)
+    g_target_lin = 10.0 ** (gt / 10.0)
+    sigma_struct = max(params["rcs_sqm"], 0.0)
     lna_gain = params["lna_gain_db"]
     drive_gain = params["drive_amp_gain_db"]
     cable_loss = params["cable_loss_db"]
     conv_gain = params["homodyne_gain_db"]
     chain_gain = lna_gain + drive_gain + conv_gain - cable_loss
     lam = 3e8 / rf_hz
+    sigma_struct_eff = sigma_struct * g_target_lin
+    sigma_ant = (lam ** 2 * g_target_lin ** 2) / (4.0 * math.pi)
+    sigma = max(sigma_struct_eff + sigma_ant, 1e-12)
 
     one_way_loss = fspl_db(range_m, rf_hz)
     pr_one_way = ptx_dbm + gt + gr - one_way_loss
     pred_one_way_if = pr_one_way + chain_gain
 
-    pr_mono = (
-        ptx_dbm + gt + gr
-        + 20.0 * math.log10(lam)
-        + 10.0 * math.log10(sigma)
-        - 30.0 * math.log10(4.0 * math.pi)
-        - 40.0 * math.log10(range_m)
-    )
+    rcs_gain_db = 10.0 * math.log10(4.0 * math.pi * sigma / (lam ** 2) + 1e-30)
+    radar_loss_db = 2.0 * one_way_loss - rcs_gain_db
+    pr_mono = ptx_dbm + gt + gt - radar_loss_db
     pred_mono_if = pr_mono + chain_gain
 
     if ch == "C1":
@@ -677,11 +862,10 @@ def link_budget_from_row(row: dict[str, Any], params: dict[str, float]) -> list[
     inferred_rcs = float("nan")
     if ch == "C2" and math.isfinite(band_dbm):
         target_rf = band_dbm - chain_gain
+        inferred_rcs_gain_db = target_rf - ptx_dbm - gt - gt + 2.0 * one_way_loss
         sigma_db = (
-            target_rf - ptx_dbm - gt - gr
-            - 20.0 * math.log10(lam)
-            + 30.0 * math.log10(4.0 * math.pi)
-            + 40.0 * math.log10(range_m)
+            inferred_rcs_gain_db
+            - 10.0 * math.log10(4.0 * math.pi / (lam ** 2))
         )
         inferred_rcs = 10.0 ** (sigma_db / 10.0)
 
@@ -691,6 +875,12 @@ def link_budget_from_row(row: dict[str, Any], params: dict[str, float]) -> list[
         ("Distance used", range_m * 1e3, "mm"),
         ("TX power", ptx_dbm, "dBm"),
         ("One-way FSPL", one_way_loss, "dB"),
+        ("Round-trip FSPL", 2.0 * one_way_loss, "dB"),
+        ("RCS gain", rcs_gain_db, "dB"),
+        ("Structural RCS", sigma_struct, "m^2"),
+        ("Re-rad structural RCS", sigma_struct_eff, "m^2"),
+        ("Antenna-mode RCS", sigma_ant, "m^2"),
+        ("Effective RCS", sigma, "m^2"),
         ("C1 RF at RX ant", pr_one_way, "dBm"),
         ("C1 predicted IF band", pred_one_way_if, "dBm"),
         ("C2 RF echo at RX ant", pr_mono, "dBm"),
@@ -711,6 +901,8 @@ class RangeDataViewer:
         ("range_peak_mm", "Meas mm", 90),
         ("reference_range_mm", "Ref mm", 90),
         ("range_diff_mm", "Diff mm", 85),
+        ("cfr_norm_range_mm", "CFR mm", 85),
+        ("cfr_norm_coherence", "CFR Coh", 75),
         ("band_power_dbm", "Band dBm", 85),
         ("radar_snr_db", "Radar SNR", 85),
         ("comm_snr_db", "Comm SNR", 85),
@@ -723,6 +915,8 @@ class RangeDataViewer:
         ("range_peak_mm", "Range Peak", "mm"),
         ("reference_range_mm", "Reference Range", "mm"),
         ("range_diff_mm", "Range Difference", "mm"),
+        ("cfr_norm_range_mm", "CFR-normalized Range", "mm"),
+        ("cfr_norm_coherence", "CFR-normalized Coherence", ""),
         ("band_power_dbm", "Band Power", "dBm"),
         ("radar_snr_db", "Radar SNR", "dB"),
         ("comm_snr_db", "Communication SNR", "dB"),
@@ -767,8 +961,8 @@ class RangeDataViewer:
             "photocurrent_ma": tk.StringVar(value="7.0"),
             "tx_power_dbm": tk.StringVar(value="-10.0"),
             "rf_ghz": tk.StringVar(value="280.0"),
-            "tx_ant_gain_dbi": tk.StringVar(value="25.0"),
-            "rx_ant_gain_dbi": tk.StringVar(value="25.0"),
+            "tx_ant_gain_dbi": tk.StringVar(value="30.0"),
+            "rx_ant_gain_dbi": tk.StringVar(value="30.0"),
             "lna_gain_db": tk.StringVar(value="14.0"),
             "drive_amp_gain_db": tk.StringVar(value="20.0"),
             "cable_loss_db": tk.StringVar(value="0.0"),

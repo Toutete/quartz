@@ -2118,11 +2118,12 @@ class SimConfig:
     dso_vscale_mv: float = 100.0
     dso_bandwidth_ghz: float = 40.0
     omt_iso_db: float = 25.0
+    omt_il_db: float = 1.5
     ant_gain_dbi: float = 30.0
     tx_ant_gain_dbi: float = 30.0
     rx_ant_gain_dbi: float = 30.0
     target_rcs_sqm: float = 1.0
-    target_ant_gain_dbi: float = 25.0
+    target_ant_gain_dbi: float = 30.0
     target_gamma_mag: float = 1.0
     target_pol_eff: float = 1.0
     target_dist_m: float = 1.0  # Default 1m
@@ -2360,10 +2361,18 @@ def calc_isac_link_budget(
     c2_drive_gain_db: float,
     c1_cable_loss_db: float,
     c2_cable_loss_db: float,
+    omt_il_db: float = 0.0,
     target_ant_gain_dbi: float = 0.0,
     target_gamma_mag: float = 0.0,
     target_pol_eff: float = 1.0,
 ) -> dict[str, float]:
+    # One-way RX (C1): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant -> OMT -> LNA
+    #   P_rx_received = P_tx - L_OMT + G_tx - FSPL + G_rx - L_OMT
+    # Monostatic radar RX (C2): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant
+    #   (antenna-mode + structural RCS) -- FSPL -- TX ant -> OMT -> LNA
+    #   P_radar_echo = P_tx - L_OMT + G_tx - L_radar + G_tx - L_OMT
+    #   L_radar = 2*FSPL - G_RCS, with G_RCS = 10*log10(4*pi*sigma_eff/lambda^2)
+    #   the RCS expressed as an equivalent antenna gain.
     d = max(float(distance_m), 1e-9)
     rf_hz = max(float(rf_ghz), 1e-9) * 1e9
     lam = 3e8 / rf_hz
@@ -2371,23 +2380,29 @@ def calc_isac_link_budget(
     g_target = 10.0 ** (float(target_ant_gain_dbi) / 10.0)
     gamma_mag = float(np.clip(abs(float(target_gamma_mag)), 0.0, 1.0))
     pol_eff = float(np.clip(float(target_pol_eff), 0.0, 1.0))
+    sigma_struct_eff = sigma_struct * g_target * gamma_mag ** 2 * pol_eff
     sigma_ant = (lam ** 2 * g_target ** 2 * gamma_mag ** 2 * pol_eff) / (4.0 * np.pi)
-    sigma = max(sigma_struct + sigma_ant, 1e-12)
+    sigma = max(sigma_struct_eff + sigma_ant, 1e-12)
+    omt_il_db = float(omt_il_db)
     fspl_one_way_db = 20.0 * np.log10(4.0 * np.pi * d * rf_hz / 3e8)
-    c1_rf_dbm = float(tx_dbm + tx_gain_dbi + rx_gain_dbi - fspl_one_way_db)
-    radar_loss_db = 10.0 * np.log10(
-        ((4.0 * np.pi) ** 3 * d ** 4)
-        / ((10.0 ** (tx_gain_dbi / 10.0)) * (10.0 ** (rx_gain_dbi / 10.0)) * lam ** 2 * sigma)
-        + 1e-30
-    )
-    c2_rf_dbm = float(tx_dbm - radar_loss_db)
+    rcs_gain_db = 10.0 * np.log10(4.0 * np.pi * sigma / (lam ** 2) + 1e-30)
+    radar_loss_db = 2.0 * fspl_one_way_db - rcs_gain_db
+    c1_total_loss_db = fspl_one_way_db - tx_gain_dbi - rx_gain_dbi + 2.0 * omt_il_db
+    c2_total_loss_db = radar_loss_db - tx_gain_dbi - rx_gain_dbi + 2.0 * omt_il_db
+    c1_rf_dbm = float(tx_dbm - c1_total_loss_db)
+    c2_rf_dbm = float(tx_dbm - c2_total_loss_db)
     c1_if_chain_db = float(c1_drive_gain_db - c1_cable_loss_db)
     c2_if_chain_db = float(c2_drive_gain_db - c2_cable_loss_db)
     return {
         "delay_ns": 2.0 * d / 3e8 * 1e9,
         "fspl_one_way_db": fspl_one_way_db,
-        "radar_path_loss_db": radar_loss_db,
+        "rcs_gain_db": rcs_gain_db,
+        "radar_loss_db": radar_loss_db,
+        "omt_il_db": omt_il_db,
+        "radar_path_loss_db": c2_total_loss_db,
+        "c1_total_loss_db": c1_total_loss_db,
         "structural_rcs_sqm": sigma_struct,
+        "reradiated_structural_rcs_sqm": sigma_struct_eff,
         "antenna_mode_rcs_sqm": sigma_ant,
         "effective_rcs_sqm": sigma,
         "c1_rf_dbm": c1_rf_dbm,
@@ -2486,12 +2501,14 @@ def run_isac_sim(cfg: SimConfig):
         c2_drive_gain_db=cfg.c2_drive_gain_db,
         c1_cable_loss_db=cfg.c1_cable_loss_db,
         c2_cable_loss_db=cfg.c2_cable_loss_db,
+        omt_il_db=cfg.omt_il_db,
         target_ant_gain_dbi=cfg.target_ant_gain_dbi,
         target_gamma_mag=cfg.target_gamma_mag,
         target_pol_eff=cfg.target_pol_eff,
     )
     radar_path_loss_db = float(link["radar_path_loss_db"])
     one_way_path_loss_db = float(link["fspl_one_way_db"])
+    c1_total_loss_db = float(link["c1_total_loss_db"])
     delay_ns = float(link["delay_ns"])
     cfg.path_loss_db = radar_path_loss_db
     cfg.delay_ns = delay_ns
@@ -2752,6 +2769,63 @@ def run_isac_sim(cfg: SimConfig):
     ref_sig = ref_sig - float(np.mean(ref_sig)) if len(ref_sig) else ref_sig
     sync_corr_full = np.abs(fftconvolve(radar_input, ref_sig[::-1], mode="full"))
     lags_full = np.arange(-(len(ref_sig) - 1), len(radar_input), dtype=np.int64)
+    si_norm_range_axis = np.zeros(0, dtype=np.float64)
+    si_norm_profile_db = np.zeros(0, dtype=np.float64)
+    si_norm_target_over_si_db = float("nan")
+    si_norm_phase_coherence = float("nan")
+    try:
+        frame_n = min(int(frame_len), len(radar_input), len(ref_sig))
+        n_frames_norm = max(1, min(int(num_frames), 64))
+        if frame_n >= 32 and n_frames_norm >= 1:
+            ref_frame = np.asarray(ref_sig[:frame_n], dtype=np.float64)
+            ref_frame = ref_frame - float(np.mean(ref_frame))
+            ref_frame_c = hilbert(ref_frame)
+            lags_norm = np.arange(-(frame_n - 1), frame_n, dtype=np.int64)
+            near_zero = np.abs(lags_norm) <= max(2, int(0.02 * frame_n))
+            corr_sum = None
+            phase_unit: list[complex] = []
+            for k in range(n_frames_norm):
+                start = min(k * step, max(0, len(radar_input) - frame_n))
+                seg = np.asarray(radar_input[start:start + frame_n], dtype=np.float64)
+                if len(seg) < frame_n:
+                    break
+                seg = seg - float(np.mean(seg))
+                corr_c = fftconvolve(hilbert(seg), np.conj(ref_frame_c[::-1]), mode="full")
+                if corr_sum is None:
+                    corr_sum = np.zeros_like(corr_c, dtype=np.complex128)
+                if np.any(near_zero):
+                    z_idx_local = np.flatnonzero(near_zero)
+                    z_idx = int(z_idx_local[int(np.argmax(np.abs(corr_c[near_zero])))])
+                else:
+                    z_idx = int(np.argmin(np.abs(lags_norm)))
+                si_phase = float(np.angle(corr_c[z_idx] + 1e-30))
+                phase_unit.append(np.exp(1j * si_phase))
+                corr_sum += corr_c * np.exp(-1j * si_phase)
+            if corr_sum is not None:
+                mag = np.abs(corr_sum / max(1, len(phase_unit)))
+                rng_norm_full = lags_norm.astype(np.float64) * (3e8 / 2.0 / fs)
+                valid_norm = (rng_norm_full >= 0.0) & (rng_norm_full <= 4.0)
+                si_norm_range_axis = rng_norm_full[valid_norm]
+                si_mag = mag[valid_norm]
+                si_norm_profile_db = 20.0 * np.log10(si_mag / (np.max(si_mag) + 1e-30) + 1e-30)
+                if np.any(near_zero):
+                    z_idx_local = np.flatnonzero(near_zero)
+                    z_idx = int(z_idx_local[int(np.argmax(mag[near_zero]))])
+                else:
+                    z_idx = int(np.argmin(np.abs(lags_norm)))
+                target_mask_full = (
+                    np.isfinite(rng_norm_full)
+                    & (np.abs(rng_norm_full - float(cfg.target_dist_m)) <= max(0.05, 3e8 / (2.0 * max(occupied_bw_hz, 1.0))))
+                    & (rng_norm_full >= 0.0)
+                )
+                if np.any(target_mask_full):
+                    t_idx_all = np.flatnonzero(target_mask_full)
+                    t_idx = int(t_idx_all[int(np.argmax(mag[target_mask_full]))])
+                    si_norm_target_over_si_db = 20.0 * np.log10((mag[t_idx] + 1e-30) / (mag[z_idx] + 1e-30))
+                if phase_unit:
+                    si_norm_phase_coherence = float(np.abs(np.mean(np.asarray(phase_unit))))
+    except Exception:
+        pass
 
     best_delay = int(lags_full[int(np.argmax(sync_corr_full))]) if len(sync_corr_full) else 0
 
@@ -2815,11 +2889,7 @@ def run_isac_sim(cfg: SimConfig):
     #
     d = d_link
     path_loss_com_db = one_way_path_loss_db
-    effective_one_way_loss_db = (
-        path_loss_com_db
-        - float(cfg.tx_ant_gain_dbi)
-        - float(cfg.rx_ant_gain_dbi)
-    )
+    effective_one_way_loss_db = c1_total_loss_db
     beta_com = 10**(-effective_one_way_loss_db / 20.0)
     delay_samp_com = int((d / 3e8 * 1e9) * 1e-9 * fs)
 
@@ -3065,7 +3135,11 @@ def run_isac_sim(cfg: SimConfig):
         "if_center_hz": f_if,
         "radar_path_loss_db": radar_path_loss_db,
         "one_way_fspl_db": one_way_path_loss_db,
+        "round_trip_fspl_db": 2.0 * one_way_path_loss_db,
+        "rcs_gain_db": link["rcs_gain_db"],
+        "radar_loss_db": link["radar_loss_db"],
         "structural_rcs_sqm": link["structural_rcs_sqm"],
+        "reradiated_structural_rcs_sqm": link["reradiated_structural_rcs_sqm"],
         "antenna_mode_rcs_sqm": link["antenna_mode_rcs_sqm"],
         "effective_rcs_sqm": link["effective_rcs_sqm"],
         "rf_noise_bw_hz": rf_noise_bw_hz,
@@ -3077,6 +3151,10 @@ def run_isac_sim(cfg: SimConfig):
         "v_rec_c2_raw": v_dso_in,
         "sym_tx": sym_tx, "sym_eq": sym_eq, "evm_db": evm_db, "ser": ser,
         "range_axis_m": range_axis, "range_profile_db": range_profile_db,
+        "si_norm_range_axis_m": si_norm_range_axis,
+        "si_norm_range_profile_db": si_norm_profile_db,
+        "si_norm_target_over_si_db": si_norm_target_over_si_db,
+        "si_norm_phase_coherence": si_norm_phase_coherence,
         "c1_band_metrics": c1_band_metrics, "c2_band_metrics": c2_band_metrics,
         "radar_snr_db": radar_snr_db, "pslr_db": pslr_db, "processing_gain_db": proc_gain_db,
         "selected_range_m": selected_range_m,
@@ -3190,34 +3268,30 @@ class PhotonicIsacSimPanel:
 
         self.rows = {
             "tx":        self.table.insert("", "end", text="UTC-PD Output (TX)", values=("0.00", "dBm")),
-            "tx_lines":  self.table.insert("", "end", text="TX Carrier / DSB",   values=("N/A", "dBm")),
             "opt_pwr":   self.table.insert("", "end", text="UTC-PD Optical In", values=("0.00", "mW")),
-            "osa_tones": self.table.insert("", "end", text="Optical Tones",       values=("auto / 193.410", "THz")),
-            "osa_lines": self.table.insert("", "end", text="UTC-PD Tone / DSB",   values=("N/A", "dBm")),
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
-            "obs_cspr":  self.table.insert("", "end", text="Measured CSPR",       values=("20.0", "dB")),
-            "uxr_noise": self.table.insert("", "end", text="UXR Noise",         values=("0.00", "mVrms")),
-            "rcs_struct": self.table.insert("", "end", text="Structural RCS",    values=("0.00", "m^2")),
-            "rcs_ant":    self.table.insert("", "end", text="Antenna-mode RCS",  values=("0.00", "m^2")),
+            "target_gain": self.table.insert("", "end", text="Common/Re-rad Ant Gain", values=("0.00", "dBi")),
+            "rcs_struct": self.table.insert("", "end", text="Structural RCS",     values=("0.00", "m^2")),
+            "rcs_struct_eff": self.table.insert("", "end", text="Re-rad Structural RCS", values=("0.00", "m^2")),
+            "rcs_ant":   self.table.insert("", "end", text="Antenna-mode RCS",   values=("0.00", "m^2")),
             "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "m^2")),
             "delay":     self.table.insert("", "end", text="Radar Echo Delay",  values=("0.00", "ns")),
-            "loss":      self.table.insert("", "end", text="C2 Radar Loss (1/R^4)", values=("0.00", "dB")),
-            "echo":      self.table.insert("", "end", text="C2 RF Echo Power",  values=("0.00", "dBm")),
-            "si":        self.table.insert("", "end", text="Local SI Power",    values=("0.00", "dBm")),
-            "lna":       self.table.insert("", "end", text="LNA Out (Sig)",     values=("0.00", "dBm")),
-            "lna_total": self.table.insert("", "end", text="LNA Out (Total)",   values=("0.00", "dBm")),
-            "sinr":      self.table.insert("", "end", text="Radar SINR",        values=("0.00", "dB")),
-            "comm_loss": self.table.insert("", "end", text="C1 FSPL (1/R^2)",   values=("0.00", "dB")),
-            "comm_rx":   self.table.insert("", "end", text="C1 RF Rx Power",    values=("0.00", "dBm")),
+            "omt_il":    self.table.insert("", "end", text="OMT Insertion Loss (x2)", values=("0.00", "dB")),
+            "comm_loss": self.table.insert("", "end", text="C1 FSPL (one-way)", values=("0.00", "dB")),
+            "comm_rx":   self.table.insert("", "end", text="C1 P_rx_received",  values=("0.00", "dBm")),
+            "radar_fspl2": self.table.insert("", "end", text="C2 Round-trip FSPL", values=("0.00", "dB")),
+            "rcs_gain":  self.table.insert("", "end", text="C2 RCS Gain",       values=("0.00", "dB")),
+            "loss":      self.table.insert("", "end", text="C2 L_radar (2xFSPL - RCS gain)", values=("0.00", "dB")),
+            "echo":      self.table.insert("", "end", text="C2 P_radar_echo",   values=("0.00", "dBm")),
             "if_chain":  self.table.insert("", "end", text="C1/C2 IF Gain",     values=("0/0", "dB")),
-            "c1_if":     self.table.insert("", "end", text="C1 IF Band Est.",   values=("0.00", "dBm")),
-            "c2_if":     self.table.insert("", "end", text="C2 IF Band Est.",   values=("0.00", "dBm")),
             "c1_band":   self.table.insert("", "end", text="C1 Band Power",     values=("N/A", "dBm")),
             "c2_band":   self.table.insert("", "end", text="C2 Band Power",     values=("N/A", "dBm")),
             "c1_noise":  self.table.insert("", "end", text="C1 Noise Power",    values=("N/A", "dBm")),
             "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
             "comm_snr":  self.table.insert("", "end", text="C1 Comm SNR",       values=("0.00", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
+            "si_norm_ratio": self.table.insert("", "end", text="SI-norm Target/SI", values=("N/A", "dB")),
+            "si_norm_coh": self.table.insert("", "end", text="SI Phase Coherence", values=("N/A", "")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
             "proc_gain": self.table.insert("", "end", text="Processing Gain",   values=("N/A", "dB")),
             "evm_pct":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "%")),
@@ -3298,33 +3372,32 @@ class PhotonicIsacSimPanel:
         add_p(12, "utcpd_photocurrent_ma", "UTC-PD Photocurrent [mA]", "7.0")
         add_p(13, "lna_gain_db",  "THz LNA Gain [dB]",      "13.0")
         add_p(14, "lna_nf_db",    "LNA NF [dB]",            "8.0")
-        add_p(15, "zbd_resp_vpw", "VDI ZBD Resp. [V/W]",    "1700")
-        add_p(16, "zbd_nep_pw",   "VDI ZBD NEP [pW/sqrtHz]","4.8")
-        add_p(17, "c1_drive_gain_db","C1 Drive Amp [dB]",   "30.0")
+        add_p(15, "zbd_resp_vpw", "VDI ZBD Resp. [V/W]",    "1500")
+        add_p(16, "zbd_nep_pw",   "VDI ZBD NEP [pW/sqrtHz]","5")
+        add_p(17, "c1_drive_gain_db","C1 Drive Amp [dB]",   "28.0")
         add_p(18, "if_amp_nf_db", "IF Amp NF [dB]",         "5.0")
-        add_p(19, "c2_drive_gain_db","C2 Drive Amp [dB]",   "24.0")
-        add_p(20, "tx_ant_gain_dbi", "TX Ant Gain [dBi]",   "30.0")
-        add_p(21, "rx_ant_gain_dbi", "RX Ant Gain [dBi]",   "30.0")
-        add_p(22, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "0.0")
-        add_p(23, "c2_cable_loss_db", "C2 Cable Loss [dB]", "0.0")
+        add_p(19, "c2_drive_gain_db","C2 Drive Amp [dB]",   "22.0")
+        add_p(20, "tx_ant_gain_dbi", "Common Ant Gain [dBi]", "30.0")
+        add_p(22, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "7.0")
+        add_p(23, "c2_cable_loss_db", "C2 Cable Loss [dB]", "10.0")
         add_p(24, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "25.0")
-        add_p(27, "rcs_sqm",      "Struct. RCS [m^2]",      "0.01")
-        add_p(28, "target_ant_gain_dbi", "Target Ant Gain [dBi]", "25.0")
-        add_p(29, "target_gamma_mag", "Target |Gamma|",     "1.0")
-        add_p(30, "target_pol_eff", "Target Pol Eff",       "1.0")
+        add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "2")
+        add_p(28, "rcs_sqm",      "Struct. RCS [m^2]",      "0.01")
+        add_p(30, "target_gamma_mag", "Target |Gamma|",     "1.0")
+        add_p(31, "target_pol_eff", "Target Pol Eff",       "1.0")
 
-        ttk.Label(grp, text="Target Dist [m]").grid(row=31, column=0, sticky="w", pady=2)
+        ttk.Label(grp, text="Target Dist [m]").grid(row=32, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
         self.params["target_dist_m"].trace_add("write", self._update_table)
-        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=31, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.params["target_dist_m"], width=10).grid(row=32, column=1, sticky="w")
 
         self.sc_fde_enable_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=32, column=0, columnspan=2, sticky="w", pady=2)
-        ttk.Label(grp, text="Post-EQ Taps").grid(row=33, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable Post-EQ (LS)", variable=self.sc_fde_enable_var).grid(row=33, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Label(grp, text="Post-EQ Taps").grid(row=34, column=0, sticky="w", pady=2)
         self.sc_fde_taps_var = tk.StringVar(value="1")
-        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=33, column=1, sticky="w")
+        ttk.Entry(grp, textvariable=self.sc_fde_taps_var, width=10).grid(row=34, column=1, sticky="w")
 
         # Plot on right
         self.fig = Figure(figsize=(8, 8), dpi=100)
@@ -3377,9 +3450,9 @@ class PhotonicIsacSimPanel:
                 self._param_float("dso_bw_ghz", 40.0) * 1e9,
             ) * 1e3
             tx_gain = self._param_float("tx_ant_gain_dbi", 30.0)
-            rx_gain = self._param_float("rx_ant_gain_dbi", 30.0)
+            rx_gain = tx_gain
             rcs = self._param_float("rcs_sqm", 0.01)
-            target_ant_gain = self._param_float("target_ant_gain_dbi", 25.0)
+            target_ant_gain = tx_gain
             target_gamma = self._param_float("target_gamma_mag", 1.0)
             target_pol = self._param_float("target_pol_eff", 1.0)
             link = calc_isac_link_budget(
@@ -3394,12 +3467,13 @@ class PhotonicIsacSimPanel:
                 c2_drive_gain_db=self._param_float("c2_drive_gain_db", 24.0),
                 c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
                 c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
+                omt_il_db=self._param_float("omt_il_db", 1.5),
                 target_ant_gain_dbi=target_ant_gain,
                 target_gamma_mag=target_gamma,
                 target_pol_eff=target_pol,
             )
             delay_ns = link["delay_ns"]
-            loss_db = link["radar_path_loss_db"]
+            loss_db = link["radar_loss_db"]
             echo_dbm = link["c2_rf_dbm"]
             si_enable = bool(self.si_enable_var.get())
             si_dbm = tx_dbm - self._param_float("omt_iso_db", 25.0) if si_enable else -300.0
@@ -3461,46 +3535,35 @@ class PhotonicIsacSimPanel:
             # Measured EVM is updated after simulation run.
 
             self.table.item(self.rows["tx"], values=(f"{tx_dbm:.1f}", "dBm"))
-            if "tx_lines" in self.rows:
-                self.table.item(self.rows["tx_lines"], values=(f"{rf_lines['carrier_dbm']:.1f} / {rf_lines['sideband_each_dbm']:.1f}", "dBm"))
             if "opt_pwr" in self.rows:
                 self.table.item(self.rows["opt_pwr"], values=(f"{opt_mw:.2f}", "mW"))
-            if "osa_tones" in self.rows:
-                self.table.item(self.rows["osa_tones"], values=(f"{opt_tone1:.3f} / {opt_tone2:.3f}", "THz"))
-            if "osa_lines" in self.rows:
-                self.table.item(
-                    self.rows["osa_lines"],
-                    values=(f"{optical_lines['mzm_carrier_dbm']:.1f} / {optical_lines['sideband_each_dbm']:.1f}", "dBm"),
-                )
             if "mzm_rf" in self.rows:
                 self.table.item(self.rows["mzm_rf"], values=(f"{mzm_metrics['rf_in_dbm']:.1f}", "dBm"))
-            if "obs_cspr" in self.rows:
-                self.table.item(self.rows["obs_cspr"], values=(f"{mzm_metrics['effective_cspr_db']:.1f}", "dB"))
-            if "uxr_noise" in self.rows:
-                self.table.item(self.rows["uxr_noise"], values=(f"{uxr_noise_mv:.3f}", "mVrms"))
+            if "target_gain" in self.rows:
+                self.table.item(self.rows["target_gain"], values=(f"{target_ant_gain:.1f}", "dBi"))
             if "rcs_struct" in self.rows:
                 self.table.item(self.rows["rcs_struct"], values=(f"{link['structural_rcs_sqm']:.4g}", "m^2"))
+            if "rcs_struct_eff" in self.rows:
+                self.table.item(self.rows["rcs_struct_eff"], values=(f"{link['reradiated_structural_rcs_sqm']:.4g}", "m^2"))
             if "rcs_ant" in self.rows:
                 self.table.item(self.rows["rcs_ant"], values=(f"{link['antenna_mode_rcs_sqm']:.4g}", "m^2"))
             if "rcs_eff" in self.rows:
                 self.table.item(self.rows["rcs_eff"], values=(f"{link['effective_rcs_sqm']:.4g}", "m^2"))
             self.table.item(self.rows["delay"], values=(f"{delay_ns:.2f}", "ns"))
+            if "omt_il" in self.rows:
+                self.table.item(self.rows["omt_il"], values=(f"{2.0 * link['omt_il_db']:.2f}", "dB"))
             self.table.item(self.rows["loss"], values=(f"{loss_db:.1f}", "dB"))
             self.table.item(self.rows["echo"], values=(f"{echo_dbm:.1f}", "dBm"))
-            self.table.item(self.rows["si"], values=((f"{si_dbm:.1f}" if si_enable else "OFF"), ("dBm" if si_enable else "-")))
-            self.table.item(self.rows["lna"], values=(f"{lna_out_dbm:.1f}", "dBm"))
-            self.table.item(self.rows["lna_total"], values=(f"{lna_total_dbm:.1f}", "dBm"))
-            self.table.item(self.rows["sinr"], values=(f"{sinr_db:.2f}", "dB"))
             if "comm_loss" in self.rows:
                 self.table.item(self.rows["comm_loss"], values=(f"{loss_com_db:.1f}", "dB"))
             if "comm_rx" in self.rows:
                 self.table.item(self.rows["comm_rx"], values=(f"{comm_dbm:.1f}", "dBm"))
+            if "radar_fspl2" in self.rows:
+                self.table.item(self.rows["radar_fspl2"], values=(f"{2.0 * loss_com_db:.1f}", "dB"))
+            if "rcs_gain" in self.rows:
+                self.table.item(self.rows["rcs_gain"], values=(f"{link['rcs_gain_db']:.1f}", "dB"))
             if "if_chain" in self.rows:
                 self.table.item(self.rows["if_chain"], values=(f"{link['c1_if_chain_db']:.1f}/{link['c2_if_chain_db']:.1f}", "dB"))
-            if "c1_if" in self.rows:
-                self.table.item(self.rows["c1_if"], values=(f"{link['c1_if_dbm']:.1f}", "dBm"))
-            if "c2_if" in self.rows:
-                self.table.item(self.rows["c2_if"], values=(f"{link['c2_if_dbm']:.1f}", "dBm"))
             if "comm_snr" in self.rows:
                 self.table.item(self.rows["comm_snr"], values=(f"{com_snr_db:.2f}", "dB"))
         except Exception as e:
@@ -3550,13 +3613,14 @@ class PhotonicIsacSimPanel:
             dso_vscale_mv=self._param_float("dso_vscale_mv", 100.0),
             dso_bandwidth_ghz=self._param_float("dso_bw_ghz", 40.0),
             omt_iso_db=self._param_float("omt_iso_db", 25.0),
+            omt_il_db=self._param_float("omt_il_db", 1.5),
             ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
             tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
-            rx_ant_gain_dbi=self._param_float("rx_ant_gain_dbi", 30.0),
+            rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 0.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 0.0),
             target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
-            target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", 25.0),
+            target_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 30.0),
             target_gamma_mag=self._param_float("target_gamma_mag", 1.0),
             target_pol_eff=self._param_float("target_pol_eff", 1.0),
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
@@ -3578,6 +3642,7 @@ class PhotonicIsacSimPanel:
             c2_drive_gain_db=cfg.c2_drive_gain_db,
             c1_cable_loss_db=cfg.c1_cable_loss_db,
             c2_cable_loss_db=cfg.c2_cable_loss_db,
+            omt_il_db=cfg.omt_il_db,
             target_ant_gain_dbi=cfg.target_ant_gain_dbi,
             target_gamma_mag=cfg.target_gamma_mag,
             target_pol_eff=cfg.target_pol_eff,
@@ -3708,6 +3773,10 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["comm_snr"], values=(f"{float(c1m.get('snr_db', np.nan)):.2f}", "dB"))
             if "radar_snr" in self.rows:
                 self.table.item(self.rows["radar_snr"], values=(f"{float(self.data.get('radar_snr_db', np.nan)):.2f}", "dB"))
+            if "si_norm_ratio" in self.rows:
+                self.table.item(self.rows["si_norm_ratio"], values=(f"{float(self.data.get('si_norm_target_over_si_db', np.nan)):.2f}", "dB"))
+            if "si_norm_coh" in self.rows:
+                self.table.item(self.rows["si_norm_coh"], values=(f"{float(self.data.get('si_norm_phase_coherence', np.nan)):.3f}", ""))
             if "pslr" in self.rows:
                 self.table.item(self.rows["pslr"], values=(f"{float(self.data.get('pslr_db', np.nan)):.2f}", "dB"))
             if "proc_gain" in self.rows:
@@ -3769,13 +3838,27 @@ class PhotonicIsacSimPanel:
         if len(rng) > 0:
             max_range = 4.0
             m = rng <= max_range
-            self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3)
+            self.ax_range.plot(rng[m], prof[m], color="teal", lw=1.3, label="raw")
+            rng_norm = np.asarray(self.data.get("si_norm_range_axis_m", []), dtype=np.float64)
+            prof_norm = np.asarray(self.data.get("si_norm_range_profile_db", []), dtype=np.float64)
+            if len(rng_norm) and len(rng_norm) == len(prof_norm):
+                mn = rng_norm <= max_range
+                if np.any(mn):
+                    self.ax_range.plot(
+                        rng_norm[mn],
+                        prof_norm[mn],
+                        color="#dc2626",
+                        lw=1.0,
+                        linestyle="--",
+                        label="SI-normalized",
+                    )
             sel_m = float(self.data.get("selected_range_m", float("nan")))
             if np.isfinite(sel_m) and np.any(m):
                 idx = int(np.argmin(np.abs(rng - sel_m)))
                 if 0 <= idx < len(prof):
                     self.ax_range.axvline(sel_m, color="#dc2626", linestyle="--", lw=1.0, label=f"Target {sel_m:.2f} m")
-                    self.ax_range.legend(loc="upper right", fontsize=8)
+            if self.ax_range.get_legend_handles_labels()[0]:
+                self.ax_range.legend(loc="upper right", fontsize=8)
             self.ax_range.set_xlim(0.0, max_range)
             max_prof = np.max(prof[m]) if np.any(m) else 0.0
             self.ax_range.set_ylim(-40.0, max_prof + 10.0)
