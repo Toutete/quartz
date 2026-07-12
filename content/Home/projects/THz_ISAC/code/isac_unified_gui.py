@@ -15,6 +15,7 @@ import warnings
 warnings.filterwarnings("ignore", message="This figure includes Axes that are not compatible with tight_layout")
 
 from scipy.signal import welch, hilbert, fftconvolve
+from scipy.special import erfcinv
 
 import queue
 import threading
@@ -2583,9 +2584,21 @@ def calc_if_band_metrics(sig: np.ndarray, fs: float, f_if_hz: float, bandwidth_h
         noise_density_mw_hz = float(np.median(psd_mw_hz[noise_band]))
         noise_mw_psd = noise_density_mw_hz * max(hi - lo, 1.0)
     else:
+        noise_density_mw_hz = float("nan")
         noise_mw_psd = 0.0
     noise_mw_dso = ((float(noise_vrms) ** 2) / 50.0) * 1e3 * (max(hi - lo, 1.0) / max(40e9, hi - lo))
-    noise_mw = max(noise_mw_psd, noise_mw_dso)
+    # If the simulated/loaded waveform has an out-of-band noise floor, use it
+    # as the measured total DSO/system noise density. That floor already
+    # includes the generated IF amp noise, DSO input noise, and any residual
+    # broadband floor. The UXR V/div model is only a fallback when no clean
+    # out-of-band region exists; using max() here made the table disagree with
+    # the visible PSD floor.
+    if noise_mw_psd > 0.0 and np.isfinite(noise_density_mw_hz):
+        noise_mw = noise_mw_psd
+        noise_source = "psd"
+    else:
+        noise_mw = noise_mw_dso
+        noise_source = "uxr_model"
     noise_mw = max(noise_mw, 1e-30)
     sig_mw = max(p_mw - noise_mw, 1e-30)
     return {
@@ -2593,6 +2606,7 @@ def calc_if_band_metrics(sig: np.ndarray, fs: float, f_if_hz: float, bandwidth_h
         "raw_band_power_dbm": 10.0 * np.log10(max(p_mw, 1e-30)),
         "noise_dbm": 10.0 * np.log10(noise_mw),
         "noise_floor_dbm_hz": 10.0 * np.log10(max(noise_mw / max(hi - lo, 1.0), 1e-30)),
+        "noise_source": noise_source,
         "snr_db": 10.0 * np.log10(sig_mw / noise_mw),
     }
 
@@ -3579,7 +3593,10 @@ class PhotonicIsacSimPanel:
             "c2_band":   self.table.insert("", "end", text="C2 Band Power",     values=("N/A", "dBm")),
             "c1_noise":  self.table.insert("", "end", text="C1 Noise Power",    values=("N/A", "dBm")),
             "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
-            "comm_snr":  self.table.insert("", "end", text="C1 Comm SNR",       values=("0.00", "dB")),
+            "c1_noise_density": self.table.insert("", "end", text="C1 Noise Density", values=("N/A", "dBm/Hz")),
+            "c2_noise_density": self.table.insert("", "end", text="C2 Noise Density", values=("N/A", "dBm/Hz")),
+            "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
+            "comm_snr":  self.table.insert("", "end", text="C1 Band SNR",       values=("0.00", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("matched-filter raw", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
@@ -4075,6 +4092,15 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["c1_noise"], values=(f"{float(c1m.get('noise_dbm', np.nan)):.2f}", "dBm"))
             if "c2_noise" in self.rows:
                 self.table.item(self.rows["c2_noise"], values=(f"{float(c2m.get('noise_dbm', np.nan)):.2f}", "dBm"))
+            if "c1_noise_density" in self.rows:
+                self.table.item(self.rows["c1_noise_density"], values=(f"{float(c1m.get('noise_floor_dbm_hz', np.nan)):.2f}", "dBm/Hz"))
+            if "c2_noise_density" in self.rows:
+                self.table.item(self.rows["c2_noise_density"], values=(f"{float(c2m.get('noise_floor_dbm_hz', np.nan)):.2f}", "dBm/Hz"))
+            if "noise_source" in self.rows:
+                self.table.item(
+                    self.rows["noise_source"],
+                    values=(f"C1:{c1m.get('noise_source', 'N/A')} / C2:{c2m.get('noise_source', 'N/A')}", ""),
+                )
             if "comm_snr" in self.rows:
                 self.table.item(self.rows["comm_snr"], values=(f"{float(c1m.get('snr_db', np.nan)):.2f}", "dB"))
             if "radar_snr" in self.rows:
@@ -5062,10 +5088,11 @@ class DsoPanel:
             ("bandwidth_hz", "Bandwidth Bw", "GHz", "System", "Occupied measurement band used for SNR/DIR."),
             ("band_power_dbm", "Band Power", "dBm", "Comm", "Noise-subtracted in-band power."),
             ("noise_floor_dbmhz", "Noise Floor", "dBm/Hz", "Comm", "Stored or capture-derived DSO noise density."),
-            ("snr_com_db", "SNR_com", "dB", "Comm", "Communication SNR from band power and noise floor."),
+            ("snr_com_db", "Band SNR", "dB", "Comm", "Band-power SNR from integrated PSD; use EVM-implied SNR for demod quality."),
             ("sinr_com_db", "SINR_com", "dB", "Comm", "Equals SNR if interference is not separately estimated."),
             ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+SNR_com)."),
             ("evm_db", "EVM", "dB", "Comm", "Measured demodulation EVM."),
+            ("evm_snr", "EVM-implied SNR", "dB", "Comm", "-EVM[dB]; demodulation-quality communication SNR."),
             ("evm_pct", "EVM", "%", "Comm", "Measured demodulation EVM."),
             ("ber", "BER", "", "Comm", "Measured pre-FEC BER when PRBS/reference lock is valid."),
             ("symbols", "Symbols", "", "Comm", "Symbols used for BER/EVM."),
@@ -5134,11 +5161,12 @@ class DsoPanel:
         except Exception:
             bw_hz = float("nan")
 
-        snr_db = self._metric_float("snr_com_db")
+        evm_snr_db = self._metric_float("evm_snr")
+        snr_db = evm_snr_db if np.isfinite(evm_snr_db) else self._metric_float("snr_com_db")
         if np.isfinite(snr_db) and not self._metric_is_finite(self._metric_float("sinr_com_db")):
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
-                "No separate clutter/interference estimate; using SNR_com."
+                "No separate clutter/interference estimate; using EVM-implied SNR when available."
             )
         sinr_db = self._metric_float("sinr_com_db")
         if np.isfinite(snr_db) and np.isfinite(bw_hz) and bw_hz > 0:
@@ -7855,7 +7883,7 @@ class DsoPanel:
             suffix = "" if row == 0 else f" {ch}"
             key_suffix = "" if row == 0 else f"_{ch.lower()}"
             self._set_metric(f"band_power_dbm{key_suffix}", f"Band Power{suffix}", vals["band_power_dbm"], "dBm")
-            self._set_metric(f"snr_com_db{key_suffix}", f"SNR{suffix}", vals["snr_db"], "dB")
+            self._set_metric(f"snr_com_db{key_suffix}", f"Band SNR{suffix}", vals["snr_db"], "dB")
             self._set_metric(f"noise_floor_dbmhz{key_suffix}", f"Noise Floor{suffix}", vals["noise_floor_dbmhz"], "dBm/Hz")
             if row == 0:
                 self.band_pwr_var.set(f"Band Power:  {vals['band_power_dbm']:.2f} dBm")
@@ -10189,7 +10217,7 @@ class DsoPanel:
             nf_dbmhz = 10.0 * np.log10(max(nf_mwhz, 1e-30))
             self._set_metric("band_power_dbm", "Band Power", p_sig_true_dbm, "dBm")
             self._set_metric("noise_floor_dbmhz", "Noise Floor", nf_dbmhz, "dBm/Hz")
-            self._set_metric("snr_com_db", "SNR_com", snr_db, "dB")
+            self._set_metric("snr_com_db", "Band SNR", snr_db, "dB")
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
                 "No separate clutter/interference estimate; using SNR_com."
@@ -13175,6 +13203,9 @@ class DsoPanel:
         )
         self.sym_count_var.set(f"Symbols:     {n_sym:,}")
         self._set_metric("evm_db", "EVM", evm_db, "dB")
+        evm_snr = -evm_db if np.isfinite(evm_db) else float("nan")
+        self._set_metric("evm_snr", "EVM-implied SNR", evm_snr, "dB")
+        self._set_metric("sinr_com_db", "SINR_com", evm_snr, "dB", "Using EVM-implied SNR for demodulation quality.")
         self._set_metric("evm_pct", "EVM", evm_pct, "%")
         self._set_metric("ber", "BER", ber if np.isfinite(ber) else float("nan"), "")
         self._set_metric("symbols", "Symbols", int(n_sym), "")
@@ -13213,6 +13244,360 @@ class DsoPanel:
         self._apply_dashboard_layout()
         self.canvas_plot.draw_idle()
 
+class SystemModelValidationPanel:
+    """Paper-model SNR/range validation tab."""
+
+    def __init__(self, parent: ttk.Frame, runtime: dict | None = None):
+        self.parent = parent
+        self.runtime = runtime if runtime is not None else {}
+        self.params: dict[str, tk.StringVar] = {}
+        self.meas_points: list[dict[str, float | str]] = []
+        self.status_var = tk.StringVar(value="Ready")
+        self._build_ui()
+        self._run()
+
+    def _build_ui(self) -> None:
+        outer = ttk.PanedWindow(self.parent, orient=tk.HORIZONTAL)
+        outer.pack(fill=tk.BOTH, expand=True)
+        left = ttk.Frame(outer)
+        right = ttk.Frame(outer)
+        outer.add(left, weight=1)
+        outer.add(right, weight=5)
+
+        ctrl = ttk.LabelFrame(left, text="Paper Model Parameters", padding=8)
+        ctrl.pack(fill=tk.BOTH, expand=True)
+
+        def add(row: int, key: str, label: str, value: str) -> None:
+            ttk.Label(ctrl, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=value)
+            self.params[key] = var
+            ttk.Entry(ctrl, textvariable=var, width=12).grid(row=row, column=1, sticky="w", pady=2)
+
+        add(0, "r_min_m", "Range min [m]", "0.2")
+        add(1, "r_max_m", "Range max [m]", "20")
+        add(2, "n_range", "Range points", "240")
+        add(3, "rho", "rho pilot power", "0.20")
+        add(4, "cspr_db", "CSPR [dB]", "20")
+        add(5, "iso_db", "OMT ISO [dB]", "25")
+        add(6, "ac2", "A_c^2", "1.0")
+        add(7, "sqrt_k", "sqrt(K)", "1e-4")
+        add(8, "bandwidth_ghz", "B signal [GHz]", "2.0")
+        add(9, "pilot_time_ns", "T_p pilot [ns]", "1024")
+        add(10, "gc_db", "G_c [dB]", "0")
+        add(11, "n_sens", "N sensing", "1e-8")
+        add(12, "n_comm", "N_c comm", "1e-8")
+        add(13, "modulation_order", "Comm M-QAM", "32")
+        add(14, "ber_target", "BER target", "1e-3")
+        add(15, "pfa", "Radar Pfa", "1e-6")
+        add(16, "rho_points", "rho sweep points", "101")
+        add(17, "mc_trials", "MC trials", "2000")
+
+        btns = ttk.Frame(ctrl)
+        btns.grid(row=18, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(btns, text="Run", style="Primary.TButton", command=self._run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Sync TX", command=self._sync_from_tx).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Load Save Data", command=self._load_measurement).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Clear Meas.", command=self._clear_measurements).pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=260).grid(
+            row=19, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+        ctrl.columnconfigure(1, weight=1)
+
+        self.fig = Figure(figsize=(10, 7), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.axes = self.fig.subplots(2, 2)
+        self.fig.tight_layout()
+
+    def _float(self, key: str, default: float) -> float:
+        try:
+            return float(self.params[key].get())
+        except Exception:
+            return float(default)
+
+    def _int(self, key: str, default: int) -> int:
+        try:
+            return int(float(self.params[key].get()))
+        except Exception:
+            return int(default)
+
+    def _processing_gain_lin(self) -> float:
+        bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
+        pilot_time_s = max(self._float("pilot_time_ns", 1024.0) * 1e-9, 1e-15)
+        return max(bandwidth_hz * pilot_time_s, 1.0)
+
+    def _comm_threshold_db(self) -> float:
+        try:
+            m = max(2, int(round(self._float("modulation_order", 32.0))))
+            ber = float(np.clip(self._float("ber_target", 1e-3), 1e-12, 0.2))
+            k = max(np.log2(m), 1.0)
+            sqrt_m = np.sqrt(float(m))
+            coeff = 4.0 / k * (1.0 - 1.0 / sqrt_m)
+            q_arg = float(np.clip(ber / max(coeff, 1e-15), 1e-15, 0.499999))
+            q_inv = np.sqrt(2.0) * float(erfcinv(2.0 * q_arg))
+            # EVM-implied SNR is Es/N0. The common BER approximation is often
+            # written with Eb/N0 via sqrt(3*k/(M-1)*Eb/N0); converting to
+            # Es/N0 removes the /k term.
+            gamma = (q_inv ** 2) * (m - 1.0) / 3.0
+            return float(10.0 * np.log10(max(gamma, 1e-30)))
+        except Exception:
+            return 18.0
+
+    def _sens_threshold_db(self) -> float:
+        pfa = float(np.clip(self._float("pfa", 1e-6), 1e-15, 0.5))
+        gamma = -np.log(pfa)
+        return float(10.0 * np.log10(max(gamma, 1e-30)))
+
+    def _sync_from_tx(self) -> None:
+        try:
+            pl = self.runtime.get("tx_payload")
+            if isinstance(pl, dict) and pl:
+                bw = float(pl.get("B", pl.get("symbol_rate", pl.get("symbol_rate_actual", 2e9))))
+                if np.isfinite(bw) and bw > 0:
+                    self.params["bandwidth_ghz"].set(f"{bw / 1e9:.6g}")
+                n_chirps = int(pl.get("n_chirps", 1))
+                n_sym = int(pl.get("n_sym_per_chirp", 1024))
+                sym_rate = float(pl.get("symbol_rate_actual", pl.get("symbol_rate", 1e9)))
+                if sym_rate > 0:
+                    self.params["pilot_time_ns"].set(f"{(n_chirps * n_sym / sym_rate) * 1e9:.6g}")
+                rho = float(pl.get("amplitude_ratio_rho", float("nan")))
+                if np.isfinite(rho):
+                    self.params["rho"].set(f"{rho:.6g}")
+                mod = str(pl.get("modulation", "")).upper()
+                if "32" in mod:
+                    self.params["modulation_order"].set("32")
+                elif "16" in mod:
+                    self.params["modulation_order"].set("16")
+                elif "64" in mod:
+                    self.params["modulation_order"].set("64")
+            self._run()
+        except Exception as exc:
+            messagebox.showerror("Sync TX", str(exc), parent=self.parent)
+
+    def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
+        rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
+        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
+        ac2 = max(self._float("ac2", 1.0), 1e-30)
+        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
+        gp = self._processing_gain_lin()
+        gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
+        n_sens = max(self._float("n_sens", 1e-8), 1e-30)
+        n_comm = max(self._float("n_comm", 1e-8), 1e-30)
+        r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
+        snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_comm)
+        snr_sens = (2.0 * rho_v * alpha * ac2 * sqrt_k * gp) / (n_sens * (r ** 2))
+        return {
+            "rho": rho_v,
+            "snr_comm": snr_comm,
+            "snr_sens": snr_sens,
+            "alpha": alpha,
+            "cspr": cspr,
+            "gp": gp,
+        }
+
+    @staticmethod
+    def _db(x: np.ndarray | float) -> np.ndarray | float:
+        return 10.0 * np.log10(np.maximum(x, 1e-30))
+
+    def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
+        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
+        ac2 = max(self._float("ac2", 1.0), 1e-30)
+        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
+        gp = self._processing_gain_lin()
+        gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
+        n_sens = max(self._float("n_sens", 1e-8), 1e-30)
+        n_comm = max(self._float("n_comm", 1e-8), 1e-30)
+        g_sens = 10.0 ** (self._sens_threshold_db() / 10.0)
+        g_comm = 10.0 ** (self._comm_threshold_db() / 10.0)
+        r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_comm * g_comm))
+        r_sens = np.sqrt((2.0 * rho * alpha * ac2 * sqrt_k * gp) / (n_sens * g_sens))
+        return r_comm, r_sens, np.minimum(r_comm, r_sens)
+
+    def _monte_carlo_snr_db(self, snr_lin: np.ndarray) -> np.ndarray:
+        trials = max(32, min(self._int("mc_trials", 2000), 200000))
+        snr = np.asarray(snr_lin, dtype=np.float64)
+        out = np.zeros_like(snr)
+        rng = np.random.default_rng(12345)
+        for idx, val in np.ndenumerate(snr):
+            noise = (rng.normal(size=trials) + 1j * rng.normal(size=trials)) / np.sqrt(2.0)
+            sig = np.sqrt(max(float(val), 0.0))
+            y = sig + noise
+            est_sig = np.abs(np.mean(y)) ** 2
+            est_noise = max(float(np.mean(np.abs(y - np.mean(y)) ** 2)), 1e-30)
+            out[idx] = 10.0 * np.log10(max(est_sig / est_noise, 1e-30))
+        return out
+
+    def _run(self) -> None:
+        try:
+            r_min = max(self._float("r_min_m", 0.2), 1e-6)
+            r_max = max(self._float("r_max_m", 20.0), r_min * 1.01)
+            n_range = max(16, min(self._int("n_range", 240), 5000))
+            ranges = np.geomspace(r_min, r_max, n_range)
+            model = self._model(ranges)
+            rho = float(model["rho"])
+            snr_comm = np.asarray(model["snr_comm"], dtype=np.float64)
+            snr_sens = np.asarray(model["snr_sens"], dtype=np.float64)
+            comm_thr_db = self._comm_threshold_db()
+            sens_thr_db = self._sens_threshold_db()
+            gp_db = 10.0 * np.log10(max(float(model.get("gp", 1.0)), 1e-30))
+
+            ax_snr, ax_err, ax_rho, ax_meas = self.axes.reshape(-1)
+            for ax in self.axes.reshape(-1):
+                ax.cla()
+                ax.grid(True, alpha=0.35)
+
+            ax_snr.semilogx(ranges, self._db(snr_comm), label="SNR_comm calc", color="#2563eb")
+            ax_snr.semilogx(ranges, self._db(snr_sens), label="SNR_sens calc", color="#dc2626")
+            ax_snr.axhline(comm_thr_db, color="#2563eb", linestyle=":", linewidth=0.9, label=f"BER threshold {comm_thr_db:.1f} dB")
+            ax_snr.axhline(sens_thr_db, color="#dc2626", linestyle=":", linewidth=0.9, label=f"Pfa thr {sens_thr_db:.1f} dB")
+            ax_snr.set_title("SNR vs Range")
+            ax_snr.set_xlabel("Range [m]")
+            ax_snr.set_ylabel("SNR [dB]")
+            ax_snr.legend(fontsize=8)
+
+            sample_idx = np.unique(np.linspace(0, len(ranges) - 1, min(28, len(ranges))).astype(int))
+            mc_comm_db = self._monte_carlo_snr_db(snr_comm[sample_idx])
+            mc_sens_db = self._monte_carlo_snr_db(snr_sens[sample_idx])
+            ax_snr.scatter(ranges[sample_idx], mc_comm_db, s=14, marker="o", color="#60a5fa", label="comm MC")
+            ax_snr.scatter(ranges[sample_idx], mc_sens_db, s=14, marker="x", color="#f87171", label="sens MC")
+
+            ax_err.plot(ranges[sample_idx], mc_comm_db - self._db(snr_comm[sample_idx]), color="#2563eb", marker="o", ms=3, label="comm MC-calc")
+            ax_err.plot(ranges[sample_idx], mc_sens_db - self._db(snr_sens[sample_idx]), color="#dc2626", marker="x", ms=4, label="sens MC-calc")
+            ax_err.axhline(0.0, color="#64748b", linestyle=":", linewidth=0.9)
+            ax_err.set_xscale("log")
+            ax_err.set_title("Simulation - Calculation")
+            ax_err.set_xlabel("Range [m]")
+            ax_err.set_ylabel("Error [dB]")
+            ax_err.legend(fontsize=8)
+
+            n_rho = max(16, min(self._int("rho_points", 101), 2000))
+            rho_axis = np.linspace(1e-3, 0.999, n_rho)
+            r_comm, r_sens, r_joint = self._rmax(rho_axis)
+            ax_rho.plot(rho_axis, r_comm, color="#2563eb", label="Rmax_comm")
+            ax_rho.plot(rho_axis, r_sens, color="#dc2626", label="Rmax_sens")
+            ax_rho.plot(rho_axis, r_joint, color="#111827", linewidth=1.4, label="min")
+            ax_rho.axvline(rho, color="#64748b", linestyle=":", linewidth=0.9)
+            ax_rho.set_title("rho Trade-off")
+            ax_rho.set_xlabel("rho pilot power ratio")
+            ax_rho.set_ylabel("Max range [m]")
+            ax_rho.legend(fontsize=8)
+
+            ax_meas.semilogx(ranges, self._db(snr_comm), color="#2563eb", alpha=0.35, label="comm calc")
+            ax_meas.semilogx(ranges, self._db(snr_sens), color="#dc2626", alpha=0.35, label="sens calc")
+            for p in self.meas_points:
+                rr = float(p.get("range_m", float("nan")))
+                sc = float(p.get("snr_comm_db", float("nan")))
+                ss = float(p.get("snr_sens_db", float("nan")))
+                name = str(p.get("name", "meas"))
+                if np.isfinite(rr) and np.isfinite(sc):
+                    ax_meas.scatter([rr], [sc], color="#1d4ed8", marker="o", s=36)
+                    ax_meas.annotate(name, (rr, sc), fontsize=7, xytext=(4, 4), textcoords="offset points")
+                if np.isfinite(rr) and np.isfinite(ss):
+                    ax_meas.scatter([rr], [ss], color="#b91c1c", marker="D", s=34)
+            ax_meas.set_title("Loaded Save Data Overlay")
+            ax_meas.set_xlabel("Range [m]")
+            ax_meas.set_ylabel("SNR [dB]")
+            ax_meas.legend(fontsize=8)
+
+            self.fig.tight_layout()
+            self.canvas.draw_idle()
+            rc, rs, rj = self._rmax(np.asarray([rho]))
+            self.status_var.set(
+                f"rho={rho:.3f}  Rmax_comm={rc[0]:.3g} m  "
+                f"Rmax_sens={rs[0]:.3g} m  joint={rj[0]:.3g} m  "
+                f"Gp=T*B={gp_db:.1f} dB  "
+                f"thr(comm/sens)={comm_thr_db:.1f}/{sens_thr_db:.1f} dB  "
+                f"meas={len(self.meas_points)}"
+            )
+        except Exception as exc:
+            self.status_var.set(f"Error: {exc}")
+            messagebox.showerror("System Model Simulation", str(exc), parent=self.parent)
+
+    @staticmethod
+    def _as_float(value, default: float = float("nan")) -> float:
+        try:
+            if isinstance(value, np.ndarray):
+                value = value.reshape(-1)[0]
+            if hasattr(value, "item"):
+                value = value.item()
+            return float(value)
+        except Exception:
+            return default
+
+    def _metric_dict_from_npz(self, loaded) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if "metric_keys" in loaded.files and "metric_values" in loaded.files:
+            keys = np.asarray(loaded["metric_keys"]).reshape(-1)
+            vals = np.asarray(loaded["metric_values"]).reshape(-1)
+            for i, raw in enumerate(keys):
+                key = str(raw.item() if hasattr(raw, "item") else raw)
+                if i < len(vals):
+                    out[key] = self._as_float(vals[i])
+        return out
+
+    def _load_measurement(self) -> None:
+        path_str = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Load Saved Capture/Range Data",
+            initialdir=str(APP_DIR / "data"),
+            filetypes=[("NumPy save data", "*.npz"), ("All files", "*.*")],
+        )
+        if not path_str:
+            return
+        try:
+            path = Path(path_str)
+            with np.load(path, allow_pickle=True) as loaded:
+                metrics = self._metric_dict_from_npz(loaded)
+                range_m = float("nan")
+                for key in ("range_summary_peak_m", "range_summary_display_m", "range_summary_matched_filter_peak_m"):
+                    if key in loaded.files:
+                        arr = np.asarray(loaded[key], dtype=np.float64).reshape(-1)
+                        finite = arr[np.isfinite(arr)]
+                        if len(finite):
+                            range_m = float(finite[0])
+                            break
+                if not np.isfinite(range_m):
+                    for key in ("range_peak_m", "si_cfr_peak_m"):
+                        if key in metrics and np.isfinite(metrics[key]):
+                            range_m = metrics[key]
+                            break
+                snr_comm = metrics.get("evm_snr", float("nan"))
+                if not np.isfinite(snr_comm) and np.isfinite(metrics.get("evm_db", float("nan"))):
+                    snr_comm = -float(metrics.get("evm_db"))
+                if not np.isfinite(snr_comm):
+                    snr_comm = metrics.get("snr_com_db", metrics.get("snr_com_db_c1", float("nan")))
+                snr_sens = metrics.get("snr_rad_db", metrics.get("snr_com_db_c2", float("nan")))
+                if not np.isfinite(snr_sens):
+                    for key in ("range_summary_pslr_db", "range_summary_diff_cfr_coherence"):
+                        if key in loaded.files:
+                            arr = np.asarray(loaded[key], dtype=np.float64).reshape(-1)
+                            finite = arr[np.isfinite(arr)]
+                            if len(finite):
+                                snr_sens = float(finite[0])
+                                break
+                rho = metrics.get("amplitude_ratio_rho", float("nan"))
+                if not np.isfinite(rho) and "dsp__pilot_rho" in loaded.files:
+                    rho = self._as_float(loaded["dsp__pilot_rho"])
+                point = {
+                    "name": path.stem[:18],
+                    "range_m": range_m,
+                    "snr_comm_db": snr_comm,
+                    "snr_sens_db": snr_sens,
+                    "rho": rho,
+                }
+                self.meas_points.append(point)
+            self._run()
+        except Exception as exc:
+            messagebox.showerror("Load Save Data", str(exc), parent=self.parent)
+
+    def _clear_measurements(self) -> None:
+        self.meas_points.clear()
+        self._run()
+
 def main() -> None:
     root = tk.Tk()
     UnifiedApp(root)
@@ -13236,8 +13621,10 @@ class UnifiedApp:
 
         tab_tx_sim = ttk.Frame(notebook)
         tab_dso = ttk.Frame(notebook)
+        tab_model = ttk.Frame(notebook)
         notebook.add(tab_tx_sim, text="TX Design & Simulation")
         notebook.add(tab_dso, text="DSO Live Capture")
+        notebook.add(tab_model, text="System Model Validation")
 
         tx_sim_paned = ttk.PanedWindow(tab_tx_sim, orient=tk.HORIZONTAL)
         tx_sim_paned.pack(fill=tk.BOTH, expand=True)
@@ -13264,6 +13651,7 @@ class UnifiedApp:
             show_awg_params=False,
         )
         self.dso_panel = DsoPanel(tab_dso, runtime=self.runtime)
+        self.system_model_panel = SystemModelValidationPanel(tab_model, runtime=self.runtime)
         self._install_awg_dso_sync_traces()
 
     def _sync_dso_from_awg_panel(self, source: str = "AWG panel") -> None:

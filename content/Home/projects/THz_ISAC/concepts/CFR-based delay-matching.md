@@ -1,4 +1,3 @@
-핵심을 찌르는 질문입니다. 특히 "CFR 방식에서는 SI sidelobe 문제가 없는 것 아닌가"는 매우 중요한 지적이라 정확히 따져야 합니다. 순서대로 수식으로 정리하겠습니다.
 
 ## 1. Phase-slope와 IDFT(delay-matching) 수식 정리
 

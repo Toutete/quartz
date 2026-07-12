@@ -77,6 +77,43 @@ noise. The first term is the SI-borne copy of the data (zero delay); the second 
 echo-borne, delayed copy carrying the range through both `e^{j\omega_c\tau}` and the
 group delay of `s(t-\tau)`.
 
+### C.1 Detailed derivation of `y(t)`
+
+Write `V_{\mathrm{ZBD}}=V_{\mathrm{SI}}+V_{\mathrm{ec}}` so that
+`|V_{\mathrm{ZBD}}|^2=|V_{\mathrm{SI}}|^2+|V_{\mathrm{ec}}|^2+2\mathrm{Re}\{V_{\mathrm{SI}}V_{\mathrm{ec}}^*\}`.
+
+**Self term `|V_{\mathrm{SI}}|^2`.** The phasor magnitude is unity, so `e^{j\omega_c t}`
+cancels:
+
+$$|V_{\mathrm{SI}}|^2=\alpha^2A_c^2\,|1+\kappa s(t)|^2
+=\alpha^2A_c^2\Big[\underbrace{1}_{\text{DC}}+\underbrace{2\kappa\,\mathrm{Re}\{s(t)\}}_{\text{IF}}+\underbrace{\kappa^2|s(t)|^2}_{\text{SSBI}}\Big].$$
+
+`|V_{\mathrm{ec}}|^2` is identical with `s(t)\!\to\! s(t-\tau)` and prefactor `\beta^2`.
+
+**Cross term.** The carrier exponentials collapse to a delay-only phase:
+
+$$e^{j(\omega_c t+\Delta\theta(t))}e^{-j(\omega_c(t-\tau)+\Delta\theta(t-\tau))}
+=e^{j(\omega_c\tau+\Delta\phi(\tau))},\qquad \Delta\phi(\tau)=\Delta\theta(t)-\Delta\theta(t-\tau),$$
+
+so that
+
+$$2\mathrm{Re}\{V_{\mathrm{SI}}V_{\mathrm{ec}}^*\}
+=2\alpha\beta A_c^2\,\mathrm{Re}\Big\{\big[\underbrace{1}_{(i)}+\underbrace{\kappa s(t)}_{(ii)}+\underbrace{\kappa s^*(t-\tau)}_{(iii)}+\underbrace{\kappa^2 s(t)s^*(t-\tau)}_{(iv)}\big]e^{j(\omega_c\tau+\Delta\phi)}\Big\}.$$
+
+**Filtering.** A DC block removes all frequency-flat terms: the `|A_c|^2` biases from the
+self terms and cross-term (i), `2\alpha\beta A_c^2\cos(\omega_c\tau+\Delta\phi)`, which is
+time-invariant for fixed `τ` (the carrier×carrier product). A digital bandpass keeps the
+IF passband; the `\kappa^2` products (iv and the `|s|^2` self terms) fall in the SSBI band
+and are treated as `O(\kappa^2)`. Retaining the `O(\kappa)` IF terms and dropping the
+`\beta^2` self term (`\beta\ll\alpha`) gives the analytic-baseband IF signal
+
+$$y(t)=\mathcal R A_c^2\kappa\big[\alpha\,s(t)+\beta\,e^{j\omega_c\tau}s(t-\tau)\big]+n(t)+O(\kappa^2),$$
+
+i.e. the **carrier×sideband** beats: the SI-borne data at zero delay and the echo-borne
+data at delay `τ`. Note it is these terms, not the DC-blocked carrier×carrier product,
+that carry the range into the passband (as the group delay of `s(t-\tau)` and the phase
+`e^{j\omega_c\tau}`).
+
 ---
 
 ## D. Channel estimation (CFR)
@@ -153,6 +190,36 @@ with the two branches trading off through `ρ` (`R^{\mathrm{comm}}\!\propto\!\sq
 `R^{\mathrm{sens}}\!\propto\!\sqrt{\rho}`). At THz the communication constraint binds
 (FSPL-limited), so the design minimizes `ρ` subject to a near-range sensing requirement
 — a communication-centric operating point.
+
+### F.1 Sensing SNR vs PSLR, and how to measure `SNR_sens`
+
+`SNR_{sens}` (peak-to-noise) and PSLR (peak-to-sidelobe) are distinct but coupled. A
+target is detectable only if its peak clears **both** the noise floor and the
+sidelobes:
+
+$$P_{\mathrm{peak}}>\max\big(\text{noise floor},\ \text{sidelobe level}\big).$$
+
+Coherent integration (`G_p=T_pB`) raises the signal peak coherently (`\propto N`) while
+noise adds incoherently (`\propto\sqrt N`), so `SNR_{sens}\propto G_p`. The *ideal* PSLR
+is set by the waveform/window autocorrelation, but the **measured** PSLR is limited by
+noise when `SNR_{sens}` is low — the sidelobes sink below the noise floor and one only
+measures peak-to-noise. Empirically,
+
+$$\boxed{\ \mathrm{PSLR}_{\mathrm{meas}}\approx\min\big(\mathrm{PSLR}_{\mathrm{ideal}},\ \mathrm{SNR}_{sens}\big)\ }$$
+
+(e.g. a self-coherent THz ISAC demo reports a measured 21.9 dB against a 26 dB ideal
+because the NMF output SNR buried the sidelobes). Thus raising `SNR_{sens}` (more
+`ρ`, `A_c`, or integration `G_p`) also *reveals* the true PSLR up to its waveform limit.
+
+**Measuring `SNR_{sens}`** from the SI-normalized range profile `P(\tau')`:
+1. Peak power `P_{\mathrm{peak}}=\max_{\tau'}|P(\tau')|^2` at the target bin.
+2. Noise floor `N_0=\mathrm{mean}\,|P(\tau')|^2` over bins away from the target (and away
+   from any residual zero-delay region).
+3. `\mathrm{SNR}_{sens}=10\log_{10}(P_{\mathrm{peak}}/N_0)`.
+Report it with the coherence `\gamma` (detection confidence). To validate the model,
+sweep the integration time `T_p` and confirm `SNR_{sens}\propto T_pB`; or sweep target
+distance and confirm the homodyne `1/R^2` (vs self-detection `1/R^4`) decay. Detection
+probability / ROC across captures provides an operational counterpart.
 
 ### Symbol table
 | Symbol | Meaning |
