@@ -3594,10 +3594,10 @@ class PhotonicIsacSimPanel:
             "c2_band":   self.table.insert("", "end", text="C2 Band Power",     values=("N/A", "dBm")),
             "c1_noise":  self.table.insert("", "end", text="C1 Noise Power",    values=("N/A", "dBm")),
             "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
-            "c1_noise_density": self.table.insert("", "end", text="C1 Noise Density", values=("N/A", "dBm/Hz")),
-            "c2_noise_density": self.table.insert("", "end", text="C2 Noise Density", values=("N/A", "dBm/Hz")),
+            "c1_noise_density": self.table.insert("", "end", text="C1 Spectrum Noise Floor", values=("N/A", "dBm/Hz")),
+            "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Floor", values=("N/A", "dBm/Hz")),
             "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
-            "comm_snr":  self.table.insert("", "end", text="C1 Band SNR",       values=("0.00", "dB")),
+            "comm_snr":  self.table.insert("", "end", text="Comm SNR (EVM)",    values=("N/A", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("matched-filter raw", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
@@ -3880,7 +3880,7 @@ class PhotonicIsacSimPanel:
             if "if_chain" in self.rows:
                 self.table.item(self.rows["if_chain"], values=(f"{link['c1_if_chain_db']:.1f}/{link['c2_if_chain_db']:.1f}", "dB"))
             if "comm_snr" in self.rows:
-                self.table.item(self.rows["comm_snr"], values=(f"{com_snr_db:.2f}", "dB"))
+                self.table.item(self.rows["comm_snr"], values=("N/A", "dB"))
         except Exception as e:
             print(f"Update table error: {e}")
 
@@ -4103,7 +4103,7 @@ class PhotonicIsacSimPanel:
                     values=(f"C1:{c1m.get('noise_source', 'N/A')} / C2:{c2m.get('noise_source', 'N/A')}", ""),
                 )
             if "comm_snr" in self.rows:
-                self.table.item(self.rows["comm_snr"], values=(f"{float(c1m.get('snr_db', np.nan)):.2f}", "dB"))
+                self.table.item(self.rows["comm_snr"], values=("N/A", "dB"))
             if "radar_snr" in self.rows:
                 self.table.item(self.rows["radar_snr"], values=(f"{float(self.data.get('radar_snr_db', np.nan)):.2f}", "dB"))
             if "range_detect" in self.rows:
@@ -4152,10 +4152,14 @@ class PhotonicIsacSimPanel:
                 self.demod_var.set(f"{cfg.modulation} Demod: EVM={evm_db:.1f} dB | EVM-SNR={evm_snr_db:.1f} dB | SER={ser:.4f}")
                 evm_pct = estimate_measured_evm_percent(evm_db)
                 self.table.item(self.rows["evm_pct"], values=(f"{evm_pct:.2f}", "%"))
+                if "comm_snr" in self.rows:
+                    self.table.item(self.rows["comm_snr"], values=(f"{evm_snr_db:.2f}", "dB"))
                 if "evm_snr" in self.rows:
                     self.table.item(self.rows["evm_snr"], values=(f"{evm_snr_db:.2f}", "dB"))
             else:
                 self.demod_var.set(f"Comm Demod: N/A ({cfg.rx_mode})")
+                if "comm_snr" in self.rows:
+                    self.table.item(self.rows["comm_snr"], values=("N/A", "dB"))
 
             self._update_range_profile()
 
@@ -13287,7 +13291,7 @@ class SystemModelValidationPanel:
         add(8, "bandwidth_ghz", "B signal [GHz]", "2.0")
         add(9, "pilot_time_ns", "T_p pilot [ns]", "102.4")
         add(10, "gc_db", "G_c [dB]", "0")
-        add(11, "noise_density_dbmhz", "Noise density [dBm/Hz]", "-130")
+        add(11, "noise_density_dbmhz", "Spectrum noise floor [dBm/Hz]", "-130")
         add(12, "modulation_order", "Comm M-QAM", "32")
         add(13, "ber_target", "BER target", "1e-3")
         add(14, "pfa", "Radar Pfa", "1e-6")
