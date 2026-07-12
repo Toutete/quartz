@@ -2,6 +2,99 @@
 title: THz ISAC 시스템 구조
 is_public: false
 ---
+
+| Aspect             | Matched filter (classical)                  | SI-normalized CFR (this work)                                 |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------- |
+| Core op            | 1 correlation `Σ y·s*`                      | CFR division `H/H_SI` + phase slope / 1 IDFT                  |
+| Ops/scale          | `O(N log N)` (FFT correlation)              | `O(N log N)` CFR + `O(N)` division + `O(N log N)` delay match |
+| Extra state        | none                                        | SI reference `H_SI` (weighted mean, `O(N)`)                   |
+| Carrier assumption | **coherent, known/stable phase**            | **free-running OK** — SI supplies the phase reference         |
+| Extra hardware     | often OPLL / comb / shared-LO for coherence | **none** — SI leakage is the built-in LO                      |
+| Per-capture fading | severe if carrier drifts                    | removed by `H/H_SI`                                           |
+| Moving target      | fine (single shot)                          | fine (single shot)                                            |
+
+**Bottom line:** the _arithmetic_ complexity is essentially the same order as a matched filter (both dominated by FFT-length transforms). The saving is in **hardware/coherence cost**: SI normalization replaces the phase-locking hardware (OPLL/comb/wavemeter) that a coherent matched filter would otherwise need at 270 GHz with free-running lasers. The added software cost is one `O(N)` division and the SI mean — negligible.
+### 3.2 Comparison table
+
+| Criterion                    | LFM-QAM                   | OFDM                                  | DFT-s-OFDM                         |
+| ---------------------------- | ------------------------- | ------------------------------------- | ---------------------------------- |
+| Range method                 | de-chirp / matched filter | subcarrier channel division + IDFT    | precoder-inverted channel division |
+| Processing gain              | very high (chirp TBWP)    | high (N subcarriers)                  | high, minus spreading overhead     |
+| PAPR                         | low–moderate              | **high**                              | **low** (its main advantage)       |
+| Sensing sidelobes            | excellent (chirp)         | excellent                             | slightly worse (spreading)         |
+| Comms spectral eff.          | moderate                  | high                                  | high                               |
+| Data-independence of profile | good                      | **very good** (division removes data) | good after de-spreading            |
+| Doppler / moving target      | excellent (classic radar) | good (2-D DFT)                        | good but more processing           |
+| Impl. complexity             | moderate                  | moderate                              | higher (extra DFT stages)          |
+| Best fit                     | radar-centric ISAC        | comms-centric ISAC, rich sensing      | uplink / power-limited nodes       |
+
+본 논문의 핵심 수식 정리
+
+$$V_{ZBD}(t)=V_{SI}(t)+V_{echo}(t)$$
+
+$$V_{SI}=\alpha_{SI},s(t),e^{j(\omega_c t+\phi(t))},\qquad V_{echo}=\beta_{ec},s(t-\tau),e^{j(\omega_c(t-\tau)+\phi(t-\tau))}$$
+
+$$V_{out}=\mathcal R,|V_{ZBD}|^2 =\mathcal R\big[\underbrace{\alpha_{SI}^2|s(t)|^2}_{(A)\ \text{SI},\ \tau=0} +\underbrace{\beta_{ec}^2|s(t-\tau)|^2}_{(B)\ \text{echo}} +\underbrace{2\alpha_{SI}\beta_{ec},\mathrm{Re}{s(t)s^*(t-\tau)e^{j(\omega_c\tau+\Delta\phi)}}}_{(C)\ \text{homodyne}}\big]$$
+
+
+### 1.2 CFR estimate (single capture)
+
+$$H(f)=\frac{Y(f)}{S(f)} =\underbrace{\alpha_{SI}e^{j\psi}}_{\text{flat, }\tau\approx0} +\underbrace{\beta_{ec}e^{j\psi}e^{-j2\pi(f+f_c)\tau}}_{\text{echo}}$$
+
+`ψ` = common per-capture carrier phase, `f_c` = drifting carrier. SI and echo carry the **same** `e^{jψ}`.
+
+### 1.3 SI normalization (the key step)
+
+$$H_{SI}=\frac{\sum_f w,H(f)}{\sum_f w}\approx\alpha_{SI}e^{j\psi},\qquad \boxed{;\tilde H(f)=\frac{H(f)}{H_{SI}}-1=\frac{\beta_{ec}}{\alpha_{SI}},e^{-j2\pi(f+f_c)\tau};}$$
+
+Dividing by the flat SI cancels `e^{jψ}` → **coherent fading removed**. DC re-removal: `H̃' = H̃ − mean_w(H̃)`.
+
+### 1.4 Range estimate — two equivalent readouts
+
+**(a) Phase-slope** (drift-immune; `f_c τ` is constant in `f`, drops out of the slope):
+
+$$\hat\tau=-\frac{1}{2\pi}\frac{d,\angle\tilde H}{df},\qquad \hat R=\frac{c\hat\tau}{2}$$
+
+(b) IDFT/delay-matching (다중 target)
+
+정규화된 CFR을 delay 영역으로 역변환합니다.
+
+$$p(\tau') = \int \tilde{H}(f),e^{j2\pi f\tau'},df = \sum_{k}\frac{\beta_k}{\alpha_{SI}}\int e^{-j2\pi(f+f_c)\tau_k}e^{j2\pi f\tau'}df$$
+
+$$= \sum_k \frac{\beta_k}{\alpha_{SI}}e^{-j2\pi f_c\tau_k}\int e^{j2\pi f(\tau'-\tau_k)}df$$
+
+유한 대역 B에서 적분하면:
+
+$$\boxed{p(\tau') = \sum_k \frac{\beta_k}{\alpha_{SI}},e^{-j2\pi f_c\tau_k},B,\text{sinc}\big(B(\tau'-\tau_k)\big)}$$
+
+각 target이 **자기 지연 τ_k에서 sinc peak**를 만듭니다. 이산 형태(코드 구현):
+
+$$p[\tau'] = \sum_{n} w[n],\tilde{H}[n],e^{j2\pi f_n\tau'}$$
+
+$$\hat{R}_k = \frac{c}{2}\cdot{\tau' : |p(\tau')| \text{ has a peak}}$$
+
+**다중 target을 다루는 이유:** IDFT는 각 지수 성분을 자기 위치의 peak로 분리하므로, K개 target이 K개 peak로 나타납니다. 이것이 Sturm-Wiesbeck의 핵심입니다.
+
+
+
+## C. The actual range limit of this system
+
+With SI removed by normalization, the limit is the ordinary **noise limit** (plus a dynamic-range caveat), NOT an SI sidelobe:
+
+$$\mathrm{SNR}_{radar}(R)=\frac{G_p,2,\alpha_{SI},\beta_{ec}(R)}{N},\qquad \beta_{ec}(R)=\frac{\sqrt{K}}{R^2}.$$
+
+$$\boxed{R_{\max}=\left(\frac{2,\alpha_{SI},\sqrt{K},G_p}{N,\gamma_{th}}\right)^{1/2}}$$
+
+Symbols:
+
+- `α_SI = 10^{−ISO/20}` — SI amplitude (OMT isolation). **Larger helps** (homodyne gain), bounded above only by ADC dynamic range (B10), not by sidelobes.
+- `β_ec = √K/R²` — echo amplitude; radar-equation `1/R²` amplitude decay.
+- `K = P_tx G_t G_r λ² σ_eff /(4π)³` — lumped budget constant (radar eq. minus `R⁴`).
+- `N` — noise power: ZBD NEP + thermal `kT₀BF` + ADC quantization.
+- `γ_th` — detection-threshold SNR for target `P_d`/`P_fa` (e.g. ~13 dB).
+- `G_p = T·B` — matched-filter/IDFT processing gain (TBWP).
+
+
 본 논문의 핵심
 1. CP generation 
 2. Full-duplex THz ISAC 실증 (ISAC waveform 으로 통신/radar 동시 입증)

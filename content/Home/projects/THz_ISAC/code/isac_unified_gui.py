@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import copy
 import io
+import json
 from dataclasses import dataclass
 import sys
 import threading
@@ -2089,6 +2090,7 @@ class SimConfig:
 
     coherence_mode: str = "Free-running"
     rx_mode: str = "Mixer"
+    optical_sideband_mode: str = "DSB"
     si_enable: bool = True
     carrier_wander_enable: bool = False
     carrier_wander_mhz: float = 0.0
@@ -2197,6 +2199,10 @@ def effective_cspr_db(cfg: SimConfig) -> float:
     # still in the linear region, so IF power should not silently change CSPR.
     return float(cfg.cspr_db)
 
+def optical_sideband_mode(cfg: SimConfig) -> str:
+    mode = str(getattr(cfg, "optical_sideband_mode", "DSB") or "DSB").strip().upper()
+    return "SSB" if mode == "SSB" else "DSB"
+
 def calc_mzm_drive_metrics(awg_rf_dbm: float, drive_gain_db: float, cspr_ref_db: float, awg_ref_dbm: float) -> dict[str, float]:
     rf_in_dbm = float(awg_rf_dbm) + float(drive_gain_db)
     eff_cspr = float(cspr_ref_db)
@@ -2214,41 +2220,55 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
     )
     cspr_eff_db = effective_cspr_db(cfg)
     cspr_lin = max(10.0 ** (abs(cspr_eff_db) / 10.0), 1e-12)
-    p_mzm_carrier_w = p_total_w / max(2.0 + 2.0 / cspr_lin, 1e-30)
+    mode = optical_sideband_mode(cfg)
+    n_sidebands = 1.0 if mode == "SSB" else 2.0
+    # CSPR is carrier power divided by total modulated signal power. For DSB,
+    # that signal power is shared by the two sidebands; for SSB it is all in
+    # the retained sideband.
+    p_mzm_carrier_w = p_total_w / max(2.0 + 1.0 / cspr_lin, 1e-30)
     p_tone1_w = p_mzm_carrier_w
-    p_sideband_each_w = p_mzm_carrier_w / cspr_lin
-    p_dsb_total_w = 2.0 * p_sideband_each_w
+    p_signal_total_w = p_mzm_carrier_w / cspr_lin
+    p_sideband_each_w = p_signal_total_w / n_sidebands
     return {
         "total_w": p_total_w,
         "tone1_w": p_tone1_w,
         "mzm_carrier_w": p_mzm_carrier_w,
         "sideband_each_w": p_sideband_each_w,
-        "dsb_total_w": p_dsb_total_w,
-        "mzm_branch_w": p_mzm_carrier_w + p_dsb_total_w,
+        "signal_total_w": p_signal_total_w,
+        "dsb_total_w": p_signal_total_w,
+        "mzm_branch_w": p_mzm_carrier_w + p_signal_total_w,
         "tone_ratio": 1.0,
         "effective_cspr_db": float(cspr_eff_db),
+        "sideband_mode": mode,
         "total_dbm": w_to_dbm(p_total_w),
         "tone1_dbm": w_to_dbm(p_tone1_w),
         "mzm_carrier_dbm": w_to_dbm(p_mzm_carrier_w),
         "sideband_each_dbm": w_to_dbm(p_sideband_each_w),
-        "dsb_total_dbm": w_to_dbm(p_dsb_total_w),
+        "signal_total_dbm": w_to_dbm(p_signal_total_w),
+        "dsb_total_dbm": w_to_dbm(p_signal_total_w),
     }
 
 def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
     """Expected UTC-PD RF line powers after photomixing, normalized to TX power."""
     total_rf_w = dbm_to_w(cfg.utcpd_target_dbm)
     cspr_lin = max(10.0 ** (abs(effective_cspr_db(cfg)) / 10.0), 1e-12)
-    carrier_w = total_rf_w / max(1.0 + 2.0 / cspr_lin, 1e-30)
-    sideband_each_w = carrier_w / cspr_lin
+    mode = optical_sideband_mode(cfg)
+    n_sidebands = 1.0 if mode == "SSB" else 2.0
+    carrier_w = total_rf_w / max(1.0 + 1.0 / cspr_lin, 1e-30)
+    signal_total_w = carrier_w / cspr_lin
+    sideband_each_w = signal_total_w / n_sidebands
     return {
         "total_w": total_rf_w,
         "carrier_w": carrier_w,
         "sideband_each_w": sideband_each_w,
-        "dsb_total_w": 2.0 * sideband_each_w,
+        "signal_total_w": signal_total_w,
+        "dsb_total_w": signal_total_w,
+        "sideband_mode": mode,
         "total_dbm": w_to_dbm(total_rf_w),
         "carrier_dbm": w_to_dbm(carrier_w),
         "sideband_each_dbm": w_to_dbm(sideband_each_w),
-        "dsb_total_dbm": w_to_dbm(2.0 * sideband_each_w),
+        "signal_total_dbm": w_to_dbm(signal_total_w),
+        "dsb_total_dbm": w_to_dbm(signal_total_w),
     }
 
 def add_display_line_mw(
@@ -2301,6 +2321,99 @@ def make_bandpass_mask(f_axis: np.ndarray, f_if_hz: float, bandwidth_hz: float) 
     af = np.abs(f_axis)
     return (af >= low) & (af <= high)
 
+def si_normalized_cfr_delay_profile(
+    freqs_hz: np.ndarray,
+    h: np.ndarray,
+    weight: np.ndarray | None,
+    range_axis_m: np.ndarray,
+    range_scale_m_per_s: float,
+) -> dict[str, np.ndarray | float]:
+    """Single-capture SI-referenced CFR delay profile.
+
+    The zero-delay SI is modeled as the weighted constant component of H(f).
+    The plotted profile is the delay matched sum of H/H_SI - 1, so a target
+    echo appears as exp(-j 2*pi*f*tau) while the common SI phase is removed.
+    """
+    f = np.asarray(freqs_hz, dtype=np.float64).reshape(-1)
+    hc = np.asarray(h, dtype=np.complex128).reshape(-1)
+    r = np.asarray(range_axis_m, dtype=np.float64).reshape(-1)
+    n = min(len(f), len(hc))
+    if n < 16 or len(r) < 4 or not np.isfinite(range_scale_m_per_s) or range_scale_m_per_s <= 0:
+        return {
+            "range_m": np.zeros(0, dtype=np.float64),
+            "profile_db": np.zeros(0, dtype=np.float64),
+            "peak_m": float("nan"),
+            "coherence": float("nan"),
+            "si_ref_abs": float("nan"),
+        }
+    f = f[:n]
+    hc = hc[:n]
+    if weight is None:
+        w = np.ones(n, dtype=np.float64)
+    else:
+        w = np.asarray(weight, dtype=np.float64).reshape(-1)[:n]
+        if len(w) < n:
+            w = np.pad(w, (0, n - len(w)), constant_values=0.0)
+    valid = (
+        np.isfinite(f)
+        & np.isfinite(hc.real)
+        & np.isfinite(hc.imag)
+        & np.isfinite(w)
+        & (w > 0.0)
+        & (np.abs(hc) > 1e-15)
+    )
+    if np.count_nonzero(valid) < 16:
+        return {
+            "range_m": np.zeros(0, dtype=np.float64),
+            "profile_db": np.zeros(0, dtype=np.float64),
+            "peak_m": float("nan"),
+            "coherence": float("nan"),
+            "si_ref_abs": float("nan"),
+        }
+    f = f[valid]
+    hc = hc[valid]
+    w = w[valid]
+    w = w / (np.nanmax(w) + 1e-15)
+    good = w >= 0.03
+    if np.count_nonzero(good) >= 16:
+        f = f[good]
+        hc = hc[good]
+        w = w[good]
+    si_ref = np.sum(w * hc) / (np.sum(w) + 1e-15)
+    if (not np.isfinite(si_ref.real)) or abs(si_ref) <= 1e-15:
+        si_ref = np.median(hc)
+    if (not np.isfinite(si_ref.real)) or abs(si_ref) <= 1e-15:
+        return {
+            "range_m": np.zeros(0, dtype=np.float64),
+            "profile_db": np.zeros(0, dtype=np.float64),
+            "peak_m": float("nan"),
+            "coherence": float("nan"),
+            "si_ref_abs": float("nan"),
+        }
+    residual = hc / (si_ref + 1e-15) - 1.0
+    residual = residual - (np.sum(w * residual) / (np.sum(w) + 1e-15))
+    tau = r / float(range_scale_m_per_s)
+    amp = np.zeros(len(tau), dtype=np.complex128)
+    # Chunk over range bins to avoid creating very large frequency x range matrices.
+    chunk = 512
+    for i0 in range(0, len(tau), chunk):
+        tt = tau[i0:i0 + chunk]
+        phase = np.exp(1j * 2.0 * np.pi * f[:, np.newaxis] * tt[np.newaxis, :])
+        amp[i0:i0 + chunk] = np.sum((w * residual)[:, np.newaxis] * phase, axis=0)
+    mag = np.abs(amp) / (np.sum(w) + 1e-15)
+    prof_db = 20.0 * np.log10(mag / (np.nanmax(mag) + 1e-30) + 1e-30)
+    peak_idx = int(np.nanargmax(mag)) if len(mag) else 0
+    peak_m = float(r[peak_idx]) if len(r) > peak_idx else float("nan")
+    phase_unit = residual / (np.abs(residual) + 1e-15)
+    coherence = float(np.abs(np.sum(w * phase_unit)) / (np.sum(w) + 1e-15))
+    return {
+        "range_m": r,
+        "profile_db": prof_db,
+        "peak_m": peak_m,
+        "coherence": coherence,
+        "si_ref_abs": float(abs(si_ref)),
+    }
+
 def make_osa_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
     """UTC-PD input optical line display inferred from photocurrent and CSPR."""
     f2 = float(cfg.optical_center_freq_thz)
@@ -2321,8 +2434,10 @@ def make_osa_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
     tone1_dbm = float(optical_lines["tone1_dbm"])
     carrier_dbm = float(optical_lines["mzm_carrier_dbm"])
     sideband_dbm = float(optical_lines["sideband_each_dbm"])
+    mode = optical_sideband_mode(cfg)
     add_display_line_mw(f, p_mw, f2, carrier_dbm, display_fwhm_thz)
-    add_display_line_mw(f, p_mw, f2 - f_if_thz, sideband_dbm, display_fwhm_thz)
+    if mode == "DSB":
+        add_display_line_mw(f, p_mw, f2 - f_if_thz, sideband_dbm, display_fwhm_thz)
     add_display_line_mw(f, p_mw, f2 + f_if_thz, sideband_dbm, display_fwhm_thz)
 
     sig_mw = p_mw.copy()
@@ -2338,10 +2453,11 @@ def make_osa_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
         "carrier_power_dbm": np.asarray(carrier_dbm),
         "sideband_power_dbm": np.asarray(sideband_dbm),
         "total_optical_power_dbm": np.asarray(float(optical_lines["total_dbm"])),
+        "sideband_mode": np.asarray(mode),
     }
 
 def make_utcpd_rf_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
-    """Display UTC-PD output as carrier + DSB RF line powers in dBm."""
+    """Display UTC-PD output as carrier + signal sideband RF line powers in dBm."""
     rf = float(cfg.rf_carrier_ghz)
     f_if = float(cfg.if_ghz)
     bw = max(float(cfg.baud_gbaud), 0.2)
@@ -2351,8 +2467,10 @@ def make_utcpd_rf_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
     floor_dbm = float(rf_lines["sideband_each_dbm"]) - 55.0
     p_mw = np.full_like(f, dbm_to_w(floor_dbm) * 1e3)
     line_fwhm_ghz = 0.12 if classify_isac_waveform(cfg.waveform) == "Tone" else max(0.35, bw / 3.0)
+    mode = optical_sideband_mode(cfg)
     add_display_line_mw(f, p_mw, rf, float(rf_lines["carrier_dbm"]), line_fwhm_ghz)
-    add_display_line_mw(f, p_mw, rf - f_if, float(rf_lines["sideband_each_dbm"]), line_fwhm_ghz)
+    if mode == "DSB":
+        add_display_line_mw(f, p_mw, rf - f_if, float(rf_lines["sideband_each_dbm"]), line_fwhm_ghz)
     add_display_line_mw(f, p_mw, rf + f_if, float(rf_lines["sideband_each_dbm"]), line_fwhm_ghz)
     return {
         "freq_ghz": f,
@@ -2363,6 +2481,7 @@ def make_utcpd_rf_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
         "carrier_power_dbm": np.asarray(float(rf_lines["carrier_dbm"])),
         "sideband_each_dbm": np.asarray(float(rf_lines["sideband_each_dbm"])),
         "total_power_dbm": np.asarray(float(rf_lines["total_dbm"])),
+        "sideband_mode": np.asarray(mode),
     }
 
 def calc_isac_link_budget(
@@ -2664,10 +2783,14 @@ def run_isac_sim(cfg: SimConfig):
     p_opt_total_w = optical_lines["total_w"]
     p_lo_laser_w = optical_lines["tone1_w"]
     p_carrier_w = optical_lines["mzm_carrier_w"]
-    p_dsb_w = optical_lines["dsb_total_w"]
+    p_signal_w = optical_lines["signal_total_w"]
     p_data_laser_w = optical_lines["mzm_branch_w"]
     mzm_metrics = calc_mzm_drive_metrics(cfg.awg_rf_power_dbm, cfg.mzm_drive_gain_db, cfg.cspr_db, cfg.awg_ref_power_dbm)
-    e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_dsb_w, 0.0)) * m
+    if optical_sideband_mode(cfg) == "SSB":
+        m_ssb = x_if_cplx / (np.sqrt(np.mean(np.abs(x_if_cplx) ** 2)) + 1e-12)
+        e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_signal_w, 0.0)) * m_ssb
+    else:
+        e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_signal_w, 0.0)) * m
 
     #
     lw = cfg.linewidth_mhz * 1e6
@@ -2857,6 +2980,40 @@ def run_isac_sim(cfg: SimConfig):
     valid_range = (range_axis_full >= 0.0) & (range_axis_full <= 4.0)
     range_axis = range_axis_full[valid_range]
     range_profile_db = corr_db[valid_range]
+    si_cfr_range_axis = np.zeros(0, dtype=np.float64)
+    si_cfr_profile_db = np.zeros(0, dtype=np.float64)
+    si_cfr_peak_m = float("nan")
+    si_cfr_coherence = float("nan")
+    try:
+        n_cfr = min(len(radar_input), len(ref_sig))
+        if n_cfr >= 64 and len(range_axis) >= 8:
+            x_ref = np.asarray(ref_sig[:n_cfr], dtype=np.float64)
+            y_rx = np.asarray(radar_input[:n_cfr], dtype=np.float64)
+            win_cfr = np.hanning(n_cfr)
+            X = np.fft.fft((x_ref - float(np.mean(x_ref))) * win_cfr)
+            Y = np.fft.fft((y_rx - float(np.mean(y_rx))) * win_cfr)
+            f_cfr = np.fft.fftfreq(n_cfr, d=1.0 / fs)
+            band_cfr = make_bandpass_mask(f_cfr, f_if, occupied_bw_hz)
+            band_cfr &= f_cfr > 0.0
+            sxx = np.abs(X) ** 2
+            band_cfr &= sxx > (np.nanmax(sxx) + 1e-30) * 1e-5
+            if np.count_nonzero(band_cfr) >= 16:
+                idx_cfr = np.argsort(f_cfr[band_cfr])
+                h_cfr = (Y[band_cfr] * np.conj(X[band_cfr])) / (sxx[band_cfr] + 1e-30)
+                w_cfr = sxx[band_cfr] / (np.nanmax(sxx[band_cfr]) + 1e-30)
+                si_cfr = si_normalized_cfr_delay_profile(
+                    f_cfr[band_cfr][idx_cfr],
+                    h_cfr[idx_cfr],
+                    w_cfr[idx_cfr],
+                    range_axis,
+                    3e8 / 2.0,
+                )
+                si_cfr_range_axis = np.asarray(si_cfr["range_m"], dtype=np.float64)
+                si_cfr_profile_db = np.asarray(si_cfr["profile_db"], dtype=np.float64)
+                si_cfr_peak_m = float(si_cfr["peak_m"])
+                si_cfr_coherence = float(si_cfr["coherence"])
+    except Exception:
+        pass
     proc_gain_db = 10.0 * np.log10(max(len(ref_sig), 1))
     radar_snr_db = float("nan")
     pslr_db = float("nan")
@@ -3171,6 +3328,10 @@ def run_isac_sim(cfg: SimConfig):
         "si_norm_range_profile_db": si_norm_profile_db,
         "si_norm_target_over_si_db": si_norm_target_over_si_db,
         "si_norm_phase_coherence": si_norm_phase_coherence,
+        "si_cfr_range_axis_m": si_cfr_range_axis,
+        "si_cfr_range_profile_db": si_cfr_profile_db,
+        "si_cfr_peak_m": si_cfr_peak_m,
+        "si_cfr_coherence": si_cfr_coherence,
         "c1_band_metrics": c1_band_metrics, "c2_band_metrics": c2_band_metrics,
         "radar_snr_db": radar_snr_db, "pslr_db": pslr_db, "processing_gain_db": proc_gain_db,
         "selected_range_m": selected_range_m,
@@ -3181,7 +3342,8 @@ def run_isac_sim(cfg: SimConfig):
         "optical_data_laser_w": p_data_laser_w,
         "optical_lo_laser_w": p_lo_laser_w,
         "optical_carrier_w": p_carrier_w,
-        "optical_dsb_w": p_dsb_w,
+        "optical_dsb_w": p_signal_w,
+        "optical_signal_w": p_signal_w,
         "optical_sideband_each_w": optical_lines["sideband_each_w"],
         "optical_line_powers": optical_lines,
         "utcpd_rf_line_powers": rf_line_powers,
@@ -3205,6 +3367,7 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=False)
         self.si_enable_var = tk.BooleanVar(value=True)
+        self.ssb_enable_var = tk.BooleanVar(value=False)
         self.sim_welch_psd_var = tk.BooleanVar(value=True)
         self.show_si_norm_range_var = tk.BooleanVar(value=False)
         self.rx_mode_var = tk.StringVar(value="ZBD")
@@ -3239,6 +3402,110 @@ class PhotonicIsacSimPanel:
         except Exception:
             return float(default)
 
+    def _collect_sim_preset(self) -> dict:
+        awg_keys = [
+            "fs_var", "ip_var", "port_var", "ch_var", "vpp_var", "power_dbm_var",
+            "rf_var", "if_var", "symbol_rate_var", "waveform_var", "modulation_var",
+            "chirp_len_var", "pilot_rho_var", "rrc_beta_var",
+        ]
+        awg_values = {}
+        awg = getattr(self, "awg_source", None)
+        if awg is not None:
+            for key in awg_keys:
+                var = getattr(awg, key, None)
+                if var is not None and hasattr(var, "get"):
+                    try:
+                        awg_values[key] = var.get()
+                    except Exception:
+                        pass
+        return {
+            "version": 1,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "params": {key: var.get() for key, var in self.params.items()},
+            "controls": {
+                "carrier_wander_enable": bool(self.carrier_wander_enable_var.get()),
+                "si_enable": bool(self.si_enable_var.get()),
+                "ssb_enable": bool(self.ssb_enable_var.get()),
+                "sim_welch_psd": bool(self.sim_welch_psd_var.get()),
+                "show_si_norm_range": bool(self.show_si_norm_range_var.get()),
+                "rx_mode": self.rx_mode_var.get(),
+                "coherence_mode": self.coherence_var.get(),
+                "sc_fde_enable": bool(getattr(self, "sc_fde_enable_var", tk.BooleanVar(value=True)).get()),
+                "sc_fde_taps": getattr(self, "sc_fde_taps_var", tk.StringVar(value="1")).get(),
+            },
+            "awg": awg_values,
+        }
+
+    def _apply_sim_preset(self, preset: dict) -> None:
+        for key, value in dict(preset.get("params", {})).items():
+            if key in self.params:
+                self.params[key].set(str(value))
+        controls = dict(preset.get("controls", {}))
+        bool_map = {
+            "carrier_wander_enable": self.carrier_wander_enable_var,
+            "si_enable": self.si_enable_var,
+            "ssb_enable": self.ssb_enable_var,
+            "sim_welch_psd": self.sim_welch_psd_var,
+            "show_si_norm_range": self.show_si_norm_range_var,
+            "sc_fde_enable": getattr(self, "sc_fde_enable_var", None),
+        }
+        for key, var in bool_map.items():
+            if key in controls and var is not None:
+                var.set(bool(controls[key]))
+        if "rx_mode" in controls:
+            self.rx_mode_var.set(str(controls["rx_mode"]))
+        if "coherence_mode" in controls:
+            self.coherence_var.set(str(controls["coherence_mode"]))
+        if "sc_fde_taps" in controls and hasattr(self, "sc_fde_taps_var"):
+            self.sc_fde_taps_var.set(str(controls["sc_fde_taps"]))
+        awg = getattr(self, "awg_source", None)
+        if awg is not None:
+            for key, value in dict(preset.get("awg", {})).items():
+                var = getattr(awg, key, None)
+                if var is not None and hasattr(var, "set"):
+                    try:
+                        var.set(str(value))
+                    except Exception:
+                        pass
+        self._update_table()
+        if self.data is not None:
+            self._update_range_profile()
+
+    def _save_sim_params(self) -> None:
+        path = filedialog.asksaveasfilename(
+            parent=self.parent,
+            title="Save Simulation Parameters",
+            defaultextension=".json",
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+            initialfile=f"isac_sim_params_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._collect_sim_preset(), f, indent=2)
+            self.status_var.set(f"Saved parameters: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Save Parameters", str(exc), parent=self.parent)
+
+    def _load_sim_params(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.parent,
+            title="Load Simulation Parameters",
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                preset = json.load(f)
+            if not isinstance(preset, dict):
+                raise ValueError("Preset file must contain a JSON object.")
+            self._apply_sim_preset(preset)
+            self.status_var.set(f"Loaded parameters: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Load Parameters", str(exc), parent=self.parent)
+
     def _build_ui(self):
         # LEFT PANEL (parameters)
         left = ttk.Frame(self.parent)
@@ -3254,11 +3521,13 @@ class PhotonicIsacSimPanel:
         ctrl.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
         ttk.Button(ctrl, text="Run Simulation", style="Primary.TButton", command=self.run_simulation).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(ctrl, text="Save Params", command=self._save_sim_params).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(ctrl, text="Load Params", command=self._load_sim_params).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         self._anim_btn = ttk.Button(ctrl, text="Anim Start", command=self._cmd_toggle_anim)
         self._anim_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         ttk.Checkbutton(ctrl, text="Welch PSD", variable=self.sim_welch_psd_var,
                         command=self._update_frame).pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Checkbutton(ctrl, text="SI-norm range", variable=self.show_si_norm_range_var,
+        ttk.Checkbutton(ctrl, text="SI phase-align", variable=self.show_si_norm_range_var,
                         command=self._update_range_profile).pack(side=tk.LEFT, padx=2)
 
         # Split left panel into simulation parameters and physics table
@@ -3314,7 +3583,9 @@ class PhotonicIsacSimPanel:
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("matched-filter raw", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
-            "si_norm_ratio": self.table.insert("", "end", text="SI-norm Target/SI", values=("N/A", "dB")),
+            "si_cfr_peak": self.table.insert("", "end", text="SI-CFR Peak", values=("N/A", "m")),
+            "si_cfr_coh": self.table.insert("", "end", text="SI-CFR Coherence", values=("N/A", "")),
+            "si_norm_ratio": self.table.insert("", "end", text="SI-align Target/SI", values=("N/A", "dB")),
             "si_norm_coh": self.table.insert("", "end", text="SI Phase Coherence", values=("N/A", "")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
             "proc_gain": self.table.insert("", "end", text="Processing Gain",   values=("N/A", "dB")),
@@ -3386,7 +3657,8 @@ class PhotonicIsacSimPanel:
         # removed chirp_bw_ghz
 
         ttk.Checkbutton(grp, text="Enable Carrier Wander", variable=self.carrier_wander_enable_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=8, column=0, columnspan=1, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="SSB Optical Modulation", variable=self.ssb_enable_var, command=self._update_table).grid(row=8, column=1, columnspan=1, sticky="w", pady=2)
         ttk.Label(grp, text="Coherence Mode").grid(row=9, column=0, sticky="w", pady=2)
         ttk.Combobox(grp, textvariable=self.coherence_var, values=["Free-running", "Self-coherent"], width=12).grid(row=9, column=1)
         ttk.Label(grp, text="RX Front-end").grid(row=10, column=0, sticky="w", pady=2)
@@ -3454,6 +3726,7 @@ class PhotonicIsacSimPanel:
             optical_cfg = SimConfig(
                 optical_center_freq_thz=opt_center,
                 rf_carrier_ghz=rf_ghz,
+                optical_sideband_mode="SSB" if bool(self.ssb_enable_var.get()) else "DSB",
                 cspr_db=cspr_db,
                 awg_rf_power_dbm=awg_rf_power_dbm,
                 awg_ref_power_dbm=-10.0,
@@ -3617,6 +3890,7 @@ class PhotonicIsacSimPanel:
             chirp_bw_ghz=_awg_float("symbol_rate_var", 2.0) if awg else 2.0,
             coherence_mode=self.coherence_var.get().strip(),
             rx_mode=self.rx_mode_var.get().strip(),
+            optical_sideband_mode="SSB" if bool(self.ssb_enable_var.get()) else "DSB",
             si_enable=bool(self.si_enable_var.get()),
             carrier_wander_enable=bool(self.carrier_wander_enable_var.get()),
             carrier_wander_mhz=10.0 if self.carrier_wander_enable_var.get() else 0.0,
@@ -3681,7 +3955,7 @@ class PhotonicIsacSimPanel:
         self.ax_range = self.fig.add_subplot(gs[0,2])
         self.ax_const = self.fig.add_subplot(gs[1,2])
         self.lines = []
-        titles = ["1) Optical Tones + DSB", "2) UTC-PD Output (TX Antenna)", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
+        titles = ["1) Optical Tones", "2) UTC-PD Output (TX Antenna)", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
         colors = ["purple", "red", "#2563eb", "#2563eb"]
 
         for i, ax in enumerate(self.axes):
@@ -3720,6 +3994,7 @@ class PhotonicIsacSimPanel:
 
             #
             self.data = run_isac_sim(cfg)
+            sideband_mode = optical_sideband_mode(cfg)
 
             #
             #
@@ -3736,6 +4011,8 @@ class PhotonicIsacSimPanel:
             #
             opt_center = cfg.optical_center_freq_thz
             self.axes[0].set_xlim(opt_center - cfg.rf_carrier_ghz / 1000.0 - 0.03, opt_center + cfg.if_ghz / 1000.0 + 0.03)
+            self.axes[0].set_title(f"1) Optical Tones + {sideband_mode}")
+            self.axes[1].set_title(f"2) UTC-PD Output ({sideband_mode})")
             self.axes[1].set_xlim(c - span, c + span)
             spec_fmax_ghz = min(25.0, cfg.dso_bandwidth_ghz, 0.5 * fs / 1e9)
             self.axes[2].set_xlim(0.0, spec_fmax_ghz)
@@ -3806,6 +4083,10 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["range_detect"], values=("matched-filter raw", ""))
             if "range_sel" in self.rows:
                 self.table.item(self.rows["range_sel"], values=(f"{float(self.data.get('selected_range_m', np.nan)):.3f}", "m"))
+            if "si_cfr_peak" in self.rows:
+                self.table.item(self.rows["si_cfr_peak"], values=(f"{float(self.data.get('si_cfr_peak_m', np.nan)):.3f}", "m"))
+            if "si_cfr_coh" in self.rows:
+                self.table.item(self.rows["si_cfr_coh"], values=(f"{float(self.data.get('si_cfr_coherence', np.nan)):.3f}", ""))
             if "si_norm_ratio" in self.rows:
                 self.table.item(self.rows["si_norm_ratio"], values=(f"{float(self.data.get('si_norm_target_over_si_db', np.nan)):.2f}", "dB"))
             if "si_norm_coh" in self.rows:
@@ -3883,7 +4164,20 @@ class PhotonicIsacSimPanel:
                         color="#7c3aed",
                         lw=1.0,
                         linestyle="-.",
-                        label="SI-normalized",
+                        label="SI phase-aligned",
+                    )
+            rng_cfr = np.asarray(self.data.get("si_cfr_range_axis_m", []), dtype=np.float64)
+            prof_cfr = np.asarray(self.data.get("si_cfr_range_profile_db", []), dtype=np.float64)
+            if bool(self.show_si_norm_range_var.get()) and len(rng_cfr) and len(rng_cfr) == len(prof_cfr):
+                mc = rng_cfr <= max_range
+                if np.any(mc):
+                    self.ax_range.plot(
+                        rng_cfr[mc],
+                        prof_cfr[mc],
+                        color="#dc2626",
+                        lw=1.15,
+                        linestyle="--",
+                        label="SI-CFR normalized",
                     )
             sel_m = float(self.data.get("selected_range_m", float("nan")))
             if np.isfinite(sel_m) and np.any(m):
@@ -3924,7 +4218,8 @@ class PhotonicIsacSimPanel:
         # artificially lower than spread DSB content.
         osa = self.data.get("osa_display", {})
         self.lines[0].set_data(osa.get("freq_thz", []), osa.get("signal_dbm", []))
-        self.lines[0].set_label("MZM carrier + DSB")
+        sideband_mode = str(np.asarray(osa.get("sideband_mode", "DSB")).item()) if "sideband_mode" in osa else "DSB"
+        self.lines[0].set_label(f"MZM carrier + {sideband_mode}")
         self.l_lo.set_data(osa.get("freq_thz", []), osa.get("lo_dbm", []))
         self.l_lo.set_label("Optical tone")
         self.axes[0].legend(loc="upper right", fontsize=8)
@@ -9028,6 +9323,7 @@ class DsoPanel:
         array_keys = {
             "dechirped", "rng", "prof_db", "ref_rng", "ref_prof_db",
             "lags", "corr_acc", "cfr_freqs_hz", "cfr_h", "cfr_weight",
+            "si_cfr_rng", "si_cfr_prof_db",
         }
         scalar_keys = {
             "ch", "row", "fs_ref", "frame_start", "n_chirps", "pts_per_chirp",
@@ -9038,6 +9334,7 @@ class DsoPanel:
             "range_diff_mm", "peak_range_diff_mm", "range_diff_method",
             "matched_filter_range_diff_mm", "target_diff_mm", "range_resolution_m",
             "target_range_m", "target_window_m",
+            "si_cfr_peak_m", "si_cfr_coherence", "si_cfr_target_db",
         }
         for idx, item in enumerate(items):
             ch = str(item.get("ch", f"R{idx + 1}")).strip().upper() or f"R{idx + 1}"
@@ -9057,6 +9354,116 @@ class DsoPanel:
                 except Exception:
                     pass
         return out
+
+    def _augment_range_item_with_si_cfr(self, item: dict) -> dict:
+        out = dict(item)
+        if len(np.asarray(out.get("si_cfr_rng", []), dtype=np.float64).reshape(-1)) >= 4:
+            return out
+        freqs = np.asarray(out.get("cfr_freqs_hz", []), dtype=np.float64).reshape(-1)
+        h = np.asarray(out.get("cfr_h", []), dtype=np.complex128).reshape(-1)
+        w = np.asarray(out.get("cfr_weight", []), dtype=np.float64).reshape(-1)
+        rng = np.asarray(out.get("rng", []), dtype=np.float64).reshape(-1)
+        if len(freqs) < 16 or len(h) < 16 or len(rng) < 8:
+            return out
+        try:
+            range_scale = float(out.get("range_scale_m_per_s", self._range_delay_scale_m_per_s(row=int(out.get("row", 0)))))
+        except Exception:
+            range_scale = 3e8 / 2.0
+        cfr_rng = rng[np.isfinite(rng)]
+        cfr_rng = cfr_rng[cfr_rng >= 0.0]
+        if len(cfr_rng) > 4096:
+            cfr_rng = np.linspace(float(np.nanmin(cfr_rng)), float(np.nanmax(cfr_rng)), 4096)
+        if len(cfr_rng) < 8:
+            return out
+        try:
+            si_cfr = si_normalized_cfr_delay_profile(freqs, h, w if len(w) else None, cfr_rng, range_scale)
+            si_rng = np.asarray(si_cfr["range_m"], dtype=np.float64)
+            si_prof = np.asarray(si_cfr["profile_db"], dtype=np.float64)
+            si_peak = float(si_cfr["peak_m"])
+            target_m = float(out.get("target_range_m", float("nan")))
+            target_window_m = float(out.get("target_window_m", float("nan")))
+            zero_exclude_m = float(out.get("zero_exclude_m", float("nan")))
+            if len(si_rng) == len(si_prof) and len(si_rng):
+                pick_mask = np.isfinite(si_rng)
+                if np.isfinite(target_m) and target_m > 0 and np.isfinite(target_window_m) and target_window_m > 0:
+                    pick_mask &= np.abs(si_rng - target_m) <= target_window_m
+                elif np.isfinite(zero_exclude_m) and zero_exclude_m > 0:
+                    pick_mask &= si_rng > zero_exclude_m
+                if np.any(pick_mask):
+                    pick_indices = np.flatnonzero(pick_mask)
+                    peak_idx = int(pick_indices[int(np.nanargmax(si_prof[pick_mask]))])
+                    si_peak = float(si_rng[peak_idx])
+                    out["si_cfr_target_db"] = float(si_prof[peak_idx])
+            out["si_cfr_rng"] = si_rng
+            out["si_cfr_prof_db"] = si_prof
+            out["si_cfr_peak_m"] = si_peak
+            out["si_cfr_coherence"] = float(si_cfr["coherence"])
+        except Exception:
+            pass
+        return out
+
+    def _range_results_from_npz(self, loaded) -> list[dict]:
+        try:
+            count = int(np.asarray(loaded["range_result_count"]).reshape(-1)[0]) if "range_result_count" in loaded.files else 0
+        except Exception:
+            count = 0
+        if count <= 0:
+            return []
+        channels = []
+        if "range_result_channels" in loaded.files:
+            try:
+                channels = [str(x.item() if hasattr(x, "item") else x).strip().upper() for x in np.asarray(loaded["range_result_channels"]).reshape(-1)]
+            except Exception:
+                channels = []
+        array_keys = {
+            "dechirped", "rng", "prof_db", "ref_rng", "ref_prof_db",
+            "lags", "corr_acc", "cfr_freqs_hz", "cfr_h", "cfr_weight",
+            "si_cfr_rng", "si_cfr_prof_db",
+        }
+        scalar_keys = {
+            "ch", "row", "fs_ref", "frame_start", "n_chirps", "pts_per_chirp",
+            "ref_len", "range_scale_m_per_s", "est_range", "est_range_raw",
+            "display_range_m", "range_est_method", "pslr_db", "range_mode",
+            "self_interference_range_m", "zero_exclude_m", "diff_tau_s",
+            "diff_range_m", "diff_coherence", "zero_active", "zero_ref_center_m",
+            "range_diff_mm", "peak_range_diff_mm", "range_diff_method",
+            "matched_filter_range_diff_mm", "target_diff_mm", "range_resolution_m",
+            "target_range_m", "target_window_m",
+            "si_cfr_peak_m", "si_cfr_coherence", "si_cfr_target_db",
+        }
+        items: list[dict] = []
+        for idx in range(count):
+            ch = channels[idx] if idx < len(channels) and channels[idx] else f"R{idx + 1}"
+            prefix = f"range__{idx:02d}__{self._filename_safe_token(ch)}__"
+            item: dict[str, object] = {"ch": ch}
+            for key in array_keys:
+                fkey = prefix + key
+                if fkey in loaded.files:
+                    item[key] = np.asarray(loaded[fkey])
+            for key in scalar_keys:
+                fkey = prefix + key
+                if fkey not in loaded.files:
+                    continue
+                val = self._npz_unpack_value(loaded[fkey])
+                if key in {"ch", "range_est_method", "range_mode", "range_diff_method"}:
+                    item[key] = str(val)
+                elif key in {"row", "frame_start", "n_chirps", "pts_per_chirp", "ref_len"}:
+                    try:
+                        item[key] = int(val)
+                    except Exception:
+                        item[key] = val
+                elif key == "zero_active":
+                    try:
+                        item[key] = bool(int(val))
+                    except Exception:
+                        item[key] = bool(val)
+                else:
+                    try:
+                        item[key] = float(val)
+                    except Exception:
+                        item[key] = val
+            items.append(self._augment_range_item_with_si_cfr(item))
+        return items
 
     def _on_save_range_data(self) -> None:
         has_ref = bool(self.runtime.get("lfm_range_zero_by_ch") or self.runtime.get("lfm_range_zero_info"))
@@ -9254,7 +9661,24 @@ class DsoPanel:
                 path = Path(path_str)
                 with np.load(path, allow_pickle=True) as loaded:
                     if "rx_sig" not in loaded.files or "rx_fs" not in loaded.files:
-                        raise ValueError("This file does not contain rx_sig/rx_fs capture data.")
+                        range_items = self._range_results_from_npz(loaded)
+                        if range_items:
+                            payload = self._tx_payload_from_npz(loaded)
+                            self._metrics_from_npz(loaded)
+                            self._range_zero_from_npz(loaded)
+                            if payload:
+                                self.runtime["tx_payload"] = payload
+                            self.runtime["latest_range_file"] = str(path)
+
+                            def update_range_only():
+                                self._last_loaded_capture_path = str(path)
+                                self.capture_file_var.set(f"Range: {path.name}")
+                                self._show_isac_range_results(range_items)
+
+                            self.parent.after(0, update_range_only)
+                            self._log(f"[Range] Loaded saved range data: {path}  results={len(range_items)}")
+                            return
+                        raise ValueError("This file does not contain rx_sig/rx_fs capture data or saved range results.")
                     sig = np.asarray(loaded["rx_sig"], dtype=np.float64).reshape(-1)
                     fs = float(np.asarray(loaded["rx_fs"]).reshape(-1)[0])
                     t = (
@@ -11092,6 +11516,51 @@ class DsoPanel:
                     )
 
         freqs_cur, h_cur, w_cur = self._estimate_lfm_cfr(rx_mat, ref_mat, fs_ref)
+        si_cfr_rng = np.zeros(0, dtype=np.float64)
+        si_cfr_prof_db = np.zeros(0, dtype=np.float64)
+        si_cfr_peak_m = float("nan")
+        si_cfr_coherence = float("nan")
+        si_cfr_target_db = float("nan")
+        try:
+            cfr_rng = rng[np.isfinite(rng)]
+            cfr_rng = cfr_rng[cfr_rng >= 0.0]
+            if len(cfr_rng) > 4096:
+                cfr_rng = np.linspace(float(np.nanmin(cfr_rng)), float(np.nanmax(cfr_rng)), 4096)
+            if len(freqs_cur) >= 16 and len(cfr_rng) >= 8:
+                si_cfr = si_normalized_cfr_delay_profile(
+                    freqs_cur,
+                    h_cur,
+                    w_cur,
+                    cfr_rng,
+                    range_scale,
+                )
+                si_cfr_rng = np.asarray(si_cfr["range_m"], dtype=np.float64)
+                si_cfr_prof_db = np.asarray(si_cfr["profile_db"], dtype=np.float64)
+                si_cfr_coherence = float(si_cfr["coherence"])
+                if len(si_cfr_rng) == len(si_cfr_prof_db) and len(si_cfr_rng):
+                    pick_mask = np.isfinite(si_cfr_rng)
+                    if np.isfinite(target_m) and target_m > 0:
+                        pick_mask &= np.abs(si_cfr_rng - target_m) <= target_window_m
+                    elif monostatic_row and np.isfinite(zero_exclude_m):
+                        pick_mask &= si_cfr_rng > zero_exclude_m
+                    if not np.any(pick_mask):
+                        pick_mask = np.isfinite(si_cfr_rng)
+                        if monostatic_row and np.isfinite(zero_exclude_m):
+                            pick_mask &= si_cfr_rng > zero_exclude_m
+                    if np.any(pick_mask):
+                        pick_indices = np.flatnonzero(pick_mask)
+                        si_pick = int(pick_indices[int(np.nanargmax(si_cfr_prof_db[pick_mask]))])
+                        si_cfr_peak_m = float(si_cfr_rng[si_pick])
+                        si_cfr_target_db = float(si_cfr_prof_db[si_pick])
+                    else:
+                        si_cfr_peak_m = float(si_cfr["peak_m"])
+                if np.isfinite(si_cfr_peak_m):
+                    self._log(
+                        f"{prefix} SI-CFR normalized: peak={si_cfr_peak_m:.4g} m  "
+                        f"coherence={si_cfr_coherence:.3f}"
+                    )
+        except Exception as si_cfr_e:
+            self._log(f"{prefix} SI-CFR normalized skipped: {si_cfr_e}")
         ref_cfr = (
             zero_ref_info.get("cfr")
             if isinstance(zero_ref_info, dict) and zero_ref_info.get("cfr") is not None
@@ -11219,6 +11688,11 @@ class DsoPanel:
             "cfr_freqs_hz": freqs_cur,
             "cfr_h": h_cur,
             "cfr_weight": w_cur,
+            "si_cfr_rng": si_cfr_rng,
+            "si_cfr_prof_db": si_cfr_prof_db,
+            "si_cfr_peak_m": si_cfr_peak_m,
+            "si_cfr_coherence": si_cfr_coherence,
+            "si_cfr_target_db": si_cfr_target_db,
             "est_range": est_range,
             "est_range_raw": est_range_raw,
             "display_range_m": display_range_m,
@@ -11629,6 +12103,7 @@ class DsoPanel:
         if not results:
             return
         self._last_range_summaries = []
+        results = [self._augment_range_item_with_si_cfr(dict(item)) for item in results]
         self._last_range_results = list(results)
         self.runtime["latest_range_save_role"] = "measurement"
 
@@ -11638,9 +12113,13 @@ class DsoPanel:
             ax = self.fd_axes[row][3] if hasattr(self, "fd_axes") else getattr(self, "ax_range", self.ax_const)
             rng = np.asarray(item.get("rng", []), dtype=np.float64)
             prof_db = np.asarray(item.get("prof_db", []), dtype=np.float64)
+            si_cfr_rng = np.asarray(item.get("si_cfr_rng", []), dtype=np.float64)
+            si_cfr_prof_db = np.asarray(item.get("si_cfr_prof_db", []), dtype=np.float64)
             ref_rng = np.asarray(item.get("ref_rng", []), dtype=np.float64)
             ref_prof_db = np.asarray(item.get("ref_prof_db", []), dtype=np.float64)
             est_range = float(item.get("est_range", float("nan")))
+            si_cfr_peak_m = float(item.get("si_cfr_peak_m", float("nan")))
+            si_cfr_coh = float(item.get("si_cfr_coherence", float("nan")))
             pslr_db = float(item.get("pslr_db", float("nan")))
             range_mode = str(item.get("range_mode", self._range_mode_for_row(row)))
             si_range_m = float(item.get("self_interference_range_m", float("nan")))
@@ -11678,6 +12157,8 @@ class DsoPanel:
                 "cfr_diff_range_mm": cfr_diff_range_mm,
                 "range_diff_method": range_diff_method,
                 "diff_cfr_coherence": diff_coh,
+                "si_cfr_peak_m": si_cfr_peak_m,
+                "si_cfr_coherence": si_cfr_coh,
             })
             suffix = "" if len(results) == 1 else f" {ch}"
             self._set_metric(f"range_peak_m{suffix}".strip().replace(" ", "_").lower(),
@@ -11690,6 +12171,10 @@ class DsoPanel:
                              f"Range Difference{suffix}", diff_range_mm, "mm")
             self._set_metric(f"diff_cfr_coherence{suffix}".strip().replace(" ", "_").lower(),
                              f"Differential CFR Coh.{suffix}", diff_coh, "")
+            self._set_metric(f"si_cfr_peak_m{suffix}".strip().replace(" ", "_").lower(),
+                             f"SI-CFR Peak{suffix}", si_cfr_peak_m, "m")
+            self._set_metric(f"si_cfr_coherence{suffix}".strip().replace(" ", "_").lower(),
+                             f"SI-CFR Coh.{suffix}", si_cfr_coh, "")
             if np.isfinite(si_range_m):
                 self._set_metric(f"self_interference_peak_m{suffix}".strip().replace(" ", "_").lower(),
                                  f"Self-Interference Peak{suffix}", si_range_m, "m")
@@ -11702,6 +12187,8 @@ class DsoPanel:
                 self._set_metric("diff_range_mm", "Range Difference", diff_range_mm, "mm")
                 self._set_metric("range_difference_mm", "Range Difference", diff_range_mm, "mm")
                 self._set_metric("diff_cfr_coherence", "Differential CFR Coh.", diff_coh, "")
+                self._set_metric("si_cfr_peak_m", "SI-CFR Peak", si_cfr_peak_m, "m")
+                self._set_metric("si_cfr_coherence", "SI-CFR Coh.", si_cfr_coh, "")
 
             ax.cla()
             if len(rng) == 0 or len(prof_db) == 0:
@@ -11747,6 +12234,33 @@ class DsoPanel:
                         label="Zero ref",
                     )
             ax.plot(rng_plot[show], prof_db[show], color="#0f766e", linewidth=1.2, label="Current")
+            if len(si_cfr_rng) == len(si_cfr_prof_db) and len(si_cfr_rng) > 0:
+                si_cfr_plot = si_cfr_rng * x_scale
+                si_show = np.isfinite(si_cfr_rng) & np.isfinite(si_cfr_prof_db)
+                if np.any(show) and len(rng_plot) == len(show):
+                    try:
+                        x_min = float(np.nanmin(rng_plot[show]))
+                        x_max = float(np.nanmax(rng_plot[show]))
+                        si_show &= (si_cfr_plot >= x_min) & (si_cfr_plot <= x_max)
+                    except Exception:
+                        pass
+                if np.count_nonzero(si_show) >= 4:
+                    ax.plot(
+                        si_cfr_plot[si_show],
+                        si_cfr_prof_db[si_show],
+                        color="#dc2626",
+                        linewidth=1.05,
+                        linestyle="--",
+                        label="SI-CFR norm",
+                    )
+                    if np.isfinite(si_cfr_peak_m):
+                        ax.axvline(
+                            si_cfr_peak_m * x_scale,
+                            color="#dc2626",
+                            linestyle=":",
+                            linewidth=0.9,
+                            label=f"SI-CFR {si_cfr_peak_m * x_scale:.1f} {x_unit}",
+                        )
             if (not zero_active) and np.isfinite(zero_ref_center_m):
                 ax.axvline(
                     zero_ref_center_m * x_scale,
