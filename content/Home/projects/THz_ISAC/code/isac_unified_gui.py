@@ -16,6 +16,7 @@ warnings.filterwarnings("ignore", message="This figure includes Axes that are no
 
 from scipy.signal import welch, hilbert, fftconvolve
 from scipy.special import erfcinv
+from scipy.stats import ncx2
 
 import queue
 import threading
@@ -4700,7 +4701,7 @@ class DsoPanel:
         # These StringVars are still used by DSP callbacks and saved captures.
         self.band_pwr_var    = tk.StringVar(value="Band Power:  ---")
         self.noise_floor_var = tk.StringVar(value="Noise Floor: ---")
-        self.snr_var         = tk.StringVar(value="SNR:         ---")
+        self.snr_var         = tk.StringVar(value="Band SNR:    ---")
         self.evm_var         = tk.StringVar(value="EVM:         ---")
         self.ber_var         = tk.StringVar(value="BER:         ---")
         self.sym_count_var   = tk.StringVar(value="Symbols:     ---")
@@ -5090,13 +5091,13 @@ class DsoPanel:
             ("noise_floor_dbmhz", "Noise Floor", "dBm/Hz", "Comm", "Stored or capture-derived DSO noise density."),
             ("snr_com_db", "Band SNR", "dB", "Comm", "Band-power SNR from integrated PSD; use EVM-implied SNR for demod quality."),
             ("sinr_com_db", "SINR_com", "dB", "Comm", "Equals SNR if interference is not separately estimated."),
-            ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+SNR_com)."),
+            ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+EVM-implied SNR) when available."),
             ("evm_db", "EVM", "dB", "Comm", "Measured demodulation EVM."),
             ("evm_snr", "EVM-implied SNR", "dB", "Comm", "-EVM[dB]; demodulation-quality communication SNR."),
             ("evm_pct", "EVM", "%", "Comm", "Measured demodulation EVM."),
             ("ber", "BER", "", "Comm", "Measured pre-FEC BER when PRBS/reference lock is valid."),
             ("symbols", "Symbols", "", "Comm", "Symbols used for BER/EVM."),
-            ("snr_rad_db", "SNR_rad", "dB", "Radar", "Radar SNR; uses SNR_com when no separate radar SNR is available."),
+            ("snr_rad_db", "SNR_rad", "dB", "Radar", "Radar SNR proxy; separate range-profile metrics are preferred."),
             ("mi_rad_mbps", "MI_rad", "Mbit/s", "Radar", "0.5/Tsig*log2(1+SNR_rad)."),
             ("crlb_range_std_mm", "Range CRLB std", "mm", "Radar", "AWGN delay CRLB using occupied bandwidth RMS proxy."),
             ("pslr_db", "PSLR", "dB", "Radar", "Peak-to-sidelobe ratio from latest range profile."),
@@ -5176,7 +5177,7 @@ class DsoPanel:
         rad_snr_db = self._metric_float("snr_rad_db")
         if not np.isfinite(rad_snr_db) and np.isfinite(snr_db):
             rad_snr_db = snr_db
-            self._set_metric("snr_rad_db", "SNR_rad", rad_snr_db, "dB", "Using SNR_com as radar SNR proxy.")
+            self._set_metric("snr_rad_db", "SNR_rad", rad_snr_db, "dB", "Using available demod/band SNR as a fallback radar proxy.")
         if np.isfinite(rad_snr_db):
             rad_snr_lin = 10.0 ** (rad_snr_db / 10.0)
             try:
@@ -7888,7 +7889,7 @@ class DsoPanel:
             if row == 0:
                 self.band_pwr_var.set(f"Band Power:  {vals['band_power_dbm']:.2f} dBm")
                 self.noise_floor_var.set(f"Noise Floor: {vals['noise_floor_dbmhz']:.1f} dBm/Hz")
-                self.snr_var.set(f"SNR:         {vals['snr_db']:.2f} dB")
+                self.snr_var.set(f"Band SNR:    {vals['snr_db']:.2f} dB")
             if row == 1:
                 self._set_metric("snr_rad_db", "SNR_rad", vals["snr_db"], "dB", f"Measured from monostatic channel {ch}.")
         return out
@@ -10213,14 +10214,14 @@ class DsoPanel:
 
             self.band_pwr_var.set(f"Band Power:  {p_sig_true_dbm:.2f} dBm")
             self.noise_floor_var.set(f"Noise Floor: {nf_label}")
-            self.snr_var.set(f"SNR:         {snr_db:.2f} dB")
+            self.snr_var.set(f"Band SNR:    {snr_db:.2f} dB")
             nf_dbmhz = 10.0 * np.log10(max(nf_mwhz, 1e-30))
             self._set_metric("band_power_dbm", "Band Power", p_sig_true_dbm, "dBm")
             self._set_metric("noise_floor_dbmhz", "Noise Floor", nf_dbmhz, "dBm/Hz")
             self._set_metric("snr_com_db", "Band SNR", snr_db, "dB")
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
-                "No separate clutter/interference estimate; using SNR_com."
+                "No separate clutter/interference estimate; using band-power diagnostic."
             )
             self._refresh_metrics_table()
 
@@ -13247,9 +13248,11 @@ class DsoPanel:
 class SystemModelValidationPanel:
     """Paper-model SNR/range validation tab."""
 
-    def __init__(self, parent: ttk.Frame, runtime: dict | None = None):
+    def __init__(self, parent: ttk.Frame, runtime: dict | None = None, tx_source=None, photonic_source=None):
         self.parent = parent
         self.runtime = runtime if runtime is not None else {}
+        self.tx_source = tx_source
+        self.photonic_source = photonic_source
         self.params: dict[str, tk.StringVar] = {}
         self.meas_points: list[dict[str, float | str]] = []
         self.status_var = tk.StringVar(value="Ready")
@@ -13279,23 +13282,23 @@ class SystemModelValidationPanel:
         add(3, "rho", "rho pilot power", "0.20")
         add(4, "cspr_db", "CSPR [dB]", "20")
         add(5, "iso_db", "OMT ISO [dB]", "25")
-        add(6, "ac2", "A_c^2", "1.0")
-        add(7, "sqrt_k", "sqrt(K)", "1e-4")
+        add(6, "ac2", "A_c^2 [mW]", "1.0")
+        add(7, "sqrt_k", "sqrt(K) [amp*m^2]", "1e-4")
         add(8, "bandwidth_ghz", "B signal [GHz]", "2.0")
-        add(9, "pilot_time_ns", "T_p pilot [ns]", "1024")
+        add(9, "pilot_time_ns", "T_p pilot [ns]", "102.4")
         add(10, "gc_db", "G_c [dB]", "0")
-        add(11, "n_sens", "N sensing", "1e-8")
-        add(12, "n_comm", "N_c comm", "1e-8")
-        add(13, "modulation_order", "Comm M-QAM", "32")
-        add(14, "ber_target", "BER target", "1e-3")
-        add(15, "pfa", "Radar Pfa", "1e-6")
+        add(11, "noise_density_dbmhz", "Noise density [dBm/Hz]", "-130")
+        add(12, "modulation_order", "Comm M-QAM", "32")
+        add(13, "ber_target", "BER target", "1e-3")
+        add(14, "pfa", "Radar Pfa", "1e-6")
+        add(15, "pd", "Radar Pd", "0.90")
         add(16, "rho_points", "rho sweep points", "101")
         add(17, "mc_trials", "MC trials", "2000")
 
         btns = ttk.Frame(ctrl)
         btns.grid(row=18, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(btns, text="Run", style="Primary.TButton", command=self._run).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Sync TX", command=self._sync_from_tx).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text="Load Save Data", command=self._load_measurement).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text="Clear Meas.", command=self._clear_measurements).pack(side=tk.LEFT, padx=(6, 0))
 
@@ -13327,6 +13330,11 @@ class SystemModelValidationPanel:
         pilot_time_s = max(self._float("pilot_time_ns", 1024.0) * 1e-9, 1e-15)
         return max(bandwidth_hz * pilot_time_s, 1.0)
 
+    def _noise_power_mw(self) -> float:
+        density_dbmhz = self._float("noise_density_dbmhz", -130.0)
+        bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
+        return max((10.0 ** (density_dbmhz / 10.0)) * bandwidth_hz, 1e-30)
+
     def _comm_threshold_db(self) -> float:
         try:
             m = max(2, int(round(self._float("modulation_order", 32.0))))
@@ -13346,11 +13354,67 @@ class SystemModelValidationPanel:
 
     def _sens_threshold_db(self) -> float:
         pfa = float(np.clip(self._float("pfa", 1e-6), 1e-15, 0.5))
-        gamma = -np.log(pfa)
+        pd = float(np.clip(self._float("pd", 0.90), 1e-6, 1.0 - 1e-9))
+        eta = -np.log(pfa)
+        lo, hi = 0.0, 1.0
+        # Noncoherent complex detector: 2|y|^2 is noncentral chi-square
+        # with df=2 and noncentrality 2*SNR.
+        while ncx2.sf(2.0 * eta, 2, 2.0 * hi) < pd and hi < 1e9:
+            hi *= 2.0
+        for _ in range(70):
+            mid = 0.5 * (lo + hi)
+            if ncx2.sf(2.0 * eta, 2, 2.0 * mid) >= pd:
+                hi = mid
+            else:
+                lo = mid
+        gamma = hi
         return float(10.0 * np.log10(max(gamma, 1e-30)))
 
-    def _sync_from_tx(self) -> None:
+    def _sync_from_sim(self) -> None:
         try:
+            cfg = None
+            if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
+                cfg = self.photonic_source._cfg_from_ui()
+                waveform_kind = classify_isac_waveform(cfg.waveform)
+                bw_hz = estimate_waveform_bandwidth_hz(cfg, waveform_kind)
+                if bw_hz > 0:
+                    self.params["bandwidth_ghz"].set(f"{bw_hz / 1e9:.6g}")
+                pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(float(cfg.baud_gbaud) * 1e9, 1.0)
+                self.params["pilot_time_ns"].set(f"{pilot_time_s * 1e9:.6g}")
+                self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
+                self.params["cspr_db"].set(f"{float(cfg.cspr_db):.6g}")
+                self.params["iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
+                rf_lines = calc_utcpd_rf_line_powers(cfg)
+                self.params["ac2"].set(f"{float(rf_lines.get('carrier_w', 1e-6)) * 1e3:.6g}")
+                ref_r = max(float(cfg.target_dist_m), 1e-6)
+                link = calc_isac_link_budget(
+                    distance_m=ref_r,
+                    rf_ghz=cfg.rf_carrier_ghz,
+                    tx_dbm=cfg.utcpd_target_dbm,
+                    tx_gain_dbi=cfg.tx_ant_gain_dbi,
+                    rx_gain_dbi=cfg.rx_ant_gain_dbi,
+                    rcs_sqm=cfg.target_rcs_sqm,
+                    lna_gain_db=cfg.lna_gain_db,
+                    c1_drive_gain_db=cfg.c1_drive_gain_db,
+                    c2_drive_gain_db=cfg.c2_drive_gain_db,
+                    c1_cable_loss_db=cfg.c1_cable_loss_db,
+                    c2_cable_loss_db=cfg.c2_cable_loss_db,
+                    omt_il_db=cfg.omt_il_db,
+                    target_ant_gain_dbi=cfg.target_ant_gain_dbi,
+                    target_gamma_mag=cfg.target_gamma_mag,
+                    target_pol_eff=cfg.target_pol_eff,
+                )
+                beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
+                self.params["sqrt_k"].set(f"{beta_ref * ref_r ** 2:.6g}")
+                ac2_mw = max(float(rf_lines.get("carrier_w", 1e-6)) * 1e3, 1e-30)
+                c1_total_mw = dbm_to_w(float(link["c1_rf_dbm"])) * 1e3
+                gc = max(c1_total_mw * ref_r ** 2 / ac2_mw, 1e-30)
+                self.params["gc_db"].set(f"{10.0 * np.log10(gc):.6g}")
+                if getattr(self.photonic_source, "data", None):
+                    c1m = self.photonic_source.data.get("c1_band_metrics", {})
+                    nf = float(c1m.get("noise_floor_dbm_hz", float("nan")))
+                    if np.isfinite(nf):
+                        self.params["noise_density_dbmhz"].set(f"{nf:.6g}")
             pl = self.runtime.get("tx_payload")
             if isinstance(pl, dict) and pl:
                 bw = float(pl.get("B", pl.get("symbol_rate", pl.get("symbol_rate_actual", 2e9))))
@@ -13371,9 +13435,11 @@ class SystemModelValidationPanel:
                     self.params["modulation_order"].set("16")
                 elif "64" in mod:
                     self.params["modulation_order"].set("64")
+            # N_c and N_sensing are not independent knobs here: both are the
+            # integrated ZBD/DSO output noise density over B.
             self._run()
         except Exception as exc:
-            messagebox.showerror("Sync TX", str(exc), parent=self.parent)
+            messagebox.showerror("Sync Sim", str(exc), parent=self.parent)
 
     def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
         rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
@@ -13383,8 +13449,8 @@ class SystemModelValidationPanel:
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_sens = max(self._float("n_sens", 1e-8), 1e-30)
-        n_comm = max(self._float("n_comm", 1e-8), 1e-30)
+        n_sens = self._noise_power_mw()
+        n_comm = self._noise_power_mw()
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_comm)
         snr_sens = (2.0 * rho_v * alpha * ac2 * sqrt_k * gp) / (n_sens * (r ** 2))
@@ -13395,6 +13461,7 @@ class SystemModelValidationPanel:
             "alpha": alpha,
             "cspr": cspr,
             "gp": gp,
+            "n_mw": n_comm,
         }
 
     @staticmethod
@@ -13409,8 +13476,8 @@ class SystemModelValidationPanel:
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_sens = max(self._float("n_sens", 1e-8), 1e-30)
-        n_comm = max(self._float("n_comm", 1e-8), 1e-30)
+        n_sens = self._noise_power_mw()
+        n_comm = self._noise_power_mw()
         g_sens = 10.0 ** (self._sens_threshold_db() / 10.0)
         g_comm = 10.0 ** (self._comm_threshold_db() / 10.0)
         r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_comm * g_comm))
@@ -13444,6 +13511,8 @@ class SystemModelValidationPanel:
             comm_thr_db = self._comm_threshold_db()
             sens_thr_db = self._sens_threshold_db()
             gp_db = 10.0 * np.log10(max(float(model.get("gp", 1.0)), 1e-30))
+            n_dbm = 10.0 * np.log10(max(float(model.get("n_mw", 1e-30)), 1e-30))
+            nf_dbmhz = self._float("noise_density_dbmhz", -130.0)
 
             ax_snr, ax_err, ax_rho, ax_meas = self.axes.reshape(-1)
             for ax in self.axes.reshape(-1):
@@ -13510,6 +13579,7 @@ class SystemModelValidationPanel:
                 f"rho={rho:.3f}  Rmax_comm={rc[0]:.3g} m  "
                 f"Rmax_sens={rs[0]:.3g} m  joint={rj[0]:.3g} m  "
                 f"Gp=T*B={gp_db:.1f} dB  "
+                f"N={n_dbm:.1f} dBm ({nf_dbmhz:.1f} dBm/Hz x B)  "
                 f"thr(comm/sens)={comm_thr_db:.1f}/{sens_thr_db:.1f} dB  "
                 f"meas={len(self.meas_points)}"
             )
@@ -13651,7 +13721,12 @@ class UnifiedApp:
             show_awg_params=False,
         )
         self.dso_panel = DsoPanel(tab_dso, runtime=self.runtime)
-        self.system_model_panel = SystemModelValidationPanel(tab_model, runtime=self.runtime)
+        self.system_model_panel = SystemModelValidationPanel(
+            tab_model,
+            runtime=self.runtime,
+            tx_source=self.tx_sim_panel,
+            photonic_source=self.photonic_sim_panel,
+        )
         self._install_awg_dso_sync_traces()
 
     def _sync_dso_from_awg_panel(self, source: str = "AWG panel") -> None:
