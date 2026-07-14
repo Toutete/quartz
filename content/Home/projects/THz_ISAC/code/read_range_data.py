@@ -128,171 +128,6 @@ def zero_reference_result(loaded: np.lib.npyio.NpzFile, ch: str, index: int = 0)
     return item
 
 
-def differential_delay_from_cfr(
-    freqs: np.ndarray,
-    h_cur: np.ndarray,
-    h_ref: np.ndarray,
-    weight: np.ndarray | None = None,
-) -> tuple[float, float]:
-    """Estimate relative delay from the phase slope of current/reference CFR."""
-    f = np.asarray(freqs, dtype=np.float64).reshape(-1)
-    hc = np.asarray(h_cur, dtype=np.complex128).reshape(-1)
-    hr = np.asarray(h_ref, dtype=np.complex128).reshape(-1)
-    n = min(len(f), len(hc), len(hr))
-    if n < 16:
-        return float("nan"), float("nan")
-    f = f[:n]
-    hc = hc[:n]
-    hr = hr[:n]
-    ratio = hc / (hr + 1e-15)
-    valid = np.isfinite(f) & np.isfinite(ratio.real) & np.isfinite(ratio.imag) & (np.abs(ratio) > 1e-12)
-    if np.count_nonzero(valid) < 16:
-        return float("nan"), float("nan")
-    f = f[valid]
-    hc = hc[valid]
-    hr = hr[valid]
-    ratio = ratio[valid]
-    ph = np.unwrap(np.angle(ratio))
-    if weight is None:
-        w = np.ones(len(f), dtype=np.float64)
-    else:
-        w_full = np.asarray(weight, dtype=np.float64).reshape(-1)[:n]
-        w = np.maximum(w_full[valid], 0.0)
-    if not np.any(w > 0):
-        w = np.ones(len(f), dtype=np.float64)
-    amp_reliability = np.minimum(np.abs(hc), np.abs(hr))
-    amp_reliability = amp_reliability / (np.nanmax(amp_reliability) + 1e-15)
-    w = w * np.clip(amp_reliability, 0.0, 1.0)
-    w = w / (np.max(w) + 1e-15)
-    good = w >= 0.03
-    if np.count_nonzero(good) >= 16:
-        f = f[good]
-        ratio = ratio[good]
-        ph = ph[good]
-        w = w[good]
-
-    def weighted_line(x: np.ndarray, y: np.ndarray, ww: np.ndarray) -> tuple[float, float]:
-        ww = np.maximum(np.asarray(ww, dtype=np.float64), 0.0)
-        if not np.any(ww > 0):
-            ww = np.ones_like(x, dtype=np.float64)
-        x0 = x - np.sum(ww * x) / (np.sum(ww) + 1e-15)
-        y0 = y - np.sum(ww * y) / (np.sum(ww) + 1e-15)
-        slope_i = float(np.sum(ww * x0 * y0) / (np.sum(ww * x0 * x0) + 1e-15))
-        intercept_i = float(np.sum(ww * (y - slope_i * x)) / (np.sum(ww) + 1e-15))
-        return slope_i, intercept_i
-
-    slope, intercept = weighted_line(f, ph, w)
-    resid = ph - (slope * f + intercept)
-    mad = float(np.nanmedian(np.abs(resid - np.nanmedian(resid)))) if len(resid) else float("nan")
-    resid_lim = max(np.pi / 2.0, 4.0 * 1.4826 * mad) if np.isfinite(mad) else np.pi
-    robust = np.isfinite(resid) & (np.abs(resid) <= resid_lim)
-    if np.count_nonzero(robust) >= 16 and np.count_nonzero(robust) < len(f):
-        f = f[robust]
-        ratio = ratio[robust]
-        ph = ph[robust]
-        w = w[robust]
-        slope, intercept = weighted_line(f, ph, w)
-
-    delta_tau = -slope / (2.0 * np.pi)
-    derot = ratio / (np.abs(ratio) + 1e-15) * np.exp(-1j * (slope * f + intercept))
-    coh = float(np.abs(np.sum(w * derot)) / (np.sum(w) + 1e-15))
-    return float(delta_tau), coh
-
-
-def _npz_array(loaded: np.lib.npyio.NpzFile, key: str, dtype: Any) -> np.ndarray:
-    if key not in loaded.files:
-        return np.zeros(0, dtype=dtype)
-    return np.asarray(loaded[key], dtype=dtype).reshape(-1)
-
-
-def _interp_complex(x_new: np.ndarray, x_old: np.ndarray, y_old: np.ndarray) -> np.ndarray:
-    real = np.interp(x_new, x_old, y_old.real)
-    imag = np.interp(x_new, x_old, y_old.imag)
-    return real + 1j * imag
-
-
-def cfr_normalized_result(loaded: np.lib.npyio.NpzFile, result: dict[str, Any]) -> dict[str, float]:
-    """Recompute Store-Zero CFR-normalized range for old and new saved files."""
-    if "cfr_norm_coherence" in result and ("cfr_norm_range_m" in result or "cfr_norm_range_mm" in result):
-        range_m = to_float(result.get("cfr_norm_range_m"))
-        range_mm = to_float(result.get("cfr_norm_range_mm"))
-        if not math.isfinite(range_m) and math.isfinite(range_mm):
-            range_m = range_mm / 1e3
-        if not math.isfinite(range_mm) and math.isfinite(range_m):
-            range_mm = range_m * 1e3
-        return {
-            "delay_s": to_float(result.get("cfr_norm_delay_s")),
-            "range_m": range_m,
-            "range_mm": range_mm,
-            "coherence": to_float(result.get("cfr_norm_coherence")),
-        }
-
-    freqs = np.asarray(result.get("cfr_freqs_hz", []), dtype=np.float64).reshape(-1)
-    h_cur = np.asarray(result.get("cfr_h", []), dtype=np.complex128).reshape(-1)
-    w_cur = np.asarray(result.get("cfr_weight", []), dtype=np.float64).reshape(-1)
-    if len(w_cur) != len(freqs):
-        w_cur = np.ones(len(freqs), dtype=np.float64)
-    if len(freqs) < 16 or len(h_cur) < 16:
-        return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
-    n_cur = min(len(freqs), len(h_cur), len(w_cur))
-    freqs = freqs[:n_cur]
-    h_cur = h_cur[:n_cur]
-    w_cur = w_cur[:n_cur]
-
-    ch = str(result.get("ch", result.get("channel", ""))).strip().upper()
-    prefixes = [f"range_zero__{ch}__", "range_zero__"]
-    ref_freqs = ref_h = ref_w = None
-    for prefix in prefixes:
-        f_key = prefix + "cfr_freqs"
-        h_key = prefix + "cfr_h"
-        if f_key in loaded.files and h_key in loaded.files:
-            ref_freqs = _npz_array(loaded, f_key, np.float64)
-            ref_h = _npz_array(loaded, h_key, np.complex128)
-            ref_w = _npz_array(loaded, prefix + "cfr_weight", np.float64)
-            break
-    if ref_freqs is None or ref_h is None or len(ref_freqs) < 16 or len(ref_h) < 16:
-        return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
-
-    n_ref = min(len(ref_freqs), len(ref_h))
-    ref_freqs = ref_freqs[:n_ref]
-    ref_h = ref_h[:n_ref]
-    order = np.argsort(ref_freqs)
-    ref_freqs = ref_freqs[order]
-    ref_h = ref_h[order]
-    if ref_w is not None and len(ref_w) >= n_ref:
-        ref_w = ref_w[:n_ref][order]
-    if not np.array_equal(freqs[:min(len(freqs), len(ref_freqs))], ref_freqs[:min(len(freqs), len(ref_freqs))]) or len(freqs) != len(ref_freqs):
-        valid_span = (freqs >= np.min(ref_freqs)) & (freqs <= np.max(ref_freqs))
-        if np.count_nonzero(valid_span) < 16:
-            return {"delay_s": float("nan"), "range_m": float("nan"), "range_mm": float("nan"), "coherence": float("nan")}
-        freqs_fit = freqs[valid_span]
-        h_fit = h_cur[valid_span]
-        w_fit = w_cur[valid_span]
-        ref_fit = _interp_complex(freqs_fit, ref_freqs, ref_h)
-        if ref_w is not None and len(ref_w):
-            w_fit = w_fit * np.interp(freqs_fit, ref_freqs, ref_w)
-    else:
-        n = min(len(freqs), len(h_cur), len(ref_h), len(w_cur))
-        freqs_fit = freqs[:n]
-        h_fit = h_cur[:n]
-        ref_fit = ref_h[:n]
-        w_fit = w_cur[:n]
-        if ref_w is not None and len(ref_w) >= n:
-            w_fit = w_fit * ref_w[:n]
-
-    delay_s, coherence = differential_delay_from_cfr(freqs_fit, h_fit, ref_fit, w_fit)
-    scale = to_float(result.get("range_scale_m_per_s"))
-    if not math.isfinite(scale):
-        scale = 299_792_458.0 / 2.0
-    range_m = delay_s * scale if math.isfinite(delay_s) else float("nan")
-    return {
-        "delay_s": delay_s,
-        "range_m": range_m,
-        "range_mm": range_m * 1e3 if math.isfinite(range_m) else float("nan"),
-        "coherence": coherence,
-    }
-
-
 def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
     by_result: dict[tuple[int, str], dict[str, Any]] = {}
     for key in loaded.files:
@@ -336,11 +171,6 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
         if "range_summary_diff_cfr_coherence" in loaded.files
         else []
     )
-    cfr_diff_mm = (
-        np.asarray(loaded["range_summary_cfr_diff_range_mm"]).reshape(-1)
-        if "range_summary_cfr_diff_range_mm" in loaded.files
-        else []
-    )
 
     for i, raw_ch in enumerate(channels):
         ch = str(unpack(raw_ch)).strip().upper()
@@ -361,10 +191,6 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
             item["range_diff_mm"] = unpack(diff_mm[i])
         if i < len(coh):
             item["diff_coherence"] = unpack(coh[i])
-            item["cfr_norm_coherence"] = unpack(coh[i])
-        if i < len(cfr_diff_mm):
-            item["cfr_norm_range_mm"] = unpack(cfr_diff_mm[i])
-            item["cfr_norm_range_m"] = to_float(unpack(cfr_diff_mm[i])) / 1e3
 
         zero_item = zero_reference_result(loaded, ch, i)
         for key in ("rng", "prof_db", "reference_range_m"):
@@ -414,14 +240,12 @@ def extract_file(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, 
 
         rows: list[dict[str, Any]] = []
         for result in ranges:
-            channel = result.get("ch", result.get("channel", ""))
-            cfr_norm = cfr_normalized_result(loaded, result)
             row = {
                 "file": str(path),
                 "created": created,
                 "role": role,
                 "range_index": result.get("index", ""),
-                "channel": channel,
+                "channel": result.get("ch", result.get("channel", "")),
                 "reference_range_m": result.get(
                     "reference_range_m",
                     result.get("zero_ref_center_m", result.get("profile_center_m", float("nan"))),
@@ -444,18 +268,14 @@ def extract_file(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                     )
                 )
                 * 1e3,
-                "band_power_dbm": channel_metric_value(metrics, "band_power_dbm", str(channel)),
-                "radar_snr_db": metrics.get("snr_rad_db", {}).get("value", channel_metric_value(metrics, "snr_com_db", str(channel))),
-                "comm_snr_db": channel_metric_value(metrics, "snr_com_db", str(channel)),
+                "band_power_dbm": metrics.get("band_power_dbm", {}).get("value", float("nan")),
+                "radar_snr_db": metrics.get("snr_rad_db", {}).get("value", float("nan")),
+                "comm_snr_db": metrics.get("snr_com_db", {}).get("value", float("nan")),
                 "evm_db": metrics.get("evm_db", {}).get("value", float("nan")),
                 "evm_pct": metrics.get("evm_pct", {}).get("value", float("nan")),
                 "processing_gain_db_est": infer_processing_gain_db(result, loaded),
                 "pslr_db": result.get("pslr_db", metrics.get("pslr_db", {}).get("value", float("nan"))),
                 "range_diff_mm": result.get("range_diff_mm", float("nan")),
-                "cfr_norm_delay_s": cfr_norm["delay_s"],
-                "cfr_norm_range_m": cfr_norm["range_m"],
-                "cfr_norm_range_mm": cfr_norm["range_mm"],
-                "cfr_norm_coherence": cfr_norm["coherence"],
                 "range_mode": result.get("range_mode", ""),
                 "range_est_method": result.get("range_est_method", ""),
                 "rng": np.asarray(result.get("rng", []), dtype=float).reshape(-1),
@@ -482,8 +302,6 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         "range_peak_mm",
         "reference_range_mm",
         "range_diff_mm",
-        "cfr_norm_range_mm",
-        "cfr_norm_coherence",
         "band_power_dbm",
         "radar_snr_db",
         "comm_snr_db",
@@ -522,10 +340,6 @@ def write_summary_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "processing_gain_db_est",
         "pslr_db",
         "range_diff_mm",
-        "cfr_norm_delay_s",
-        "cfr_norm_range_m",
-        "cfr_norm_range_mm",
-        "cfr_norm_coherence",
         "range_mode",
         "range_est_method",
     ]
@@ -555,156 +369,6 @@ def write_profile_csvs(rows: list[dict[str, Any]], output_dir: Path) -> None:
             writer.writerow(["range_m", "range_mm", "profile_db"])
             for r_m, p_db in zip(rng[:n], prof_db[:n]):
                 writer.writerow([r_m, r_m * 1e3, p_db])
-
-
-def filename_token(text: str) -> str:
-    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text).strip())
-    return token.strip("._") or "data"
-
-
-def channels_in_npz(loaded: np.lib.npyio.NpzFile) -> list[str]:
-    channels: list[str] = []
-    if "rx_channels" in loaded.files:
-        channels.extend(str(unpack(x)).strip().upper() for x in np.asarray(loaded["rx_channels"]).reshape(-1))
-    for key in loaded.files:
-        match = re.match(r"^rx__(C\d+)__sig$", key, re.IGNORECASE)
-        if match:
-            channels.append(match.group(1).upper())
-    if not channels and "rx_sig" in loaded.files:
-        channels.append(str(unpack(loaded["rx_primary_channel"])).strip().upper() if "rx_primary_channel" in loaded.files else "C1")
-    out: list[str] = []
-    for ch in channels:
-        if ch and ch not in out:
-            out.append(ch)
-    return out
-
-
-def promote_metric_channel(payload: dict[str, np.ndarray], channel: str) -> None:
-    if "metric_keys" not in payload or "metric_values" not in payload:
-        return
-    channel = channel.strip().lower()
-    if not channel:
-        return
-    keys = [str(unpack(x)) for x in np.asarray(payload["metric_keys"]).reshape(-1)]
-
-    def replace_base(base_key: str, source_key: str) -> None:
-        if base_key not in keys or source_key not in keys:
-            return
-        base_i = keys.index(base_key)
-        src_i = keys.index(source_key)
-        for arr_key in ("metric_values", "metric_units", "metric_notes", "metric_categories"):
-            if arr_key in payload:
-                arr = np.asarray(payload[arr_key]).copy()
-                if base_i < len(arr) and src_i < len(arr):
-                    arr[base_i] = arr[src_i]
-                    payload[arr_key] = arr
-        if "metric_labels" in payload:
-            labels = np.asarray(payload["metric_labels"]).copy()
-            if base_i < len(labels):
-                labels[base_i] = labels[src_i] if src_i < len(labels) else base_key
-                payload["metric_labels"] = labels
-
-    replace_base("band_power_dbm", f"band_power_dbm_{channel}")
-    replace_base("snr_com_db", f"snr_com_db_{channel}")
-    replace_base("noise_floor_dbmhz", f"noise_floor_dbmhz_{channel}")
-    if channel == "c2":
-        replace_base("snr_rad_db", f"snr_com_db_{channel}")
-
-
-def filter_range_summary_for_channel(payload: dict[str, np.ndarray], channel: str) -> None:
-    if "range_summary_channels" not in payload:
-        return
-    channels = [str(unpack(x)).strip().upper() for x in np.asarray(payload["range_summary_channels"]).reshape(-1)]
-    keep = [i for i, ch in enumerate(channels) if ch == channel]
-    if not keep:
-        for key in list(payload.keys()):
-            if key.startswith("range_summary_"):
-                payload.pop(key, None)
-        return
-    for key in list(payload.keys()):
-        if not key.startswith("range_summary_"):
-            continue
-        arr = np.asarray(payload[key])
-        if arr.ndim == 1 and len(arr) == len(channels):
-            payload[key] = arr[keep]
-
-
-def split_npz_for_gui(path: Path, output_dir: Path) -> list[Path]:
-    written: list[Path] = []
-    with np.load(path, allow_pickle=True) as loaded:
-        channels = channels_in_npz(loaded)
-        for ch in channels:
-            sig_key = f"rx__{ch}__sig"
-            fs_key = f"rx__{ch}__fs"
-            t_key = f"rx__{ch}__t"
-            if sig_key in loaded.files and fs_key in loaded.files:
-                sig = np.asarray(loaded[sig_key], dtype=np.float64).reshape(-1)
-                fs = float(np.asarray(loaded[fs_key]).reshape(-1)[0])
-                t = (
-                    np.asarray(loaded[t_key], dtype=np.float64).reshape(-1)
-                    if t_key in loaded.files
-                    else np.arange(len(sig), dtype=np.float64) / fs
-                )
-            elif "rx_sig" in loaded.files and "rx_fs" in loaded.files:
-                sig = np.asarray(loaded["rx_sig"], dtype=np.float64).reshape(-1)
-                fs = float(np.asarray(loaded["rx_fs"]).reshape(-1)[0])
-                t = (
-                    np.asarray(loaded["rx_t"], dtype=np.float64).reshape(-1)
-                    if "rx_t" in loaded.files
-                    else np.arange(len(sig), dtype=np.float64) / fs
-                )
-            else:
-                continue
-            if len(t) != len(sig):
-                t = np.arange(len(sig), dtype=np.float64) / fs
-
-            payload: dict[str, np.ndarray] = {}
-            for key in loaded.files:
-                if key in {"rx_sig", "rx_t", "rx_fs", "rx_primary_channel", "rx_channels", "rx_channel_count", "rx_display_channels", "capture_channel"}:
-                    continue
-                rx_match = re.match(r"^rx__(C\d+)__", key, re.IGNORECASE)
-                if rx_match and rx_match.group(1).upper() != ch:
-                    continue
-                range_match = RANGE_KEY_RE.match(key)
-                if range_match and range_match.group("channel").upper() != ch:
-                    continue
-                zero_match = re.match(r"^range_zero__(C\d+)__", key, re.IGNORECASE)
-                if zero_match and zero_match.group(1).upper() != ch:
-                    continue
-                payload[key] = np.asarray(loaded[key])
-
-            payload["rx_sig"] = sig
-            payload["rx_t"] = t
-            payload["rx_fs"] = np.asarray([fs], dtype=np.float64)
-            payload["rx_primary_channel"] = np.asarray([ch])
-            payload["rx_channels"] = np.asarray([ch])
-            payload["rx_channel_count"] = np.asarray([1], dtype=np.int64)
-            payload["rx_display_channels"] = np.asarray([ch])
-            payload["capture_channel"] = np.asarray([ch])
-            payload[f"rx__{ch}__sig"] = sig
-            payload[f"rx__{ch}__t"] = t
-            payload[f"rx__{ch}__fs"] = np.asarray([fs], dtype=np.float64)
-            payload["range_split_source_file"] = np.asarray([path.name])
-            payload["range_split_channel"] = np.asarray([ch])
-            if "range_zero_channels" in payload:
-                payload["range_zero_channels"] = np.asarray([ch])
-            if "range_result_channels" in payload:
-                payload["range_result_channels"] = np.asarray([ch])
-            promote_metric_channel(payload, ch)
-            filter_range_summary_for_channel(payload, ch)
-
-            output_dir.mkdir(parents=True, exist_ok=True)
-            out_path = output_dir / f"{path.stem}_{ch}_gui.npz"
-            np.savez_compressed(out_path, **payload)
-            written.append(out_path)
-    return written
-
-
-def split_folder_for_gui(input_path: Path, output_dir: Path) -> list[Path]:
-    written: list[Path] = []
-    for path in iter_input_paths(input_path):
-        written.extend(split_npz_for_gui(path, output_dir))
-    return written
 
 
 def load_raw_channels(path: Path) -> dict[str, dict[str, Any]]:
@@ -775,124 +439,6 @@ def metric_value(metrics: dict[str, dict[str, Any]], key: str) -> Any:
     return metrics.get(key, {}).get("value", float("nan"))
 
 
-def channel_metric_value(metrics: dict[str, dict[str, Any]], base_key: str, channel: str) -> Any:
-    ch = str(channel).strip().lower()
-    if ch:
-        channel_key = f"{base_key}_{ch}"
-        if channel_key in metrics:
-            return metrics[channel_key].get("value", float("nan"))
-    return metrics.get(base_key, {}).get("value", float("nan"))
-
-
-def dbm_to_w(dbm: float) -> float:
-    return 1e-3 * 10.0 ** (dbm / 10.0)
-
-
-def w_to_dbm(watt: float) -> float:
-    return 10.0 * math.log10(max(watt, 1e-30) / 1e-3)
-
-
-def fspl_db(distance_m: float, rf_hz: float) -> float:
-    return 20.0 * math.log10(4.0 * math.pi * max(distance_m, 1e-9) * rf_hz / 3e8)
-
-
-def utcpd_output_dbm(photocurrent_ma: float) -> float:
-    # Same calibration used by isac_unified_gui.py's simulation panel.
-    return -10.0 + 20.0 * math.log10(max(photocurrent_ma, 1e-6) / 7.0)
-
-
-def optional_float(text: str) -> float | None:
-    text = str(text).strip()
-    if text == "":
-        return None
-    try:
-        value = float(text)
-    except Exception:
-        return None
-    return value if math.isfinite(value) else None
-
-
-def link_budget_from_row(row: dict[str, Any], params: dict[str, float]) -> list[tuple[str, float | str, str]]:
-    band_dbm = to_float(row.get("band_power_dbm"))
-    ch = str(row.get("channel", "")).strip().upper()
-    range_m = to_float(row.get("range_peak_m"))
-    if not math.isfinite(range_m) or range_m <= 0:
-        range_m = to_float(row.get("reference_range_m"))
-    range_m = max(range_m, 1e-9)
-
-    ptx_dbm = params["tx_power_dbm"]
-    rf_hz = params["rf_ghz"] * 1e9
-    gt = params["tx_ant_gain_dbi"]
-    gr = params["rx_ant_gain_dbi"]
-    g_target_lin = 10.0 ** (gt / 10.0)
-    sigma_struct = max(params["rcs_sqm"], 0.0)
-    lna_gain = params["lna_gain_db"]
-    drive_gain = params["drive_amp_gain_db"]
-    cable_loss = params["cable_loss_db"]
-    conv_gain = params["homodyne_gain_db"]
-    chain_gain = lna_gain + drive_gain + conv_gain - cable_loss
-    lam = 3e8 / rf_hz
-    sigma_struct_eff = sigma_struct * g_target_lin
-    sigma_ant = (lam ** 2 * g_target_lin ** 2) / (4.0 * math.pi)
-    sigma = max(sigma_struct_eff + sigma_ant, 1e-12)
-
-    one_way_loss = fspl_db(range_m, rf_hz)
-    pr_one_way = ptx_dbm + gt + gr - one_way_loss
-    pred_one_way_if = pr_one_way + chain_gain
-
-    rcs_gain_db = 10.0 * math.log10(4.0 * math.pi * sigma / (lam ** 2) + 1e-30)
-    radar_loss_db = 2.0 * one_way_loss - rcs_gain_db
-    pr_mono = ptx_dbm + gt + gt - radar_loss_db
-    pred_mono_if = pr_mono + chain_gain
-
-    if ch == "C1":
-        selected_rf = pr_one_way
-        selected_pred = pred_one_way_if
-        selected_model = "C1 one-way"
-    elif ch == "C2":
-        selected_rf = pr_mono
-        selected_pred = pred_mono_if
-        selected_model = "C2 monostatic"
-    else:
-        selected_rf = pr_one_way
-        selected_pred = pred_one_way_if
-        selected_model = "one-way"
-
-    inferred_conv = band_dbm - selected_rf - lna_gain - drive_gain + cable_loss
-    inferred_rcs = float("nan")
-    if ch == "C2" and math.isfinite(band_dbm):
-        target_rf = band_dbm - chain_gain
-        inferred_rcs_gain_db = target_rf - ptx_dbm - gt - gt + 2.0 * one_way_loss
-        sigma_db = (
-            inferred_rcs_gain_db
-            - 10.0 * math.log10(4.0 * math.pi / (lam ** 2))
-        )
-        inferred_rcs = 10.0 ** (sigma_db / 10.0)
-
-    rows: list[tuple[str, float | str, str]] = [
-        ("Selected model", selected_model, ""),
-        ("Measured band power", band_dbm, "dBm"),
-        ("Distance used", range_m * 1e3, "mm"),
-        ("TX power", ptx_dbm, "dBm"),
-        ("One-way FSPL", one_way_loss, "dB"),
-        ("Round-trip FSPL", 2.0 * one_way_loss, "dB"),
-        ("RCS gain", rcs_gain_db, "dB"),
-        ("Structural RCS", sigma_struct, "m^2"),
-        ("Re-rad structural RCS", sigma_struct_eff, "m^2"),
-        ("Antenna-mode RCS", sigma_ant, "m^2"),
-        ("Effective RCS", sigma, "m^2"),
-        ("C1 RF at RX ant", pr_one_way, "dBm"),
-        ("C1 predicted IF band", pred_one_way_if, "dBm"),
-        ("C2 RF echo at RX ant", pr_mono, "dBm"),
-        ("C2 predicted IF band", pred_mono_if, "dBm"),
-        ("IF chain gain", chain_gain, "dB"),
-        ("Meas - selected pred", band_dbm - selected_pred, "dB"),
-        ("Inferred homodyne gain", inferred_conv, "dB"),
-        ("Inferred RCS", inferred_rcs, "m^2"),
-    ]
-    return rows
-
-
 class RangeDataViewer:
     summary_columns = [
         ("file", "File", 260),
@@ -901,8 +447,6 @@ class RangeDataViewer:
         ("range_peak_mm", "Meas mm", 90),
         ("reference_range_mm", "Ref mm", 90),
         ("range_diff_mm", "Diff mm", 85),
-        ("cfr_norm_range_mm", "CFR mm", 85),
-        ("cfr_norm_coherence", "CFR Coh", 75),
         ("band_power_dbm", "Band dBm", 85),
         ("radar_snr_db", "Radar SNR", 85),
         ("comm_snr_db", "Comm SNR", 85),
@@ -915,8 +459,6 @@ class RangeDataViewer:
         ("range_peak_mm", "Range Peak", "mm"),
         ("reference_range_mm", "Reference Range", "mm"),
         ("range_diff_mm", "Range Difference", "mm"),
-        ("cfr_norm_range_mm", "CFR-normalized Range", "mm"),
-        ("cfr_norm_coherence", "CFR-normalized Coherence", ""),
         ("band_power_dbm", "Band Power", "dBm"),
         ("radar_snr_db", "Radar SNR", "dB"),
         ("comm_snr_db", "Communication SNR", "dB"),
@@ -947,30 +489,6 @@ class RangeDataViewer:
         self.metrics_by_file: dict[str, dict[str, dict[str, Any]]] = {}
         self.plot_data: dict[Any, tuple[np.ndarray, np.ndarray, str, str]] = {}
         self.markers: dict[Any, list[Any]] = {}
-        self.axis_vars = {
-            "spec_xmin": tk.StringVar(value=""),
-            "spec_xmax": tk.StringVar(value=""),
-            "spec_ymin": tk.StringVar(value=""),
-            "spec_ymax": tk.StringVar(value=""),
-            "range_xmin": tk.StringVar(value=""),
-            "range_xmax": tk.StringVar(value=""),
-            "range_ymin": tk.StringVar(value=""),
-            "range_ymax": tk.StringVar(value=""),
-        }
-        self.budget_vars = {
-            "photocurrent_ma": tk.StringVar(value="7.0"),
-            "tx_power_dbm": tk.StringVar(value="-10.0"),
-            "rf_ghz": tk.StringVar(value="280.0"),
-            "tx_ant_gain_dbi": tk.StringVar(value="30.0"),
-            "rx_ant_gain_dbi": tk.StringVar(value="30.0"),
-            "lna_gain_db": tk.StringVar(value="14.0"),
-            "drive_amp_gain_db": tk.StringVar(value="20.0"),
-            "cable_loss_db": tk.StringVar(value="0.0"),
-            "homodyne_gain_db": tk.StringVar(value="0.0"),
-            "rcs_sqm": tk.StringVar(value="1.0"),
-        }
-        self.use_iph_var = tk.BooleanVar(value=False)
-        self.current_row_index: int | None = None
 
         top = ttk.Frame(root, padding=(8, 8, 8, 4))
         top.pack(side=tk.TOP, fill=tk.X)
@@ -979,7 +497,6 @@ class RangeDataViewer:
         ttk.Button(top, text="Browse", command=self.browse_folder).pack(side=tk.LEFT)
         ttk.Button(top, text="Reload", command=self.load_folder).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(top, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(top, text="Split for GUI", command=self.split_for_gui).pack(side=tk.LEFT, padx=(6, 0))
 
         main = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
         main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(2, 8))
@@ -1006,10 +523,6 @@ class RangeDataViewer:
         self.summary_tree.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
-        controls = ttk.Notebook(left)
-        controls.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self._build_axis_controls(controls)
-        self._build_budget_controls(controls)
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         self.summary_tree.bind("<<TreeviewSelect>>", self.on_select_row)
@@ -1042,67 +555,6 @@ class RangeDataViewer:
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.load_folder()
-
-    def _build_axis_controls(self, parent) -> None:
-        frame = self.ttk.Frame(parent, padding=6)
-        parent.add(frame, text="Axes")
-
-        labels = [
-            ("Spectrum X min/max", "spec_xmin", "spec_xmax"),
-            ("Spectrum Y min/max", "spec_ymin", "spec_ymax"),
-            ("Range X min/max", "range_xmin", "range_xmax"),
-            ("Range Y min/max", "range_ymin", "range_ymax"),
-        ]
-        for r, (label, key_min, key_max) in enumerate(labels):
-            self.ttk.Label(frame, text=label).grid(row=r, column=0, sticky="w", padx=(0, 6), pady=2)
-            self.ttk.Entry(frame, textvariable=self.axis_vars[key_min], width=9).grid(row=r, column=1, sticky="ew", pady=2)
-            self.ttk.Entry(frame, textvariable=self.axis_vars[key_max], width=9).grid(row=r, column=2, sticky="ew", pady=2)
-        self.ttk.Button(frame, text="Apply", command=self.apply_axis_limits).grid(row=0, column=3, rowspan=2, sticky="nsew", padx=(8, 0))
-        self.ttk.Button(frame, text="Auto", command=self.reset_axis_limits).grid(row=2, column=3, rowspan=2, sticky="nsew", padx=(8, 0))
-        frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(2, weight=1)
-
-    def _build_budget_controls(self, parent) -> None:
-        frame = self.ttk.Frame(parent, padding=6)
-        parent.add(frame, text="Link Budget")
-
-        entries = [
-            ("Iph mA", "photocurrent_ma"),
-            ("Ptx dBm", "tx_power_dbm"),
-            ("RF GHz", "rf_ghz"),
-            ("Gt dBi", "tx_ant_gain_dbi"),
-            ("Gr dBi", "rx_ant_gain_dbi"),
-            ("LNA dB", "lna_gain_db"),
-            ("Drive dB", "drive_amp_gain_db"),
-            ("Cable loss dB", "cable_loss_db"),
-            ("Homodyne dB", "homodyne_gain_db"),
-            ("RCS m^2", "rcs_sqm"),
-        ]
-        for i, (label, key) in enumerate(entries):
-            r = i // 2
-            c = (i % 2) * 2
-            self.ttk.Label(frame, text=label).grid(row=r, column=c, sticky="w", padx=(0, 4), pady=2)
-            entry = self.ttk.Entry(frame, textvariable=self.budget_vars[key], width=9)
-            entry.grid(row=r, column=c + 1, sticky="ew", padx=(0, 8), pady=2)
-            entry.bind("<Return>", lambda _event: self.update_link_budget())
-
-        self.ttk.Checkbutton(
-            frame,
-            text="Use Iph -> Ptx",
-            variable=self.use_iph_var,
-            command=self.update_link_budget,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 2))
-        self.ttk.Button(frame, text="Update", command=self.update_link_budget).grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=(4, 2))
-        self.ttk.Button(frame, text="Fit Homodyne", command=self.fit_homodyne_gain).grid(row=5, column=3, sticky="ew", pady=(4, 2))
-
-        self.budget_tree = self.ttk.Treeview(frame, columns=("metric", "value", "unit"), show="headings", height=9)
-        for name, label, width in (("metric", "Metric", 160), ("value", "Value", 110), ("unit", "Unit", 65)):
-            self.budget_tree.heading(name, text=label)
-            self.budget_tree.column(name, width=width, anchor=self.tk.W if name == "metric" else self.tk.CENTER)
-        self.budget_tree.grid(row=6, column=0, columnspan=4, sticky="nsew", pady=(6, 0))
-        frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(3, weight=1)
-        frame.rowconfigure(6, weight=1)
 
     def browse_folder(self) -> None:
         from tkinter import filedialog
@@ -1164,7 +616,6 @@ class RangeDataViewer:
         self.ax_spectrum.set_title("Raw Spectrum")
         self.ax_spectrum.set_xlabel("Frequency (GHz)")
         self.ax_spectrum.set_ylabel("Magnitude (dB rel.)")
-        self.ax_spectrum.set_xlim([0, 30])
         self.ax_spectrum.grid(True, alpha=0.3)
         self.ax_range.clear()
         self.ax_range.set_title("Range Profile")
@@ -1175,77 +626,6 @@ class RangeDataViewer:
         self.markers = {}
         self.canvas.draw_idle()
 
-    def _apply_axis_pair(self, ax, xmin_key: str, xmax_key: str, ymin_key: str, ymax_key: str) -> None:
-        xmin = optional_float(self.axis_vars[xmin_key].get())
-        xmax = optional_float(self.axis_vars[xmax_key].get())
-        ymin = optional_float(self.axis_vars[ymin_key].get())
-        ymax = optional_float(self.axis_vars[ymax_key].get())
-        if xmin is not None or xmax is not None:
-            cur = ax.get_xlim()
-            ax.set_xlim(xmin if xmin is not None else cur[0], xmax if xmax is not None else cur[1])
-        if ymin is not None or ymax is not None:
-            cur = ax.get_ylim()
-            ax.set_ylim(ymin if ymin is not None else cur[0], ymax if ymax is not None else cur[1])
-
-    def apply_axis_limits(self) -> None:
-        self._apply_axis_pair(self.ax_spectrum, "spec_xmin", "spec_xmax", "spec_ymin", "spec_ymax")
-        self._apply_axis_pair(self.ax_range, "range_xmin", "range_xmax", "range_ymin", "range_ymax")
-        self.canvas.draw_idle()
-
-    def reset_axis_limits(self) -> None:
-        for var in self.axis_vars.values():
-            var.set("")
-        if self.current_row_index is not None:
-            self.show_row(self.current_row_index)
-        else:
-            self.clear_plots()
-
-    def budget_params(self) -> dict[str, float]:
-        if self.use_iph_var.get():
-            iph = to_float(self.budget_vars["photocurrent_ma"].get())
-            if math.isfinite(iph) and iph > 0:
-                self.budget_vars["tx_power_dbm"].set(f"{utcpd_output_dbm(iph):.3f}")
-        params: dict[str, float] = {}
-        defaults = {
-            "tx_power_dbm": -10.0,
-            "rf_ghz": 280.0,
-            "tx_ant_gain_dbi": 25.0,
-            "rx_ant_gain_dbi": 25.0,
-            "lna_gain_db": 14.0,
-            "drive_amp_gain_db": 20.0,
-            "cable_loss_db": 0.0,
-            "homodyne_gain_db": 0.0,
-            "rcs_sqm": 1.0,
-        }
-        for key, default in defaults.items():
-            value = to_float(self.budget_vars[key].get())
-            params[key] = value if math.isfinite(value) else default
-        return params
-
-    def update_link_budget(self) -> None:
-        if not hasattr(self, "budget_tree"):
-            return
-        self.budget_tree.delete(*self.budget_tree.get_children())
-        if self.current_row_index is None or self.current_row_index >= len(self.rows):
-            return
-        row = self.rows[self.current_row_index]
-        try:
-            for metric, value, unit in link_budget_from_row(row, self.budget_params()):
-                self.budget_tree.insert("", "end", values=(metric, fmt_cell(value, 4), unit))
-        except Exception as exc:
-            self.budget_tree.insert("", "end", values=("Link budget error", str(exc), ""))
-
-    def fit_homodyne_gain(self) -> None:
-        if self.current_row_index is None or self.current_row_index >= len(self.rows):
-            return
-        row = self.rows[self.current_row_index]
-        rows = link_budget_from_row(row, self.budget_params())
-        inferred = next((value for metric, value, _unit in rows if metric == "Inferred homodyne gain"), float("nan"))
-        inferred_f = to_float(inferred)
-        if math.isfinite(inferred_f):
-            self.budget_vars["homodyne_gain_db"].set(f"{inferred_f:.3f}")
-        self.update_link_budget()
-
     def on_select_row(self, _event=None) -> None:
         selection = self.summary_tree.selection()
         if not selection:
@@ -1255,7 +635,6 @@ class RangeDataViewer:
     def show_row(self, index: int) -> None:
         if index < 0 or index >= len(self.rows):
             return
-        self.current_row_index = index
         row = self.rows[index]
         path = Path(str(row["file"]))
         metrics = self.metrics_by_file.get(str(path), {})
@@ -1274,7 +653,6 @@ class RangeDataViewer:
             self.detail_tree.insert("", "end", values=(label, fmt_cell(value, 4), unit))
 
         self.plot_row(row)
-        self.update_link_budget()
         self.status_var.set(f"Selected {path.name} / {row.get('channel', '')}. Click a plot to place a value marker.")
 
     def plot_row(self, row: dict[str, Any]) -> None:
@@ -1333,7 +711,6 @@ class RangeDataViewer:
         self.ax_range.set_ylabel("Profile (dB)")
         self.ax_range.grid(True, alpha=0.3)
 
-        self.apply_axis_limits()
         self.fig.tight_layout(pad=2.4)
         self.canvas.draw_idle()
 
@@ -1391,23 +768,6 @@ class RangeDataViewer:
         except Exception as exc:
             messagebox.showerror("Export error", str(exc))
 
-    def split_for_gui(self) -> None:
-        from tkinter import filedialog, messagebox
-
-        folder = Path(self.folder_var.get()).expanduser()
-        default_out = folder.parent / f"{folder.name}_gui_split"
-        selected = filedialog.askdirectory(
-            title="Select output folder for isac_unified_gui.py-compatible files",
-            initialdir=str(default_out.parent),
-        )
-        out_dir = Path(selected) if selected else default_out
-        try:
-            written = split_folder_for_gui(folder, out_dir)
-            self.status_var.set(f"Wrote {len(written)} GUI-compatible file(s): {out_dir}")
-            messagebox.showinfo("Split complete", f"Wrote {len(written)} file(s)\n{out_dir}")
-        except Exception as exc:
-            messagebox.showerror("Split error", str(exc))
-
 
 def launch_gui(initial_folder: Path) -> None:
     import tkinter as tk
@@ -1433,24 +793,11 @@ def main() -> None:
     parser.add_argument("--profiles-dir", type=Path, help="Optional folder for per-file range profile CSVs.")
     parser.add_argument("--list-keys", action="store_true", help="Print raw NPZ keys for debugging.")
     parser.add_argument("--cli", action="store_true", help="Print a command-line summary instead of opening the GUI.")
-    parser.add_argument(
-        "--split-for-gui",
-        type=Path,
-        help="Write C1/C2-split .npz files compatible with isac_unified_gui.py Load DSO Capture.",
-    )
     args = parser.parse_args()
 
-    if not (args.cli or args.csv or args.profiles_dir or args.list_keys or args.split_for_gui):
+    if not (args.cli or args.csv or args.profiles_dir or args.list_keys):
         launch_gui(args.input)
         return
-
-    if args.split_for_gui:
-        written = split_folder_for_gui(args.input, args.split_for_gui)
-        print(f"Wrote {len(written)} GUI-compatible file(s) to {args.split_for_gui}")
-        for path in written:
-            print(path)
-        if not (args.cli or args.csv or args.profiles_dir or args.list_keys):
-            return
 
     paths = iter_input_paths(args.input)
     if not paths:

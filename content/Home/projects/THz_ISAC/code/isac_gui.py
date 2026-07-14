@@ -2562,51 +2562,78 @@ def calc_if_band_metrics(sig: np.ndarray, fs: float, f_if_hz: float, bandwidth_h
                          noise_vrms: float = 0.0) -> dict[str, float]:
     x = np.asarray(sig, dtype=np.float64).reshape(-1)
     if len(x) < 8 or fs <= 0:
-        return {"band_power_dbm": float("nan"), "snr_db": float("nan"), "noise_dbm": float("nan")}
-    f = np.fft.rfftfreq(len(x), d=1.0 / fs)
-    win = np.hanning(len(x))
-    X = np.fft.rfft((x - np.mean(x)) * win)
-    psd_v2_hz = (np.abs(X) ** 2) / (50.0 * fs * max(np.sum(win ** 2), 1e-30))
-    psd_mw_hz = psd_v2_hz * 1e3
+        return {
+            "band_power_dbm": float("nan"),
+            "snr_db": float("nan"),
+            "noise_dbm": float("nan"),
+            "noise_power_dbm": float("nan"),
+            "noise_floor_dbm_hz": float("nan"),
+            "noise_density_dbm_hz": float("nan"),
+        }
+    f, psd_dbm_hz = calc_psd(x, fs)
+    psd_mw_hz = 10.0 ** (np.asarray(psd_dbm_hz, dtype=np.float64) / 10.0)
     lo = max(0.0, f_if_hz - 0.5 * bandwidth_hz)
     hi = min(0.5 * fs, f_if_hz + 0.5 * bandwidth_hz)
     band = (f >= lo) & (f <= hi)
     if np.count_nonzero(band) < 2:
-        return {"band_power_dbm": float("nan"), "snr_db": float("nan"), "noise_dbm": float("nan")}
-    df = float(f[1] - f[0]) if len(f) > 1 else 1.0
+        return {
+            "band_power_dbm": float("nan"),
+            "snr_db": float("nan"),
+            "noise_dbm": float("nan"),
+            "noise_power_dbm": float("nan"),
+            "noise_floor_dbm_hz": float("nan"),
+            "noise_density_dbm_hz": float("nan"),
+        }
+    df = float(np.nanmedian(np.diff(f))) if len(f) > 1 else 1.0
+    analysis_bw = max(hi - lo, 1.0)
     p_mw = float(np.sum(psd_mw_hz[band]) * df)
     guard_hz = max(0.1 * bandwidth_hz, 5.0 * df)
+    finite_floor = np.isfinite(psd_mw_hz) & (psd_mw_hz > 0.0)
     noise_band = (
         (f > max(30e3, 5.0 * df))
         & (f < 0.95 * 0.5 * fs)
         & ((f < lo - guard_hz) | (f > hi + guard_hz))
+        & finite_floor
     )
+    if np.count_nonzero(noise_band) < 8:
+        noise_band = (
+            (f > max(30e3, 5.0 * df))
+            & (f < 0.95 * 0.5 * fs)
+            & (~band)
+            & finite_floor
+        )
+    if np.count_nonzero(noise_band) < 8:
+        noise_band = (
+            (f > max(30e3, 5.0 * df))
+            & (f < 0.95 * 0.5 * fs)
+            & finite_floor
+        )
+    noise_density_mw_hz = float("nan")
     if np.count_nonzero(noise_band) >= 8:
         noise_density_mw_hz = float(np.median(psd_mw_hz[noise_band]))
-        noise_mw_psd = noise_density_mw_hz * max(hi - lo, 1.0)
-    else:
-        noise_density_mw_hz = float("nan")
-        noise_mw_psd = 0.0
     noise_mw_dso = ((float(noise_vrms) ** 2) / 50.0) * 1e3 * (max(hi - lo, 1.0) / max(40e9, hi - lo))
-    # If the simulated/loaded waveform has an out-of-band noise floor, use it
-    # as the measured total DSO/system noise density. That floor already
-    # includes the generated IF amp noise, DSO input noise, and any residual
-    # broadband floor. The UXR V/div model is only a fallback when no clean
-    # out-of-band region exists; using max() here made the table disagree with
-    # the visible PSD floor.
-    if noise_mw_psd > 0.0 and np.isfinite(noise_density_mw_hz):
-        noise_mw = noise_mw_psd
-        noise_source = "psd"
+    # The table's noise density must match the plotted spectrum floor.  Use
+    # the measured PSD median first; the UXR V/div model is only a last-resort
+    # fallback when a spectrum floor cannot be estimated at all.
+    if np.isfinite(noise_density_mw_hz) and noise_density_mw_hz > 0.0:
+        noise_mw = noise_density_mw_hz * analysis_bw
+        noise_source = "spectrum_floor"
     else:
         noise_mw = noise_mw_dso
+        noise_density_mw_hz = noise_mw / analysis_bw
         noise_source = "uxr_model"
     noise_mw = max(noise_mw, 1e-30)
     sig_mw = max(p_mw - noise_mw, 1e-30)
+    noise_power_dbm = 10.0 * np.log10(noise_mw)
+    noise_density_dbm_hz = 10.0 * np.log10(max(noise_density_mw_hz, 1e-30))
     return {
         "band_power_dbm": 10.0 * np.log10(sig_mw),
         "raw_band_power_dbm": 10.0 * np.log10(max(p_mw, 1e-30)),
-        "noise_dbm": 10.0 * np.log10(noise_mw),
-        "noise_floor_dbm_hz": 10.0 * np.log10(max(noise_mw / max(hi - lo, 1.0), 1e-30)),
+        "noise_dbm": noise_power_dbm,
+        "noise_power_dbm": noise_power_dbm,
+        "noise_floor_dbm_hz": noise_density_dbm_hz,
+        "noise_density_dbm_hz": noise_density_dbm_hz,
+        "analysis_bw_hz": analysis_bw,
         "noise_source": noise_source,
         "snr_db": 10.0 * np.log10(sig_mw / noise_mw),
     }
@@ -3125,9 +3152,9 @@ def run_isac_sim(cfg: SimConfig):
         + dso_noise_vrms * np.random.randn(N_f_com)
     )
     v_demod_com = hilbert(v_dso_in_com) if cfg.rx_mode == "Mixer" else v_dso_in_com.astype(np.complex128)
-    analysis_bw_hz = max(occupied_bw_hz * 1.2, 1.0)
+    analysis_bw_hz = max(occupied_bw_hz, 1.0)
     c1_band_metrics = calc_if_band_metrics(v_dso_in_com, fs, f_if, analysis_bw_hz, dso_noise_vrms)
-    c2_band_metrics = calc_if_band_metrics(c2_sic_for_metrics, fs, f_if, analysis_bw_hz, dso_noise_vrms)
+    c2_band_metrics = calc_if_band_metrics(v_dso_in, fs, f_if, analysis_bw_hz, dso_noise_vrms)
 
     # 9. Demodulation (Remote Comm)
     lo_if = np.exp(-1j * 2 * np.pi * f_if * t)
@@ -3594,8 +3621,8 @@ class PhotonicIsacSimPanel:
             "c2_band":   self.table.insert("", "end", text="C2 Band Power",     values=("N/A", "dBm")),
             "c1_noise":  self.table.insert("", "end", text="C1 Noise Power",    values=("N/A", "dBm")),
             "c2_noise":  self.table.insert("", "end", text="C2 Noise Power",    values=("N/A", "dBm")),
-            "c1_noise_density": self.table.insert("", "end", text="C1 Spectrum Noise Floor", values=("N/A", "dBm/Hz")),
-            "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Floor", values=("N/A", "dBm/Hz")),
+            "c1_noise_density": self.table.insert("", "end", text="C1 Spectrum Noise Density", values=("N/A", "dBm/Hz")),
+            "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Density", values=("N/A", "dBm/Hz")),
             "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
             "comm_snr":  self.table.insert("", "end", text="Comm SNR (EVM)",    values=("N/A", "dB")),
             "radar_snr": self.table.insert("", "end", text="C2 Radar SNR",      values=("N/A", "dB")),
@@ -4074,7 +4101,7 @@ class PhotonicIsacSimPanel:
             _, p_com_probe = calc_psd(self.data["v_rec_com"], fs)
             self.axes[3].set_ylim(-150.0, -90.0)
 
-            analysis_bw_hz = max(float(self.data.get("occupied_bw_hz", cfg.baud_gbaud * 1e9)) * 1.2, 1.0)
+            analysis_bw_hz = max(float(self.data.get("occupied_bw_hz", cfg.baud_gbaud * 1e9)), 1.0)
             f1_ghz = max(0.0, cfg.if_ghz - 0.5 * analysis_bw_hz / 1e9)
             f2_ghz = min(spec_fmax_ghz, cfg.if_ghz + 0.5 * analysis_bw_hz / 1e9)
             for ax in (self.axes[2], self.axes[3]):
@@ -4090,13 +4117,13 @@ class PhotonicIsacSimPanel:
             if "c2_band" in self.rows:
                 self.table.item(self.rows["c2_band"], values=(f"{float(c2m.get('band_power_dbm', np.nan)):.2f}", "dBm"))
             if "c1_noise" in self.rows:
-                self.table.item(self.rows["c1_noise"], values=(f"{float(c1m.get('noise_dbm', np.nan)):.2f}", "dBm"))
+                self.table.item(self.rows["c1_noise"], values=(f"{float(c1m.get('noise_power_dbm', c1m.get('noise_dbm', np.nan))):.2f}", "dBm"))
             if "c2_noise" in self.rows:
-                self.table.item(self.rows["c2_noise"], values=(f"{float(c2m.get('noise_dbm', np.nan)):.2f}", "dBm"))
+                self.table.item(self.rows["c2_noise"], values=(f"{float(c2m.get('noise_power_dbm', c2m.get('noise_dbm', np.nan))):.2f}", "dBm"))
             if "c1_noise_density" in self.rows:
-                self.table.item(self.rows["c1_noise_density"], values=(f"{float(c1m.get('noise_floor_dbm_hz', np.nan)):.2f}", "dBm/Hz"))
+                self.table.item(self.rows["c1_noise_density"], values=(f"{float(c1m.get('noise_density_dbm_hz', c1m.get('noise_floor_dbm_hz', np.nan))):.2f}", "dBm/Hz"))
             if "c2_noise_density" in self.rows:
-                self.table.item(self.rows["c2_noise_density"], values=(f"{float(c2m.get('noise_floor_dbm_hz', np.nan)):.2f}", "dBm/Hz"))
+                self.table.item(self.rows["c2_noise_density"], values=(f"{float(c2m.get('noise_density_dbm_hz', c2m.get('noise_floor_dbm_hz', np.nan))):.2f}", "dBm/Hz"))
             if "noise_source" in self.rows:
                 self.table.item(
                     self.rows["noise_source"],
@@ -4261,8 +4288,8 @@ class PhotonicIsacSimPanel:
         self.lines[1].set_data(rf_disp.get("freq_ghz", []), rf_disp.get("power_dbm", []))
         self.lines[1].set_label(f"UTC-PD Out ({pwr_tx:.1f} dBm)")
 
-        # Plot 3: C2 raw DSO IF spectrum. Metrics still use SI-cancelled C2,
-        # but the raw trace lets SI and SSBI around 2*IF remain visible.
+        # Plot 3: C2 raw DSO IF spectrum. The C2 table noise density/power use
+        # this same trace so the metric follows the visible spectrum floor.
         c2_plot = np.asarray(self.data.get("v_rec_c2_raw", self.data["v_rec_c2"]))
         if bool(self.sim_welch_psd_var.get()):
             f, p_c2 = calc_psd(c2_plot, fs)
@@ -4272,8 +4299,8 @@ class PhotonicIsacSimPanel:
         fmax_ghz = float(self.axes[2].get_xlim()[1])
         mask = f_ghz <= fmax_ghz
         self.lines[2].set_data(f_ghz[mask], p_c2[mask])
-        f1_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 - 0.5 * 1.2 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
-        f2_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 + 0.5 * 1.2 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
+        f1_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 - 0.5 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
+        f2_ghz = float(self.data.get("if_center_hz", 0.0)) / 1e9 + 0.5 * float(self.data.get("occupied_bw_hz", 1.0)) / 1e9
         band = mask & (f_ghz >= f1_ghz) & (f_ghz <= f2_ghz)
         self.l_c2_band.set_data(f_ghz[band], p_c2[band])
         self.lines[2].set_label("Raw")
@@ -4408,7 +4435,7 @@ class DsoPanel:
         self._rx_fs: float = 1.0
         self._rx_t: np.ndarray | None = None
         self._rx_multi: dict[str, dict[str, np.ndarray | float]] = {}
-        self._noise_floor_ref_dbmhz: float | None = None   # stored from "Measure Noise Floor"
+        self._noise_floor_ref_dbmhz: float | None = None   # stored DSO noise density in dBm/Hz
         self._metrics: dict[str, dict[str, object]] = {}
         self._loaded_capture_without_metrics = False
         self._last_range_summaries: list[dict[str, object]] = []
@@ -4704,7 +4731,7 @@ class DsoPanel:
         # Section 3: Results
         # These StringVars are still used by DSP callbacks and saved captures.
         self.band_pwr_var    = tk.StringVar(value="Band Power:  ---")
-        self.noise_floor_var = tk.StringVar(value="Noise Floor: ---")
+        self.noise_floor_var = tk.StringVar(value="Noise Density: ---")
         self.snr_var         = tk.StringVar(value="Band SNR:    ---")
         self.evm_var         = tk.StringVar(value="EVM:         ---")
         self.ber_var         = tk.StringVar(value="BER:         ---")
@@ -4716,6 +4743,7 @@ class DsoPanel:
         summary_font = tkfont.Font(family="Segoe UI", size=11, weight="bold")
         summary_items = [
             ("band_power_dbm", "Band Power"),
+            ("noise_power_dbm", "Noise Power"),
             ("snr_com_db", "SNR"),
             ("evm_db", "EVM"),
             ("ber", "BER"),
@@ -4972,23 +5000,23 @@ class DsoPanel:
             return max(0.02, min(1.0, float(sr)))
         if waveform_type == "DFT-s-OFDM":
             # The occupied DFT-s-OFDM band is set by the active IFFT bins, not
-            # by a hard-coded RRC roll-off.  Fall back to Rs when older TX refs
-            # do not carry the DFT metadata.
+            # by a hard-coded RRC roll-off or display guard.  Fall back to Rs
+            # when older TX refs do not carry the DFT metadata.
             try:
                 sr_ref_hz = self._payload_symbol_rate_hz(pl) if pl else 0.0
                 sr_ui_hz = float(sr) * 1e9
                 if sr_ref_hz > 0 and sr_ui_hz > 0:
                     tol = max(5.0e6, 5.0e-4 * max(sr_ref_hz, sr_ui_hz))
                     if abs(sr_ref_hz - sr_ui_hz) > tol:
-                        return float(sr) * 1.12
+                        return float(sr)
                 n_fft = int(pl.get("dft_n_fft", 0)) if pl else 0
                 active = np.asarray(pl.get("dft_active_bins", []), dtype=np.int64).reshape(-1) if pl else np.zeros(0)
                 fs_ref = float(pl.get("fs", 0.0)) if pl else 0.0
                 if n_fft > 0 and len(active) > 0 and fs_ref > 0:
-                    return (fs_ref * len(active) / n_fft) / 1e9 * 1.12
+                    return (fs_ref * len(active) / n_fft) / 1e9
             except Exception:
                 pass
-            return float(sr) * 1.12
+            return float(sr)
         return float(sr) * (1.0 + float(np.clip(beta, 0.0, 1.0))) + 2.0 * self._lfm_qam_extra_half_bw_ghz(sr)
 
     def _update_band_label(self) -> None:
@@ -5091,9 +5119,10 @@ class DsoPanel:
             ("carrier_if_ghz", "Carrier/IF", "GHz", "System", "Configured real-IF carrier."),
             ("symbol_rate_ghz", "Symbol Rate", "GHz", "System", "Configured or restored symbol rate."),
             ("bandwidth_hz", "Bandwidth Bw", "GHz", "System", "Occupied measurement band used for SNR/DIR."),
-            ("band_power_dbm", "Band Power", "dBm", "Comm", "Noise-subtracted in-band power."),
-            ("noise_floor_dbmhz", "Noise Floor", "dBm/Hz", "Comm", "Stored or capture-derived DSO noise density."),
-            ("snr_com_db", "Band SNR", "dB", "Comm", "Band-power SNR from integrated PSD; use EVM-implied SNR for demod quality."),
+            ("band_power_dbm", "Band Power", "dBm", "Comm", "Noise-subtracted in-band signal power."),
+            ("noise_floor_dbmhz", "Noise Density", "dBm/Hz", "Comm", "Stored or capture-derived DSO PSD noise density."),
+            ("noise_power_dbm", "Noise Power", "dBm", "Comm", "Noise density integrated over the analysis bandwidth."),
+            ("snr_com_db", "Band SNR", "dB", "Comm", "Band Power divided by Noise Power; use EVM-implied SNR for demod quality."),
             ("sinr_com_db", "SINR_com", "dB", "Comm", "Equals SNR if interference is not separately estimated."),
             ("dir_gbps", "DIR", "Gb/s", "Comm", "Bw*log2(1+EVM-implied SNR) when available."),
             ("evm_db", "EVM", "dB", "Comm", "Measured demodulation EVM."),
@@ -7873,8 +7902,12 @@ class DsoPanel:
             "band_power_dbm": 10.0 * np.log10(p_true_mw),
             "raw_power_dbm": 10.0 * np.log10(max(p_sig_mw, 1e-30)),
             "noise_floor_dbmhz": 10.0 * np.log10(max(nf_mwhz, 1e-30)),
+            "noise_density_dbmhz": 10.0 * np.log10(max(nf_mwhz, 1e-30)),
+            "noise_power_dbm": 10.0 * np.log10(max(p_noise_mw, 1e-30)),
             "snr_db": 10.0 * np.log10(max(p_true_mw / max(p_noise_mw, 1e-30), 1e-30)),
             "band_power_mw": p_true_mw,
+            "noise_power_mw": p_noise_mw,
+            "analysis_bw_hz": bw_sig_hz,
         }
 
     def _update_band_metrics_for_channels(self) -> dict[str, dict[str, float]]:
@@ -7888,11 +7921,15 @@ class DsoPanel:
             suffix = "" if row == 0 else f" {ch}"
             key_suffix = "" if row == 0 else f"_{ch.lower()}"
             self._set_metric(f"band_power_dbm{key_suffix}", f"Band Power{suffix}", vals["band_power_dbm"], "dBm")
+            self._set_metric(f"noise_power_dbm{key_suffix}", f"Noise Power{suffix}", vals["noise_power_dbm"], "dBm")
             self._set_metric(f"snr_com_db{key_suffix}", f"Band SNR{suffix}", vals["snr_db"], "dB")
-            self._set_metric(f"noise_floor_dbmhz{key_suffix}", f"Noise Floor{suffix}", vals["noise_floor_dbmhz"], "dBm/Hz")
+            self._set_metric(f"noise_floor_dbmhz{key_suffix}", f"Noise Density{suffix}", vals["noise_floor_dbmhz"], "dBm/Hz")
             if row == 0:
                 self.band_pwr_var.set(f"Band Power:  {vals['band_power_dbm']:.2f} dBm")
-                self.noise_floor_var.set(f"Noise Floor: {vals['noise_floor_dbmhz']:.1f} dBm/Hz")
+                self.noise_floor_var.set(
+                    f"Noise Density: {vals['noise_floor_dbmhz']:.1f} dBm/Hz; "
+                    f"Noise Power: {vals['noise_power_dbm']:.2f} dBm"
+                )
                 self.snr_var.set(f"Band SNR:    {vals['snr_db']:.2f} dB")
             if row == 1:
                 self._set_metric("snr_rad_db", "SNR_rad", vals["snr_db"], "dB", f"Measured from monostatic channel {ch}.")
@@ -10127,7 +10164,7 @@ class DsoPanel:
         self.canvas_plot.draw_idle()
 
     def _on_measure_noise_floor(self) -> None:
-        """Store real DSO noise floor from the out-of-band region of the current capture."""
+        """Store real DSO noise density from the out-of-band region of the current capture."""
         if self._rx_sig is None:
             messagebox.showwarning("No data", "Acquire a signal first (ideally with no signal connected).")
             return
@@ -10154,15 +10191,15 @@ class DsoPanel:
             self._noise_floor_ref_dbmhz = 10.0 * np.log10(max(nf_mwhz, 1e-30))
             self._const_drawn = False
 
-            self.noise_floor_var.set(f"Noise Floor: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz  [stored]")
-            self._set_metric("noise_floor_dbmhz", "Noise Floor", self._noise_floor_ref_dbmhz, "dBm/Hz")
+            self.noise_floor_var.set(f"Noise Density: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz  [stored]")
+            self._set_metric("noise_floor_dbmhz", "Noise Density", self._noise_floor_ref_dbmhz, "dBm/Hz")
             self._refresh_metrics_table()
-            self._log(f"[NF] DSO noise floor stored: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz")
+            self._log(f"[NF] DSO noise density stored: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz")
             self._plot_spectrum_and_time()   # redraw with NF reference line
             messagebox.showinfo("Noise Floor Stored",
-                f"DSO Noise Floor: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz\n"
+                f"DSO Noise Density: {self._noise_floor_ref_dbmhz:.1f} dBm/Hz\n"
                 "(out-of-band median from current capture)\n\n"
-                "This replaces the -174 dBm/Hz theoretical value for SNR calculations.")
+                "This PSD density is integrated over the analysis band for Noise Power and SNR.")
         except Exception as e:
             messagebox.showerror("Noise Floor Error", str(e))
 
@@ -10210,6 +10247,7 @@ class DsoPanel:
 
             bw_sig_hz    = (f2_ghz - f1_ghz) * 1e9
             p_noise_mw   = nf_mwhz * bw_sig_hz
+            p_noise_dbm  = 10.0 * np.log10(max(p_noise_mw, 1e-30))
 
             p_sig_true_mw = max(p_sig_mw - p_noise_mw, 1e-30)
             p_sig_true_dbm = 10.0 * np.log10(p_sig_true_mw)
@@ -10217,11 +10255,12 @@ class DsoPanel:
             snr_db       = 10.0 * np.log10(max(p_sig_true_mw / max(p_noise_mw, 1e-30), 1e-30))
 
             self.band_pwr_var.set(f"Band Power:  {p_sig_true_dbm:.2f} dBm")
-            self.noise_floor_var.set(f"Noise Floor: {nf_label}")
+            self.noise_floor_var.set(f"Noise Density: {nf_label}; Noise Power: {p_noise_dbm:.2f} dBm")
             self.snr_var.set(f"Band SNR:    {snr_db:.2f} dB")
             nf_dbmhz = 10.0 * np.log10(max(nf_mwhz, 1e-30))
             self._set_metric("band_power_dbm", "Band Power", p_sig_true_dbm, "dBm")
-            self._set_metric("noise_floor_dbmhz", "Noise Floor", nf_dbmhz, "dBm/Hz")
+            self._set_metric("noise_floor_dbmhz", "Noise Density", nf_dbmhz, "dBm/Hz")
+            self._set_metric("noise_power_dbm", "Noise Power", p_noise_dbm, "dBm")
             self._set_metric("snr_com_db", "Band SNR", snr_db, "dB")
             self._set_metric(
                 "sinr_com_db", "SINR_com", snr_db, "dB",
@@ -10231,7 +10270,8 @@ class DsoPanel:
 
             self._log(f"[Meas] fc={float(self.fc_var.get()):.2f} GHz  "
                       f"sr={float(self.sr_var.get()):.3f} GHz -> "
-                      f"P={p_sig_dbm:.2f} dBm  NF={nf_label}  SNR={snr_db:.2f} dB")
+                      f"Praw={p_sig_dbm:.2f} dBm  Psig={p_sig_true_dbm:.2f} dBm  "
+                      f"N={p_noise_dbm:.2f} dBm  N0={nf_label}  SNR={snr_db:.2f} dB")
 
             self._const_drawn = False
             self._plot_spectrum_and_time()
@@ -12358,6 +12398,8 @@ class DsoPanel:
                 ax.legend(fontsize=8)
             if zero_active:
                 ax.set_ylim(-30.0, 10.0)
+            elif not (np.isfinite(zoom_center_m) and zoom_center_m > 0):
+                ax.set_ylim(-45.0, 10.0)
             ax.grid(True, alpha=0.35)
 
         self._apply_dashboard_layout()
@@ -12387,6 +12429,12 @@ class DsoPanel:
         ax.set_ylabel("Magnitude (dB)")
         ax.set_title(f"{self.ch_var.get().strip().upper()} Range Profile")
         self._apply_range_xlim(ax, est_range, x_scale=1e3)
+        if np.any(show):
+            try:
+                y_hi = max(5.0, float(np.nanmax(prof_db[show])) + 8.0)
+            except Exception:
+                y_hi = 10.0
+            ax.set_ylim(-45.0, y_hi)
         ax.grid(True, alpha=0.35)
         mode = self._range_mode_for_row(0)
         pslr_db = self._compute_pslr_db(10.0 ** (np.asarray(prof_db, dtype=np.float64) / 20.0), rng, mode=mode)
@@ -12491,7 +12539,7 @@ class DsoPanel:
                     beta_guard = float(pl.get("qam_rrc_beta", demod_beta_val))
                     wf_guard = str(pl.get("waveform_type", "")).strip()
                     if wf_guard == "DFT-s-OFDM":
-                        half_bw_guard = 0.5 * _sr_act * 1.05
+                        half_bw_guard = 0.5 * self._tx_occupied_bw_hz(pl)
                     elif wf_guard == "LFM-QAM":
                         half_bw_guard = max(0.5 * _sr_act * (1.0 + beta_guard), _sr_act)
                     else:
@@ -12589,8 +12637,8 @@ class DsoPanel:
                           f"demod_lpf={'on' if filter_enable_val else 'off'}")
                 if waveform_type == "DFT-s-OFDM":
                     occupied_hz = self._tx_occupied_bw_hz(pl)
-                    rf_lo = (_if_freq_log - 0.5 * occupied_hz * 1.12) / 1e9
-                    rf_hi = (_if_freq_log + 0.5 * occupied_hz * 1.12) / 1e9
+                    rf_lo = (_if_freq_log - 0.5 * occupied_hz) / 1e9
+                    rf_hi = (_if_freq_log + 0.5 * occupied_hz) / 1e9
                     bb_lpf = min(0.65 * occupied_hz, fs_ref * 0.45)
                     self._log(
                         "[Demod] DFT grid: "
@@ -13291,23 +13339,33 @@ class SystemModelValidationPanel:
         add(8, "bandwidth_ghz", "B signal [GHz]", "2.0")
         add(9, "pilot_time_ns", "T_p pilot [ns]", "102.4")
         add(10, "gc_db", "G_c [dB]", "0")
-        add(11, "noise_density_dbmhz", "Spectrum noise floor [dBm/Hz]", "-130")
+        add(11, "noise_density_dbmhz", "Spectrum noise density [dBm/Hz]", "-130")
         add(12, "modulation_order", "Comm M-QAM", "32")
         add(13, "ber_target", "BER target", "1e-3")
         add(14, "pfa", "Radar Pfa", "1e-6")
         add(15, "pd", "Radar Pd", "0.90")
         add(16, "rho_points", "rho sweep points", "101")
         add(17, "mc_trials", "MC trials", "2000")
+        add(18, "m_min", "m sweep min", "0.02")
+        add(19, "m_max", "m sweep max", "1.0")
+        add(20, "m_points", "m sweep points", "300")
+        add(21, "phi_bias_deg", "MZM phi_b [deg]", "45")
+        add(22, "gamma1_dbm", "gamma1 [dBm]", "0")
+        add(23, "gamma2_dbm", "gamma2 [dBm]", "-20")
+        add(24, "gamma3_dbm", "gamma3 [dBm]", "-30")
+        add(25, "papr_db", "Waveform PAPR [dB]", "8")
+        add(26, "backoff_db", "Power backoff [dB]", "3")
+        add(27, "m_peak_limit", "m peak limit", "1.0")
 
         btns = ttk.Frame(ctrl)
-        btns.grid(row=18, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        btns.grid(row=28, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(btns, text="Run", style="Primary.TButton", command=self._run).pack(side=tk.LEFT)
         ttk.Button(btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text="Load Save Data", command=self._load_measurement).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btns, text="Clear Meas.", command=self._clear_measurements).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=260).grid(
-            row=19, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+            row=29, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
         ctrl.columnconfigure(1, weight=1)
 
@@ -13338,6 +13396,83 @@ class SystemModelValidationPanel:
         density_dbmhz = self._float("noise_density_dbmhz", -130.0)
         bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
         return max((10.0 ** (density_dbmhz / 10.0)) * bandwidth_hz, 1e-30)
+
+    def _qam_moment_factors(self) -> tuple[float, float]:
+        try:
+            m_order = max(2, int(round(self._float("modulation_order", 32.0))))
+            if m_order <= 4:
+                mod = "QPSK"
+            else:
+                mod = f"{m_order}QAM"
+            bps = max(1, int(np.ceil(np.log2(m_order))))
+            bits = np.array(
+                [[int(b) for b in format(i, f"0{bps}b")] for i in range(1 << bps)],
+                dtype=np.uint8,
+            )
+            syms = np.asarray(_bits_to_qam_symbols(bits.reshape(-1), mod), dtype=np.complex128).reshape(-1)
+            if len(syms) == 0:
+                return 1.0, 1.0
+            p2 = max(float(np.mean(np.abs(syms) ** 2)), 1e-30)
+            mu4 = float(np.mean(np.abs(syms) ** 4) / (p2 ** 2))
+            mu6 = float(np.mean(np.abs(syms) ** 6) / (p2 ** 3))
+            return max(mu4, 1.0), max(mu6, 1.0)
+        except Exception:
+            return 1.0, 1.0
+
+    def _sdinr_model(self) -> dict[str, np.ndarray | float]:
+        m_min = max(self._float("m_min", 0.02), 1e-5)
+        m_max = max(self._float("m_max", 1.0), m_min * 1.01)
+        n_pts = max(32, min(self._int("m_points", 300), 5000))
+        m_axis = np.geomspace(m_min, m_max, n_pts)
+        phi_b = np.deg2rad(float(np.clip(self._float("phi_bias_deg", 45.0), 1e-3, 89.999)))
+        cot_phi = 1.0 / max(np.tan(phi_b), 1e-12)
+        gamma1_mw = max(10.0 ** (self._float("gamma1_dbm", 0.0) / 10.0), 1e-30)
+        gamma2_mw = max(10.0 ** (self._float("gamma2_dbm", -20.0) / 10.0), 0.0)
+        gamma3_mw = max(10.0 ** (self._float("gamma3_dbm", -30.0) / 10.0), 0.0)
+        noise_mw = self._noise_power_mw()
+        mu4, mu6 = self._qam_moment_factors()
+        papr_lin = max(10.0 ** (self._float("papr_db", 8.0) / 10.0), 1.0)
+        backoff_lin = max(10.0 ** (self._float("backoff_db", 3.0) / 10.0), 1.0)
+        m_peak_limit = max(self._float("m_peak_limit", 1.0), 1e-6)
+        m_allowed = m_peak_limit / np.sqrt(papr_lin * backoff_lin)
+
+        sig_mw = gamma1_mw * (m_axis ** 2)
+        ssbi_mw = gamma2_mw * mu4 * (m_axis ** 4)
+        imd3_mw = gamma3_mw * mu6 * (m_axis ** 6) * (cot_phi ** 4)
+        den_mw = np.maximum(noise_mw + ssbi_mw + imd3_mw, 1e-30)
+        sdinr = sig_mw / den_mw
+        feasible = m_axis <= m_allowed
+        if np.any(feasible & np.isfinite(sdinr)):
+            feasible_idx = np.flatnonzero(feasible)
+            opt_idx = int(feasible_idx[int(np.nanargmax(sdinr[feasible]))])
+        else:
+            opt_idx = int(np.nanargmax(sdinr)) if np.any(np.isfinite(sdinr)) else 0
+
+        cspr_axis = 1.0 / np.maximum(m_axis ** 2, 1e-30)
+        cspr_now = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        m_now = 1.0 / np.sqrt(max(cspr_now, 1e-30))
+        return {
+            "m": m_axis,
+            "cspr_db": 10.0 * np.log10(cspr_axis),
+            "sdinr": sdinr,
+            "sdinr_db": self._db(sdinr),
+            "signal_mw": sig_mw,
+            "noise_mw": noise_mw,
+            "ssbi_mw": ssbi_mw,
+            "imd3_mw": imd3_mw,
+            "feasible": feasible,
+            "m_allowed": float(m_allowed),
+            "m_opt": float(m_axis[opt_idx]),
+            "cspr_opt_db": float(10.0 * np.log10(cspr_axis[opt_idx])),
+            "sdinr_opt_db": float(10.0 * np.log10(max(sdinr[opt_idx], 1e-30))),
+            "m_now": float(m_now),
+            "cspr_now_db": float(self._float("cspr_db", 20.0)),
+            "cot_phi": float(cot_phi),
+            "mu4": float(mu4),
+            "mu6": float(mu6),
+            "papr_db": float(10.0 * np.log10(papr_lin)),
+            "backoff_db": float(10.0 * np.log10(backoff_lin)),
+        }
 
     def _comm_threshold_db(self) -> float:
         try:
@@ -13416,7 +13551,7 @@ class SystemModelValidationPanel:
                 self.params["gc_db"].set(f"{10.0 * np.log10(gc):.6g}")
                 if getattr(self.photonic_source, "data", None):
                     c1m = self.photonic_source.data.get("c1_band_metrics", {})
-                    nf = float(c1m.get("noise_floor_dbm_hz", float("nan")))
+                    nf = float(c1m.get("noise_density_dbm_hz", c1m.get("noise_floor_dbm_hz", float("nan"))))
                     if np.isfinite(nf):
                         self.params["noise_density_dbmhz"].set(f"{nf:.6g}")
             pl = self.runtime.get("tx_payload")
@@ -13432,6 +13567,10 @@ class SystemModelValidationPanel:
                 rho = float(pl.get("amplitude_ratio_rho", float("nan")))
                 if np.isfinite(rho):
                     self.params["rho"].set(f"{rho:.6g}")
+                if "awg_sig" in pl:
+                    papr = DsoPanel._papr_db(np.asarray(pl["awg_sig"]))
+                    if np.isfinite(papr):
+                        self.params["papr_db"].set(f"{papr:.6g}")
                 mod = str(pl.get("modulation", "")).upper()
                 if "32" in mod:
                     self.params["modulation_order"].set("32")
@@ -13518,7 +13657,9 @@ class SystemModelValidationPanel:
             n_dbm = 10.0 * np.log10(max(float(model.get("n_mw", 1e-30)), 1e-30))
             nf_dbmhz = self._float("noise_density_dbmhz", -130.0)
 
-            ax_snr, ax_err, ax_rho, ax_meas = self.axes.reshape(-1)
+            sdinr_model = self._sdinr_model()
+
+            ax_snr, ax_sdinr, ax_rho, ax_meas = self.axes.reshape(-1)
             for ax in self.axes.reshape(-1):
                 ax.cla()
                 ax.grid(True, alpha=0.35)
@@ -13538,14 +13679,38 @@ class SystemModelValidationPanel:
             ax_snr.scatter(ranges[sample_idx], mc_comm_db, s=14, marker="o", color="#60a5fa", label="comm MC")
             ax_snr.scatter(ranges[sample_idx], mc_sens_db, s=14, marker="x", color="#f87171", label="sens MC")
 
-            ax_err.plot(ranges[sample_idx], mc_comm_db - self._db(snr_comm[sample_idx]), color="#2563eb", marker="o", ms=3, label="comm MC-calc")
-            ax_err.plot(ranges[sample_idx], mc_sens_db - self._db(snr_sens[sample_idx]), color="#dc2626", marker="x", ms=4, label="sens MC-calc")
-            ax_err.axhline(0.0, color="#64748b", linestyle=":", linewidth=0.9)
-            ax_err.set_xscale("log")
-            ax_err.set_title("Simulation - Calculation")
-            ax_err.set_xlabel("Range [m]")
-            ax_err.set_ylabel("Error [dB]")
-            ax_err.legend(fontsize=8)
+            m_axis = np.asarray(sdinr_model["m"], dtype=np.float64)
+            sdinr_db = np.asarray(sdinr_model["sdinr_db"], dtype=np.float64)
+            m_opt = float(sdinr_model["m_opt"])
+            m_now = float(sdinr_model["m_now"])
+            m_allowed = float(sdinr_model["m_allowed"])
+            cspr_opt_db = float(sdinr_model["cspr_opt_db"])
+            cspr_now_db = float(sdinr_model["cspr_now_db"])
+            sdinr_opt_db = float(sdinr_model["sdinr_opt_db"])
+            papr_db = float(sdinr_model["papr_db"])
+            backoff_db = float(sdinr_model["backoff_db"])
+            ax_sdinr.semilogx(m_axis, sdinr_db, color="#7c3aed", linewidth=1.4, label="SDINR")
+            ax_sdinr.axvline(m_opt, color="#111827", linestyle="--", linewidth=1.0, label=f"m_opt={m_opt:.3g}")
+            if m_axis[0] < m_allowed < m_axis[-1]:
+                ax_sdinr.axvline(m_allowed, color="#dc2626", linestyle="-.", linewidth=1.0, label="PAPR/OBO limit")
+                ax_sdinr.axvspan(m_allowed, m_axis[-1], color="#dc2626", alpha=0.08)
+            if m_axis[0] <= m_now <= m_axis[-1]:
+                ax_sdinr.axvline(m_now, color="#f59e0b", linestyle=":", linewidth=1.2, label=f"current CSPR={cspr_now_db:.1f} dB")
+            ax_sdinr.set_title("SDINR vs Modulation Index")
+            ax_sdinr.set_xlabel("m  (CSPR = 1/m^2)")
+            ax_sdinr.set_ylabel("SDINR [dB]")
+            ax_sdinr.legend(fontsize=8)
+            ax_sdinr.text(
+                0.03, 0.04,
+                f"opt CSPR={cspr_opt_db:.2f} dB\n"
+                f"opt SDINR={sdinr_opt_db:.2f} dB\n"
+                f"PAPR/OBO={papr_db:.1f}/{backoff_db:.1f} dB",
+                transform=ax_sdinr.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=8,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.82, edgecolor="#cbd5e1"),
+            )
 
             n_rho = max(16, min(self._int("rho_points", 101), 2000))
             rho_axis = np.linspace(1e-3, 0.999, n_rho)
@@ -13584,6 +13749,8 @@ class SystemModelValidationPanel:
                 f"Rmax_sens={rs[0]:.3g} m  joint={rj[0]:.3g} m  "
                 f"Gp=T*B={gp_db:.1f} dB  "
                 f"N={n_dbm:.1f} dBm ({nf_dbmhz:.1f} dBm/Hz x B)  "
+                f"m_opt={m_opt:.3g} CSPR_opt={cspr_opt_db:.1f} dB  "
+                f"m_limit={m_allowed:.3g}  "
                 f"thr(comm/sens)={comm_thr_db:.1f}/{sens_thr_db:.1f} dB  "
                 f"meas={len(self.meas_points)}"
             )

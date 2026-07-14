@@ -1,446 +1,813 @@
 ---
-title: DSO DSP 및 차동 거리 측정 워크플로우
+title: DSO DSP and Differential Ranging Workflow
 is_public: false
+updated: 2026-07-13
 ---
 
-# DSO DSP 및 차동 거리 측정 워크플로우
+# DSO DSP 및 Differential Ranging 최신 정리
 
-## 1. 현재 상태
+이 문서는 현재 `isac_unified_gui.py`의 DSO 측정 탭에서 실제로 수행되는 DSP 절차를 기준으로 정리한 최신 버전이다. 대상은 DSO로 획득한 실수 IF 파형이며, TX 생성 시 저장된 payload/reference를 이용해 spectrum/SNR 측정, 동기화, 복조, 채널 추정, range detection, zero-reference 기반 differential ranging을 수행한다.
 
-최근 LFM-QAM DSO 측정 결과는 SNR 한계에 거의 도달했다.
+핵심 전제는 다음과 같다.
 
-| 항목 | 결과 | 해석 |
-|---|---:|---|
-| SNR | 25.25 dB | 캡처된 수신 신호의 대역 내 SNR |
-| EVM | -24.12 dB | SNR 한계 대비 약 1.1 dB 손실 |
-| 파형 | LFM-QAM / 16QAM | 현재 DSO DSP가 거의 정상 동작 중 |
+- DSO 입력은 real IF waveform이다.
+- DSP 기준 샘플레이트는 DSO 샘플레이트가 아니라 TX payload의 `fs`이다.
+- 복조와 range는 항상 TX reference payload와 현재 GUI 파라미터의 일관성을 확인한 뒤 수행한다.
+- DFT-s-OFDM의 equalization 탭 수는 현재 GUI 기본값 및 사용 조건 기준 `1`이다. 따라서 현재 DSO demod 경로의 Post-EQ는 긴 FIR/FDE가 아니라 one-tap complex LS correction에 해당한다.
+- range display는 zero reference를 저장해도 절대 range axis를 유지한다. zero reference는 overlay 및 differential range/CFR 계산에만 사용된다.
 
-AWGN 지배 링크에서는 RMS EVM이 대략 다음 관계를 따른다.
+---
 
-$$
-\mathrm{EVM}_{dB} \approx -\mathrm{SNR}_{dB}
-$$
+## 1. DSO 데이터 및 TX reference
 
-따라서 SNR이 약 25 dB일 때 EVM이 -24 dB 수준이면 충분히 타당하다. 이전의 -16 dB 수준 EVM은 LFM-QAM 파형 자체의 피할 수 없는 upper bound가 아니라, dechirp 이후 채널 보정 및 심볼 복구 DSP가 부족해서 발생한 손실로 보는 것이 맞다.
-
-## 2. 차동 거리 측정 개념
-
-현재 셋업에서 절대 거리를 바로 측정하기는 어렵다. DSO trigger/pre-trigger latency, AWG 출력 latency, trigger cable delay, DSO channel skew, 장비 내부 delay가 모두 측정 delay에 포함되기 때문이다.
-
-따라서 절대 delay를 모두 제거하려 하기보다, 기준 위치와 이동 후 위치의 차이를 보는 차동 측정 방식을 사용한다.
-
-## 3. Trigger Reference Path
-
-계획 중인 구성은 다음과 같다.
+DSO capture는 선택 채널별로 다음 형태로 runtime에 저장된다.
 
 ```text
-AWG M8194A dual-channel mode
-  CH1 또는 선택한 RF 출력 채널  -> ISAC / communication waveform path
-  CH2                         -> DSO CH3 reference trigger path
-
-DSO
-  선택한 RX channel             -> received ISAC waveform
-  CH3                         -> reference trigger input
+rx_multi[ch] = {
+  "sig": real_voltage_samples,
+  "t": time_axis,
+  "fs": dso_sample_rate
+}
 ```
 
-3 m RF trigger cable은 대략 12-15 ns의 전기적 delay를 만든다. 이 delay는 0이 아니지만, 케이블을 움직이거나 구부리지 않고 같은 상태로 유지하면 공통 상수항으로 취급할 수 있다.
+Full-duplex display는 최대 2개 채널을 표시한다.
 
-기준 위치의 측정 delay:
+- C1 또는 첫 번째 row: one-way LOS range, range scale = `c`
+- C2 또는 두 번째 row: monostatic radar range, range scale = `c/2`
 
-$$
-\tau_0 = \tau_{\mathrm{path},0} + \tau_{\mathrm{sys}}
-$$
+TX reference payload는 다음 정보를 제공한다.
 
-이동 후 위치의 측정 delay:
+- waveform type: `QAM`, `LFM-QAM`, `DFT-s-OFDM`
+- TX baseband matrix: `tx_bb_matrix`
+- TX symbol matrix: `tx_sym_matrix`
+- sample rate: `fs`
+- IF: `if_freq`, `iqtools_if_freq`
+- symbol rate: `symbol_rate`, `symbol_rate_actual`
+- QAM RRC taps/preamble 또는 DFT-s-OFDM pilot/active-bin metadata
 
-$$
-\tau_1 = \tau_{\mathrm{path},1} + \tau_{\mathrm{sys}}
-$$
+DSO demod/range/CFR 실행 전에는 `_sync_dsp_params_from_payload`, `_assert_dsp_payload_consistent`, `_warn_if_tx_reference_stale`를 통해 GUI 값과 payload의 symbol rate, modulation, IF, waveform type이 맞는지 확인한다.
 
-두 값을 빼면
+---
 
-$$
-\Delta \tau = \tau_1 - \tau_0
-             = \tau_{\mathrm{path},1} - \tau_{\mathrm{path},0}
-$$
+## 2. Spectrum, noise density, noise power, SNR
 
-가 되어 시스템 공통 delay는 1차적으로 소거된다.
+DSO Spectrum은 raw real waveform에 Welch PSD를 적용해서 계산한다.
 
-단, 이것을 "오차 리스크 0%"라고 표현하는 것은 과하다. trigger jitter, 케이블 bending, 온도 drift, AWG/DSO clock drift, stage repeatability는 여전히 남는다. 다만 큰 고정 delay가 변위 측정을 지배하지 않게 되는 것이 핵심이다.
+```math
+S_v(f) = \text{Welch}(v[n])
+```
 
-## 4. One-Way와 Monostatic 거리 변환
+50 ohm 기준 전력 spectral density는 다음과 같다.
 
-거리 변환식은 측정 geometry에 따라 달라진다.
+```math
+PSD_{dBm/Hz}(f)
+= 10\log_{10}\left({S_v(f) \over 50\Omega \cdot 1\text{ mW}}\right)
+```
 
-### One-way LOS
+즉 spectrum plot에서 보이는 noise floor 값, 예를 들어 `-130 dBm/Hz`, 는 noise density `N_0`이다. 이 값 자체는 전체 noise power가 아니다.
 
-AWG/송신부에서 수신부까지 한 번만 전파되는 direct LOS 이동량은
+신호 분석 대역은 waveform type에 따라 결정된다.
 
-$$
-\Delta R = c \Delta \tau
-$$
+- DFT-s-OFDM: active IFFT bin bandwidth
 
-를 사용한다.
+```math
+B_{\text{ana}} = f_s {N_{\text{active}} \over N_{\text{FFT}}}
+```
 
-### Monostatic Radar
+- 일반 QAM/SC: symbol rate와 RRC roll-off 기반 occupied bandwidth
 
-송신부에서 target까지 갔다가 다시 돌아오는 monostatic radar echo는 왕복 경로이므로
+```math
+B_{\text{ana}} \approx R_s(1+\beta)
+```
 
-$$
-\Delta R = \frac{c \Delta \tau}{2}
-$$
+- LFM-QAM: chirp bandwidth와 symbol bandwidth를 함께 반영
 
-를 사용한다.
+DSO 측정 탭의 band power, noise power, SNR 계산은 다음 순서이다.
 
-GUI에는 이를 위해 `Range Mode`를 추가했다.
+1. 신호 대역 mask를 만든다.
 
-- `One-way LOS (c)`
-- `Monostatic radar (c/2)`
+```math
+f \in [f_1, f_2]
+```
 
-## 5. Range Resolution과 미세 변위 추적
+2. raw in-band power를 PSD 적분으로 계산한다.
 
-대역폭으로 결정되는 고전적 range resolution은 다음과 같다.
+```math
+P_{\text{raw}} = \sum_{f \in \text{band}} PSD_{\text{mW/Hz}}(f)\Delta f
+```
 
-Monostatic radar:
+3. noise density `N_0`를 정한다.
 
-$$
-\Delta R_{\mathrm{mono}} = \frac{c}{2B}
-$$
+- stored noise floor가 있으면 그 값을 사용
+- 없으면 current capture의 out-of-band PSD median 사용
 
-One-way LOS:
+```math
+N_0 = \text{median}\{PSD_{\text{mW/Hz}}(f), f \notin \text{signal band}\}
+```
 
-$$
-\Delta R_{\mathrm{one-way}} = \frac{c}{B}
-$$
+4. noise power는 noise density를 분석 대역폭에 대해 적분한다.
 
-예시는 다음과 같다.
+```math
+P_N = N_0 B_{\text{ana}}
+```
 
-| Bandwidth | Monostatic resolution | One-way LOS resolution |
-|---:|---:|---:|
-| 1 GHz | 15 cm | 30 cm |
-| 10 GHz | 1.5 cm | 3 cm |
+5. signal-only band power는 raw in-band power에서 noise power를 뺀다.
 
-반면 CFR phase slope 또는 carrier phase 기반 분석은 peak bin보다 훨씬 작은 sub-bin displacement tracking을 가능하게 한다. 이것은 두 개의 독립 target을 분리하는 range resolution 자체를 무한히 넘는다는 뜻은 아니다. 안정적인 단일 경로 또는 dominant path의 미세 변위를 고해상도로 추정하는 것이다.
+```math
+P_S = \max(P_{\text{raw}} - P_N, \epsilon)
+```
 
-## 6. 권장 측정 프로토콜
+6. SNR은 다음과 같이 계산한다.
 
-### Step 1. Reference 획득
+```math
+SNR_{\text{band}} = 10\log_{10}{P_S \over P_N}
+```
 
-1. 수신부 또는 target을 Position 0에 고정한다.
-2. AWG CH2를 DSO CH3에 연결하여 reference trigger로 사용한다.
-3. DSO에서 ISAC RX channel을 capture한다.
-4. `Set Range Zero`를 누른다.
-5. `Save Capture`로 기준 capture를 저장한다.
+따라서 table에 표시되는 값의 의미는 다음과 같이 구분된다.
 
-`Set Range Zero`는 다음을 저장한다.
+| 항목 | 의미 | 단위 |
+|---|---|---|
+| Noise Density | PSD noise floor, 예: `-130 dBm/Hz` | dBm/Hz |
+| Noise Power | `Noise Density + 10log10(Bana)` | dBm |
+| Band Power | in-band raw power에서 noise power를 뺀 signal power | dBm |
+| Band SNR | `Band Power / Noise Power` | dB |
 
-- matched-filter peak delay를 0 m 기준으로 저장
-- 기준 LFM-QAM channel frequency response, 즉 `H0(f)` 저장
+주의: DFT-s-OFDM에서는 RRC filter가 적용되지 않으므로 `1.2 x symbol rate` 같은 RRC guard bandwidth를 noise power 계산에 쓰지 않는다. 현재 코드는 active-bin occupied bandwidth를 사용한다.
 
-### Step 2. Target 획득
+---
 
-1. stage를 원하는 거리만큼 이동한다.
-2. 같은 trigger/reference 조건에서 capture한다.
-3. 필요하면 `Save Capture`로 저장한다.
-4. `ISAC De-chirp / Range`를 실행한다.
+## 3. Real IF에서 complex baseband로 변환
 
-GUI는 다음을 계산한다.
+DSO real IF signal `x[n]`은 `_rx_to_baseband`에서 다음 순서로 baseband가 된다.
 
-- matched-filter peak 기반 range
-- `Range Mode`에 따른 one-way 또는 monostatic scaling
-- `H1(f) / H0(f)` phase slope 기반 차동 변위
-- differential CFR coherence
+### 3.1 DC 제거
 
-### Step 3. Offline 재처리
+```math
+x_0[n] = x[n] - \mathbb{E}\{x[n]\}
+```
 
-`Load Capture`로 저장된 `.npz` 파일을 불러오면 실시간 DSO 없이도 같은 데이터로 demodulation과 range detection을 반복할 수 있다.
+### 3.2 complex mixing
 
-저장 파일에는 다음이 포함된다.
+기본 sideband sign은 `-1`이다.
 
-- `rx_sig`: DSO voltage waveform
-- `rx_t`: time axis
-- `rx_fs`: sampling rate
-- GUI demod/range 설정
-- 현재 TX reference payload (`tx__...` prefix)
+```math
+r_{\text{bb,high}}[n]
+= 2x_0[n]\exp(-j2\pi f_{\text{IF}} n/f_{s,\text{DSO}})
+```
 
-Load 후에는 `Live DSO`가 자동으로 꺼지고, `Demodulate` 및 `ISAC De-chirp / Range`가 저장된 capture를 대상으로 실행된다.
+여기서 `f_IF`는 가능하면 `iqtools_if_freq`, 아니면 `if_freq`를 사용한다.
 
-## 7. 현재 DSO DSP 체인
+### 3.3 TX reference sample rate로 resampling
 
-현재 GUI의 DSO DSP는 `code/isac_unified_gui.py`에 구현되어 있다.
+DSO sample rate와 TX reference sample rate가 다르면 FFT 기반 complex resampling을 적용한다.
 
-### 7.1 DSO 설정 및 Capture
+```math
+r_{\text{bb}}[n] =
+\text{Resample}\{r_{\text{bb,high}}\; ;\; f_{s,\text{DSO}}\rightarrow f_{s,\text{TX}}\}
+```
 
-DSO 연결 또는 capture 시 GUI는 다음 설정을 적용한다.
+### 3.4 baseband LPF
 
-- DSO RX channel display 및 vertical scale
-- DSO sample rate
-- acquisition points 및 timebase range
-- FFT source, offset, scale
-- trigger source 및 trigger level
-- Keysight UXR의 waveform/FFT split display layout
+실수 IF downconversion 후 생기는 image와 넓은 잡음을 억제하기 위해 optional FFT LPF를 적용한다. cutoff는 waveform type별로 다르다.
 
-AWG CH2 -> DSO CH3 reference trigger를 위해 `Trigger Ch`와 `Trig Level (mV)` 설정을 추가했다.
+- QAM: RRC occupied bandwidth보다 넓게 설정
+- LFM-QAM: chirp half-bandwidth와 symbol transition bandwidth를 포함
+- DFT-s-OFDM: active-bin occupied bandwidth 기반
 
-### 7.2 Baseband 변환
+DFT-s-OFDM의 cutoff는 현재 다음 형태이다.
 
-DSO에서 받은 real waveform을 `x[n]`이라고 하면,
+```math
+f_c = \min(0.65B_{\text{occupied}},\; 0.45f_s)
+```
 
-1. DC 제거
+### 3.5 AGC normalization
 
-   $$
-   x[n] \leftarrow x[n] - \mathrm{mean}(x[n])
-   $$
+복조 threshold, timing loop, slicer 안정성을 위해 RMS를 1로 정규화한다.
 
-2. Real IF downconversion
+```math
+r_{\text{bb}}[n] \leftarrow {r_{\text{bb}}[n] \over \sqrt{\mathbb{E}|r_{\text{bb}}[n]|^2}}
+```
 
-   $$
-   r[n] = 2x[n]e^{-j2\pi f_{\mathrm{IF}} n/f_s}
-   $$
+---
 
-3. TX/AWG reference sampling rate로 resampling
-4. FFT-domain low-pass filtering
-5. RMS normalization
+## 4. Frame synchronization
 
-LFM-QAM demod LPF는 QAM RRC 대역뿐 아니라 chirp sweep 대역을 포함하도록 설정한다.
+공통 frame sync는 `_frame_sync_and_reshape`에서 수행된다.
 
-$$
-B_{\mathrm{LPF}} \gtrsim
-\frac{B_{\mathrm{chirp}}}{2}
-+ \frac{R_s(1+\beta)}{2}
-$$
+### 4.1 TX reference correlation
 
-## 8. QAM Demodulation DSP
+수신 baseband와 TX reference template 간 normalized가 아닌 magnitude correlation을 계산한다.
 
-일반 QAM 경로는 다음 순서로 처리된다.
+```math
+C[k] =
+\left|
+\sum_n r_{\text{bb}}[k+n]s_{\text{ref}}^*[n]
+\right|
+```
 
-1. 현재 TX reference payload 로드
-2. `Sync symbol/mod from AWG`가 켜져 있으면 AWG panel의 symbol rate 및 modulation을 DSO demod 설정에 반영
-3. M-th power 기반 blind CFO 추정
-4. RRC matched filtering
-5. Zadoff-Chu preamble correlation으로 frame/timing lock
-6. deterministic TX PRBS reference 기반 frame start, CFO, SRO refine
-7. Gardner timing recovery
-8. phase, IQ, widely-linear correction 후보 평가
-9. SC-FDE 적용 여부별 후보 평가
-10. EVM이 가장 낮고 유효한 equalization path 선택
-11. deterministic PRBS/TX reference 기준 EVM 및 BER 계산
+```math
+k_0 = \arg\max_k C[k]
+```
 
-## 9. LFM-QAM Demodulation DSP
+DFT-s-OFDM의 경우 한 block template만 쓰면 반복 pilot/block 때문에 중간 block에 lock될 수 있다. 따라서 capture가 충분히 길면 full-frame template를 사용한다.
 
-### 9.1 배경: TDM에서 shared waveform으로
+### 4.2 reshape
 
-이전 LFM-QAM은 TDM 구조였다 — 프레임 안에서 ZC preamble chirp + pilot chirp만 레이더 처리 이득을 얻고, 나머지 data chirp는 통신 전용이었다. 지금의 LFM-QAM은 이 TDM 분리를 없앤 **shared-waveform ISAC 신호**다. 프레임 전체를 하나의 연속된 LFM chirp로 사용하면서 그 위에 PSK 데이터를 위상으로만 얹는다.
+frame start 이후 수신 baseband를 `n_chirps x pts_per_chirp` matrix로 reshape한다.
 
-$$
-s(t) = \exp\!\left[j\pi(2f_0 t + u t^2) + j\phi_k(t)\right]
-$$
+```math
+R[i,n] = r_{\text{bb}}[k_0 + iN_{\text{frame}} + n]
+```
 
-여기서 $u$는 chirp slope, $\phi_k(t)$는 심볼 구간 동안 위상을 유지하는 (zero-order-hold) PSK 심볼 위상이다. RRC 등 진폭 pulse shaping은 적용하지 않는다 — pulse shaping은 진폭 리플을 만들어 constant-envelope 특성을 깨뜨리기 때문이다. 따라서 매 샘플에서 $|s[n]| = 1$이 정확히 유지되고, MZM/UTC-PD에 최대 전력으로 구동할 수 있다.
+### 4.3 SRO/CFO refinement
 
-프레임 전체가 하나의 chirp이므로 (`n_chirps = 1`), 100% duty cycle로 정합 필터 처리 이득을 얻는다 — 이전처럼 overhead chirp 비율만큼만 레이더에 쓰이는 것이 아니라 캡처 전체가 레이더 펄스로 동작한다. Modulation은 PSK(BPSK/QPSK/8PSK)로 제한된다 — QAM은 진폭이 변하므로 constant envelope과 양립할 수 없다.
+LFM-QAM 및 DFT-s-OFDM은 blind CFO를 frame sync 전에 적용하지 않는다. 이전 방식처럼 capture 초반부만 보고 CFO를 추정하면 DSO pre-trigger margin 때문에 noise/idle 구간에 lock될 수 있기 때문이다.
 
-### 9.2 기존 chirp 기반 코드의 재사용
+대신 frame 위치를 먼저 찾은 뒤 `_refine_lfm_frame_sro`가 TX full reference와 비교하여 SRO와 CFO를 함께 보정한다. refinement score가 충분하면 fractional sample indexing과 CFO correction을 적용한다.
 
-`_frame_sync_and_reshape`, `_refine_lfm_frame_sro`/`_sample_fractional_symbol_indices`, `_estimate_lfm_cfr`, `_differential_delay_from_cfr`, `_compute_isac_range_profile_for_signal`는 모두 `n_chirps`/`pts_per_chirp` 기준의 일반화된 코드다. TX payload를 `n_chirps=1`, `tx_bb_matrix` shape `(1, N)`, `base_chirp`를 프레임 전체 길이의 chirp phase ramp로 구성하면, 위 함수들은 **코드 수정 없이** 그대로 동작한다. 특히 `_compute_isac_range_profile_for_signal`의 `for i in range(n_chirps)` 정합 필터 루프는 `n_chirps=1`일 때 프레임 전체에 대한 단일 matched filter로 자연스럽게 축소되는데, 이것이 곧 100% duty cycle 레이더 처리 이득이다.
+```math
+n' = n(1+\epsilon_{\text{SRO}})
+```
 
-단, `_estimate_lfm_cfr`의 chirp 간 평균(ensemble averaging)은 row가 1개이므로 사라진다 (평균 대신 단일 노이즈 있는 bin별 비율이 된다). 대신 프레임 전체 길이의 FFT를 쓰므로 주파수 분해능은 훨씬 좋아진다 — 실측 전까지는 이 trade-off가 순이익인지 아직 검증되지 않은 v1 주의사항으로 남겨둔다 (CFR bin 개수, phase-slope fit coherence를 로그로 남겨 확인할 것).
+```math
+r'[n] = r[n']\exp(-j2\pi f_{\text{CFO}}n/f_s)
+```
 
-### 9.3 PSK 심볼 복구
+---
 
-데이터는 RRC로 성형되지 않은 rectangular (zero-order-hold) 위상 스텝이므로, RRC matched filter가 존재하지 않는다. Rectangular pulse에 대한 정합 필터는 심볼 구간(`n_per_sym` 샘플)에 대한 boxcar integrate-and-dump다.
+## 5. QAM demodulation
 
-DSP 순서:
+`waveform_type == "QAM"`인 경우의 DSO demod 경로이다.
 
-1. TX reference payload 로드 (`tx_bb_matrix`, `tx_sym_matrix`, `base_chirp`, PSK preamble metadata)
-2. raw AWG waveform lock probe로 capture와 AWG record의 일치 여부 진단
-3. `_frame_sync_and_reshape` (`n_chirps=1`)로 프레임 동기화 + SRO/CFO refine
-4. Dechirp: $y[n] = r[n] \cdot c^*_{\mathrm{chirp}}[n]$
-5. Boxcar integrate-and-dump로 심볼률 심볼 스트림 복구
-6. 프레임 앞부분의 알려진 PSK preamble(Zadoff-Chu 위상을 가장 가까운 PSK 성상점에 매핑해 생성)로 잔차 위상/CFO를 1차 선형 피팅으로 추정 및 보정
-7. SC-FDE 및 phase/IQ 후보 equalization (`sc_fde_equalizer`, `_equalize_reference_candidates` — 기존 코드 그대로 재사용, 심볼 스트림 형태에 특정 pulse shape을 가정하지 않으므로 변경 불필요)
-8. EVM 및 BER 계산
+### 5.1 blind CFO estimate
 
-새로 추가된 함수는 `DsoPanel._recover_lfm_qam_symbols_integrate_and_dump()` 하나뿐이다. 이전 TDM 구조 전용이던 pilot-chirp 채널추정/Gardner 코드(`_recover_chirp_symbols`, `_smooth_complex_gain`)는 더 이상 쓰이지 않아 삭제했다.
+QAM rotational symmetry를 이용한 M-th power CFO estimate를 먼저 수행한다.
 
-### 9.4 v1 범위
+```math
+z[n] = r[n]^M
+```
 
-- PSK order: BPSK/QPSK/8PSK 지원 (`dsp_functions.py`에 Gray-coded 8PSK 매핑 추가).
-- Range/Doppler: 1D range profile은 기존 코드로 그대로 계산됨. Range-Doppler map(2D)은 아직 구현하지 않음 (OFDM-ZC 쪽에서 필요해질 때 같이 검토).
-- 검증 순서: 시뮬레이션 loopback → 실측 DSO capture (frame_start 반복 안정성, CFR coherence, PSLR, range 정확도 확인) 순으로 진행한다.
+M-th power spectrum peak로 coarse CFO를 추정한다. quality가 충분할 때만 보정한다.
 
-## 10. Range / Detection DSP
+### 5.2 RRC matched filtering
 
-Range path는 수신 frame과 알려진 TX waveform 사이의 matched filtering을 사용한다.
+TX payload에 저장된 `qam_rrc_taps`로 matched filtering을 수행한다.
 
-Per-chirp correlation:
+```math
+y[n] = r[n] * h_{\text{RRC}}[n]
+```
 
-$$
-R_i[\ell] = \sum_n r_i[n]s_i^*[n-\ell]
-$$
+### 5.3 preamble timing search
 
-평균 range profile:
+각 sample phase에 대해 symbol-rate stream을 만들고, known ZC preamble과 correlation한다.
 
-$$
-R[\ell] =
-\frac{1}{N_{\mathrm{chirp}}}
-\sum_i |R_i[\ell]|
-$$
+```math
+C_p[k] =
+{\left|\sum_m y[k+m]p^*[m]\right|
+\over
+\sqrt{\sum_m |p[m]|^2 \sum_m |y[k+m]|^2}}
+```
 
-Range axis는 `Range Mode`에 따라 다음 중 하나를 사용한다.
+최대 correlation이 preamble 위치와 sample phase를 결정한다.
 
-One-way:
+### 5.4 frame candidate 및 timing recovery
 
-$$
-R = c\tau
-$$
+반복 preamble이 있는 경우 각 preamble peak가 어느 row인지 알 수 없으므로 가능한 frame start 후보를 만든다. 후보마다 다음을 평가한다.
 
-Monostatic:
+- direct symbol slicing
+- Gardner timing recovery gain 후보: `0`, `0.0015`, `0.004`, `0.008`
+- preamble lock score
+- data lock score
 
-$$
-R = \frac{c\tau}{2}
-$$
+timing score가 약한 경우 `_refine_qam_frame_cfo_sro`로 CFO/SRO/frame start를 다시 refine한다.
 
-`Set Range Zero` 전에는 frame-sync peak 기준 relative range로 표시한다. `Set Range Zero` 후에는 저장된 matched-filter peak delay를 빼고 표시한다.
+### 5.5 fallback
 
-## 11. Differential CFR Phase-Slope Estimator
+reference lock이 충분하지 않으면 다음 fallback을 시도한다.
 
-`Set Range Zero`에서 기준 CFR을 저장한다.
+- PRBS stream fallback
+- blind QAM filter/symbol search
+- conjugate/rotation/IQ correction candidate
 
-$$
-H_0(f) =
-\frac{Y_0(f)X^*(f)}{|X(f)|^2}
-$$
+---
 
-이후 capture에서
+## 6. DFT-s-OFDM demodulation
 
-$$
-\frac{H_1(f)}{H_0(f)}
-\approx A(f)e^{-j2\pi f\Delta\tau}
-$$
+`waveform_type == "DFT-s-OFDM"`인 경우 `_recover_dfts_ofdm_symbols`가 block별로 symbol을 복원한다.
 
-이므로 phase slope에서 delay 변화를 추정한다.
+### 6.1 payload reference
 
-$$
-\Delta\tau =
--\frac{1}{2\pi}
-\frac{d}{df}
-\angle\left(\frac{H_1(f)}{H_0(f)}\right)
-$$
+필수 metadata는 다음이다.
 
-거리 변화는 `Range Mode`에 따라
+- `dft_n_fft`
+- `dft_n_data`
+- `dft_active_bins`
+- `dft_zc_pilot`
+- `dft_data_scale`
+- `amplitude_ratio_rho`
+- `tx_sym_matrix`
 
-$$
+pilot/data 결합은 다음 power split을 따른다.
+
+```math
+x[n] = \sqrt{\rho}\,p[n] + \sqrt{1-\rho}\,d[n]
+```
+
+### 6.2 block-wise pilot CFO search
+
+각 DFT-s-OFDM block에서 pilot lock을 최대화하도록 CFO grid를 탐색한다.
+
+```math
+\hat f_{\text{CFO}}
+= \arg\max_f
+{\left|\langle \sqrt{\rho}p[n], y[n]e^{-j2\pi fn/f_s}\rangle\right|
+\over
+\sqrt{E_pE_y}}
+```
+
+grid 범위는 symbol rate 기반으로 제한되며 대략 `±1 MHz`에서 `±12 MHz` 범위 안에 들어간다.
+
+### 6.3 pilot 기반 channel estimate
+
+active subcarrier에서 pilot 성분을 이용해 channel을 추정한다.
+
+```math
+H_{\text{pilot}}[k]
+= {Y[k] \over \sqrt{\rho}P[k]}
+```
+
+필요하면 scalar pilot channel, smoothed vector channel, reference-aided update, decision-directed update를 평가한다.
+
+### 6.4 data symbol recovery
+
+channel equalization 후 pilot active component를 제거하고 DFT-spread symbol을 inverse DFT로 복원한다.
+
+```math
+\hat D_{\text{active}}[k]
+= {1 \over \sqrt{1-\rho}}
+\left(
+{Y[k] \over \hat H[k]}
+- \sqrt{\rho}P[k]
+\right)
+```
+
+```math
+\hat a[m]
+= \text{IDFT}\{\hat D_{\text{active}}[k]\}
+```
+
+### 6.5 sideband/conjugate retry
+
+복조 lock이 약할 때 다음 후보를 비교한다.
+
+- default
+- default + conjugate
+- LPF off
+- opposite sideband
+- opposite sideband + conjugate
+
+후보 score는 payload lock, pilot lock, min pilot lock, block 수를 조합하여 선택한다.
+
+---
+
+## 7. LFM-QAM demodulation
+
+`waveform_type == "LFM-QAM"`은 chirp와 communication symbol이 같은 frame을 공유한다.
+
+### 7.1 frame sync
+
+공통 `_frame_sync_and_reshape`로 TX chirp reference에 lock한다.
+
+### 7.2 dechirp
+
+수신 frame과 base chirp conjugate를 곱한다.
+
+```math
+z[n] = r[n]c_{\text{chirp}}^*[n]
+```
+
+### 7.3 integrate-and-dump
+
+symbol interval마다 평균을 내어 QAM symbol을 얻는다.
+
+```math
+\hat a[m]
+= {1 \over N_s}
+\sum_{n=mN_s}^{(m+1)N_s-1} z[n]
+```
+
+### 7.4 preamble 기반 phase/CFO 보정
+
+preamble 구간에서 common phase와 residual phase slope를 추정한다.
+
+```math
+e[m] = \hat a[m]a_{\text{ref}}^*[m]
+```
+
+```math
+\angle e[m] \approx \phi_0 + \alpha m
+```
+
+이를 전체 symbol stream에 보정한다.
+
+---
+
+## 8. Symbol correction 및 Post-EQ
+
+복원된 symbol은 `_equalize_reference_candidates`에서 reference symbol과 비교되며, 여러 후보 중 EVM이 가장 낮은 경로를 선택한다.
+
+### 8.1 alignment
+
+먼저 reference와 estimated symbols 사이 lag를 작은 범위에서 정렬한다.
+
+```math
+\ell^* = \arg\max_\ell
+{\left|\langle \hat a[n+\ell], a_{\text{ref}}[n]\rangle\right|
+\over
+\sqrt{E_{\hat a}E_a}}
+```
+
+### 8.2 phase correction
+
+training/reference 구간에서 linear phase를 fitting한다.
+
+```math
+\angle(\hat a[n]a_{\text{ref}}^*[n])
+\approx \alpha n + \phi
+```
+
+```math
+\hat a[n] \leftarrow \hat a[n]e^{-j(\alpha n+\phi)}
+```
+
+### 8.3 widely-linear IQ correction
+
+QAM 계열에서는 IQ imbalance 보정을 위해 다음 LS fit을 적용할 수 있다.
+
+```math
+a_{\text{ref}}[n]
+\approx
+c_1\hat a[n] + c_2\hat a^*[n] + c_0
+```
+
+PSK 계열(BPSK/QPSK/8PSK)은 widely-linear correction을 제한한다.
+
+### 8.4 Post-EQ, FDE taps = 1
+
+현재 DSO demod의 Post-EQ 탭 수는 `1`이다. `sc_fde_equalizer`에서 `num_taps <= 1`이면 다음 one-tap LS gain만 계산한다.
+
+```math
+g
+= {\langle \hat a, a_{\text{ref}}\rangle
+\over
+\langle \hat a, \hat a\rangle}
+```
+
+```math
+\hat a_{\text{eq}}[n] = g\hat a[n]
+```
+
+따라서 현재 설정은 frequency-selective multipath를 길게 equalize하는 multi-tap FDE가 아니다. 실제 의미는 residual complex gain/phase를 reference-aided로 맞추는 one-tap post correction이다.
+
+### 8.5 EVM 및 BER
+
+최종 선택된 candidate에 대해 EVM은 다음과 같이 계산한다.
+
+```math
+EVM_{\text{rms}}
+=
+\sqrt{
+{\mathbb{E}|\hat a[n]-a_{\text{ref}}[n]|^2
+\over
+\mathbb{E}|a_{\text{ref}}[n]|^2}
+}
+```
+
+```math
+EVM_{dB} = 20\log_{10}(EVM_{\text{rms}})
+```
+
+BER은 hard decision bits와 reference bits를 비교해 계산한다.
+
+---
+
+## 9. Channel estimation, CFR
+
+Channel response는 `_compute_channel_response_for_signal`과 `_estimate_lfm_cfr`에서 계산된다.
+
+### 9.1 reference 선택
+
+- DFT-s-OFDM: pilot matrix 사용
+- 그 외: full TX baseband matrix 사용
+
+DFT-s-OFDM range/CFR에서 full data waveform이 아니라 pilot reference를 쓰는 이유는 data symbol의 modulation 성분이 channel 추정에 섞이지 않게 하기 위함이다.
+
+### 9.2 frequency-domain CFR estimate
+
+RX/TX matrix row에 Hann window를 적용하고 FFT한다.
+
+```math
+Y_i(f) = \mathcal{F}\{w[n]r_i[n]\}
+```
+
+```math
+X_i(f) = \mathcal{F}\{w[n]x_i[n]\}
+```
+
+여러 row/chirp를 합산한 LS channel은 다음이다.
+
+```math
+\hat H(f)
+=
+{\sum_i Y_i(f)X_i^*(f)
+\over
+\sum_i |X_i(f)|^2 + \epsilon}
+```
+
+TX spectral power가 충분한 frequency bin만 사용하며, frequency axis는 baseband offset을 RF display axis로 변환한다.
+
+```math
+f_{\text{RF}} = f_c + f_{\text{BB}}
+```
+
+### 9.3 CFR magnitude normalization
+
+in-band median magnitude를 기준으로 normalization한다.
+
+```math
+|H|_{dB}
+= 20\log_{10}
+{|H(f)| \over \text{median}_{f\in band}|H(f)|}
+```
+
+ripple은 in-band magnitude의 95 percentile과 5 percentile 차이로 표시한다.
+
+```math
+Ripple_{dB}
+= P_{95}(|H|_{dB}) - P_{5}(|H|_{dB})
+```
+
+### 9.4 group delay
+
+in-band phase를 unwrap한 뒤 weighted line fitting을 수행한다.
+
+```math
+\angle H(f) \approx -2\pi f\tau_g + \phi_0
+```
+
+```math
+\tau_g = -{1 \over 2\pi}{d\angle H(f)\over df}
+```
+
+range 환산은 row mode에 따라 다르다.
+
+```math
+R =
+\begin{cases}
+c\tau_g, & \text{one-way LOS} \\
+{c\tau_g \over 2}, & \text{monostatic radar}
+\end{cases}
+```
+
+---
+
+## 10. Range detection
+
+Range profile은 `_compute_isac_range_profile_for_signal`에서 matched filtering으로 계산된다.
+
+### 10.1 reference 선택
+
+CFR과 동일하게 reference를 선택한다.
+
+- DFT-s-OFDM: repeated pilot matrix
+- QAM/LFM-QAM: TX baseband matrix
+
+### 10.2 matched filter profile
+
+각 row/chirp마다 full correlation을 계산하고 평균한다.
+
+```math
+P_i[\ell]
+=
+\left|
+\sum_n R_i[n]X_i^*[n-\ell]
+\right|
+```
+
+```math
+P[\ell] = {1\over N}\sum_i P_i[\ell]
+```
+
+lag axis는 다음과 같다.
+
+```math
+\ell \in [-(N_{\text{ref}}-1),\; N_{\text{frame}}-1]
+```
+
+range axis는 absolute mode에서 다음과 같다.
+
+```math
+R[\ell] = {\ell \over f_s}\cdot S_R
+```
+
+여기서 `S_R`은 one-way row에서는 `c`, monostatic row에서는 `c/2`이다.
+
+### 10.3 peak selection
+
+기본 peak는 matched-filter profile의 최대값이다. 다만 row/mode별 예외가 있다.
+
+- one-way row: peak가 negative range에 있으면 positive range에서 가장 강한 peak를 선택한다.
+- monostatic row: zero 근처 self-interference peak를 먼저 식별하고, guard 밖의 target peak를 선택한다.
+
+monostatic zero guard는 최소 `0.05 m`, 또는 range resolution의 2배 정도로 설정된다.
+
+### 10.4 peak refinement
+
+선택된 peak 주변에서 centroid refinement를 수행한다.
+
+```math
+\hat R
+=
+{\sum_{k\in \Omega} R_k w_k
+\over
+\sum_{k\in \Omega} w_k}
+```
+
+가중치는 local floor를 뺀 matched-filter magnitude를 사용한다.
+
+### 10.5 range resolution
+
+분석 대역폭 기준 range resolution은 다음이다.
+
+```math
+\Delta R =
+{S_R \over B_{\text{ana}}}
+```
+
+따라서 one-way와 monostatic은 같은 bandwidth에서도 resolution scale이 다르다.
+
+### 10.6 PSLR
+
+PSLR은 main peak 주변 guard bin을 제외한 sidelobe 최대값과 비교한다.
+
+```math
+PSLR_{dB}
+= 20\log_{10}
+{P_{\text{peak}} \over P_{\text{sidelobe,max}}}
+```
+
+---
+
+## 11. Zero reference 및 differential ranging
+
+`Store Zero Ref`는 현재 capture를 기준 상태로 저장한다. 저장되는 값은 channel별이다.
+
+```text
+lfm_range_zero_by_ch[ch] = {
+  delay_s,
+  frame_start,
+  peak_lag,
+  frame_period_s,
+  profile,
+  cfr,
+  abs_range_m,
+  range_mode,
+  range_resolution_m,
+  fs
+}
+```
+
+중요한 점은 zero reference를 저장해도 이후 range plot의 x-axis는 relative로 이동하지 않는다는 것이다. 현재 구현은 absolute range axis를 유지하고, 저장된 reference profile을 overlay하며, displacement는 별도 metric으로 계산한다.
+
+---
+
+## 12. Peak-based differential range
+
+저장된 zero reference가 있으면 current peak와 reference peak를 비교해 displacement를 계산할 수 있다.
+
+```math
+\Delta R_{\text{peak}}
+= R_{\text{current peak}} - R_{\text{reference peak}}
+```
+
+다만 repeated frame에서는 frame sync가 이웃 frame에 lock될 수 있으므로 absolute record index보다 frame 내부 `peak_lag` 기준 비교가 더 안정적이다. 현재 zero reference 저장 시 `peak_lag`를 함께 저장하는 이유가 이것이다.
+
+---
+
+## 13. CFR phase-slope 기반 differential range
+
+CFR 기반 differential range는 matched-filter peak 위치보다 더 미세한 displacement 추정에 사용된다.
+
+### 13.1 CFR ratio
+
+current CFR과 zero-reference CFR의 ratio를 만든다.
+
+```math
+G(f)
+=
+{\hat H_{\text{cur}}(f)
+\over
+\hat H_{\text{ref}}(f)}
+```
+
+### 13.2 differential phase slope
+
+ratio phase를 unwrap하고 weighted line fitting을 수행한다.
+
+```math
+\angle G(f)
+\approx -2\pi f\Delta\tau + \phi_0
+```
+
+```math
+\Delta\tau
+=
+-{1\over 2\pi}
+{d\angle G(f)\over df}
+```
+
+### 13.3 reliability weighting
+
+fit weight는 TX spectral weight와 current/reference CFR amplitude reliability를 함께 반영한다.
+
+```math
+w(f)
+\propto
+w_{\text{TX}}(f)
+\min(|H_{\text{cur}}(f)|,\; |H_{\text{ref}}(f)|)
+```
+
+너무 낮은 weight bin은 제거하고, MAD 기반 residual rejection 후 다시 fitting한다.
+
+### 13.4 coherence
+
+phase-slope fit 이후 residual coherence를 계산한다.
+
+```math
+\eta
+=
+\left|
+{\sum_f w(f)
+{G(f)\over |G(f)|}
+e^{-j(\hat a f+\hat b)}
+\over
+\sum_f w(f)}
+\right|
+```
+
+coherence가 높을수록 differential CFR 결과를 신뢰할 수 있다.
+
+현재 range display에서는 CFR differential coherence가 약 `0.20` 이상이면 표시용 relative range에 활용하고, `range_diff_mm` metric은 coherence가 더 높은 경우, 약 `0.35` 이상일 때 CFR 기반 값을 우선 사용한다. 그렇지 않으면 peak-reference 기반 displacement를 사용한다.
+
+### 13.5 range conversion
+
+```math
 \Delta R =
 \begin{cases}
 c\Delta\tau, & \text{one-way LOS} \\
-\frac{c\Delta\tau}{2}, & \text{monostatic radar}
+{c\Delta\tau \over 2}, & \text{monostatic radar}
 \end{cases}
-$$
-
-로 계산한다.
-
-GUI 로그 예시는 다음 형태이다.
-
-```text
-[ISAC] differential CFR: dTau=... ps  dR=... mm  coherence=...  mode=...
 ```
 
-`coherence`는 differential CFR phase consistency를 나타내는 진단 지표이다. 1에 가까울수록 phase slope 추정이 안정적이다.
+---
 
-## 12. 실험 시 주의사항
+## 14. 현재 DSO DSP metric 요약
 
-- AWG CH2 -> DSO CH3 trigger는 time origin을 안정화하지만, 모든 delay uncertainty를 제거하지는 않는다.
-- Differential ranging은 trigger cable, connector, DSO trigger setting, AWG output path가 기준 capture와 target capture 사이에서 변하지 않는다고 가정한다.
-- 절대 거리 측정에는 여전히 reference calibration이 필요하다.
-- Range resolution 주장은 bandwidth-limited formula를 기준으로 해야 한다.
-- Sub-mm 결과를 주장할 때는 CFR phase slope 또는 carrier phase 기반 displacement tracking으로 표현하고, SNR, coherence, 반복 측정 표준편차, stage ground truth를 함께 제시해야 한다.
+DSO 측정/복조/range 탭에서 의미 있는 metric은 다음과 같다.
 
-## 13. Full-Duplex DSO Display Plan
+| Metric | 계산 의미 |
+|---|---|
+| Noise Density | Welch PSD 기반 out-of-band median 또는 stored reference, dBm/Hz |
+| Noise Power | `Noise Density`를 analysis bandwidth로 적분한 값, dBm |
+| Band Power | in-band PSD 적분값에서 noise power를 뺀 값, dBm |
+| Band SNR | `Band Power / Noise Power`, dB |
+| EVM | reference symbol 대비 RMS error |
+| BER | hard decision bit와 TX reference bit 비교 |
+| Pilot Lock | DFT-s-OFDM pilot correlation quality |
+| Payload Lock | recovered symbols와 reference payload의 lock score |
+| CFR Ripple | in-band normalized CFR magnitude의 95%-5% spread |
+| Group Range | CFR phase slope로 추정한 absolute group delay range |
+| Range Peak | matched-filter peak 기반 range |
+| PSLR | main peak 대비 최대 sidelobe |
+| Range Diff | zero reference 대비 displacement, peak 또는 CFR 기반 |
+| CFR Coherence | differential CFR phase-slope fit 신뢰도 |
 
-Full-duplex 시연에서는 DSO CH1과 CH2를 동시에 capture하고, 같은 trigger 기준에서 두 채널을 나란히 비교한다.
+---
 
-GUI dashboard는 2 x 4 layout을 사용한다.
+## 15. 현재 구현상 해석 주의점
 
-| Row | Col 1 | Col 2 | Col 3 | Col 4 |
-|---|---|---|---|---|
-| Selected channel 1 | Time scope | Spectrum | Demod / constellation / status | Range profile |
-| Selected channel 2 | Time scope | Spectrum | Demod / constellation / status | Range profile |
+1. Spectrum의 noise floor `dBm/Hz`는 noise density이다. Noise power는 이 값을 bandwidth에 대해 적분해야 하므로 dBm 값이 달라진다.
 
-동작 방식:
+2. DFT-s-OFDM은 RRC roll-off bandwidth를 쓰지 않는다. noise power, spectrum highlight, demod LPF는 active-bin occupied bandwidth를 기준으로 해석해야 한다.
 
-- DSO channel checkbox에서 CH1, CH2를 모두 선택하면 두 row가 모두 채워진다.
-- 하나만 선택하면 나머지 row는 빈 창으로 남긴다.
-- 세 개 이상 선택하면 capture는 가능하지만 dashboard는 앞의 두 채널만 표시한다.
-- Spectrum은 full-duplex 화면에서는 0-25 GHz 범위로 제한해서 보여준다.
-- Demodulate는 현재 선택된 첫 번째 채널을 대상으로 실행한다. Range 버튼은 표시 중인 최대 두 채널에 대해 같은 TX reference로 range profile을 계산해 각 row에 표시한다.
+3. Post-EQ taps가 `1`이면 multi-tap equalizer가 아니다. 현재 DSO demod에서 `FDE taps = 1`은 complex scalar LS 보정이다.
 
-Correlation plot은 기본 화면에 항상 띄울 필요가 없다. Frame sync correlation은 디버깅에는 유용하지만, full-duplex 시연 화면에서는 time/spectrum/demod/range를 가리는 부작용이 크다. 따라서 기본값은 숨김이며, 필요할 때만 `Show sync correlation` 옵션으로 표시한다.
+4. DFT-s-OFDM range/CFR은 data payload 전체가 아니라 pilot reference를 사용한다. 이는 data modulation이 range/CFR 추정에 섞이는 것을 줄이기 위한 구현이다.
 
-Shared-waveform LFM-QAM도 (`n_chirps=1`인 채로) `n_chirps`/`tx_bb_matrix`/`base_chirp` 스키마를 동일하게 채우므로 (§9.2 참고), 이 2×4 대시보드와 `_apply_range_xlim`은 코드 변경 없이 그대로 동작한다.
+5. LFM-QAM range는 chirp matched filtering과 dechirp-demod가 같은 frame reference를 공유한다.
 
-## 14. Trigger / Clock Lock 판단 기준
+6. Zero reference는 range axis를 shift하지 않는다. absolute range plot을 유지하면서 saved reference profile을 overlay하고, displacement는 `range_diff_mm` 및 differential CFR metric으로 따로 보고한다.
 
-Trigger와 clock이 제대로 잡혔는지는 correlation 그림 하나보다 다음 수치들이 더 중요하다.
+7. CFR differential range는 phase unwrap, weighted fitting, coherence threshold에 의존한다. bandwidth가 좁거나 CFR SNR이 낮으면 peak-based range가 더 안정적일 수 있다.
 
-### 14.1 Frame Start 안정성
-
-동일 조건에서 반복 capture했을 때 `frame_start`가 거의 같은 위치에 있어야 한다.
-
-- 안정적: 반복 capture 간 변화가 수 sample에서 수십 sample 이하
-- 의심: 같은 setup에서 `frame_start`가 큰 폭으로 jumping
-
-### 14.2 Sync Score
-
-LFM-QAM frame sync 및 SRO refine 로그의 score를 본다.
-
-```text
-[Sync] LFM-QAM SRO refine: start=... sro=... ppm cfo=... kHz score=...
-```
-
-권장 해석:
-
-- `score > 0.8`: 매우 양호
-- `0.35 < score < 0.8`: 동작은 가능하지만 capture/trigger 상태 확인 필요
-- `score < 0.35`: frame lock 신뢰도 낮음
-
-### 14.3 SRO 및 CFO 안정성
-
-공유 reference clock이 없으면 AWG와 DSO 사이에 sample-rate offset이 생길 수 있다. 현재 DSP는 이를 추정하고 보정한다.
-
-확인할 항목:
-
-- `sro`가 반복 capture에서 일정한지
-- `cfo`가 작고 안정적인지
-- 값 자체보다 run-to-run drift가 큰지 여부가 중요하다
-
-### 14.4 Differential CFR Coherence
-
-`Set Range Zero` 이후 target capture에서 다음 로그를 확인한다.
-
-```text
-[ISAC] differential CFR: dTau=... ps dR=... mm coherence=...
-```
-
-해석:
-
-- `coherence`가 1에 가까울수록 `H1(f)/H0(f)` phase slope가 안정적이다.
-- 낮은 coherence는 trigger instability, path 변화, SNR 부족, multipath 변화, 또는 clock drift를 의심해야 한다.
-
-### 14.5 CH1/CH2 상대 delay drift
-
-Full-duplex 시연에서는 CH1과 CH2의 frame_start 또는 peak delay 차이가 반복 capture에서 안정적인지 확인한다. 절대 delay는 calibration 전에는 의미가 작지만, CH1-CH2 상대 delay가 안정적이면 trigger 기준과 DSO capture timing이 잘 유지되고 있다는 강한 근거가 된다.
-
-## 15. 관련 코드
-
-- `code/isac_unified_gui.py`: GUI, DSO capture, demodulation, LFM-QAM range/DSP
-- `code/functions/dso_functions.py`: DSO controller 및 waveform capture
-- `code/functions/awg_functions.py`: AWG M8194A download/run/stop SCPI
-- `code/functions/dsp_functions.py`: PRBS/QAM mapping, symbol alignment, SC-FDE, SIC helper
-
-## 16. 관련 Concepts
-
-- [[00_system_architecture]]
-- [[01_tx_signal_generation]]
-- [[02_rx_demodulation]]
-- [[03_omt_simulation]]
+8. Monostatic row는 self-interference/near-zero peak가 강할 수 있으므로 guard 밖 target peak 선택 로직을 적용한다.
