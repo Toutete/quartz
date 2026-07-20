@@ -161,6 +161,21 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
         else []
     )
     pslr = np.asarray(loaded["range_summary_pslr_db"]).reshape(-1) if "range_summary_pslr_db" in loaded.files else []
+    snr_post = (
+        np.asarray(loaded["range_summary_snr_rad_post_db"]).reshape(-1)
+        if "range_summary_snr_rad_post_db" in loaded.files
+        else []
+    )
+    proc_gain = (
+        np.asarray(loaded["range_summary_processing_gain_db"]).reshape(-1)
+        if "range_summary_processing_gain_db" in loaded.files
+        else []
+    )
+    snr_pg_corrected = (
+        np.asarray(loaded["range_summary_snr_rad_pg_corrected_db"]).reshape(-1)
+        if "range_summary_snr_rad_pg_corrected_db" in loaded.files
+        else []
+    )
     diff_mm = (
         np.asarray(loaded["range_summary_diff_range_mm"]).reshape(-1)
         if "range_summary_diff_range_mm" in loaded.files
@@ -187,6 +202,12 @@ def collect_range_results(loaded: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
             item["est_range_raw"] = unpack(mf_peaks[i])
         if i < len(pslr):
             item["pslr_db"] = unpack(pslr[i])
+        if i < len(snr_post):
+            item["range_profile_snr_db"] = unpack(snr_post[i])
+        if i < len(proc_gain):
+            item["processing_gain_db"] = unpack(proc_gain[i])
+        if i < len(snr_pg_corrected):
+            item["pg_corrected_snr_db"] = unpack(snr_pg_corrected[i])
         if i < len(diff_mm):
             item["range_diff_mm"] = unpack(diff_mm[i])
         if i < len(coh):

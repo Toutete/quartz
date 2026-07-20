@@ -26,6 +26,19 @@ capture로 어디까지 검증할 수 있는지 정리한다.
 >   따라서 저속 floor는 제거 가능한 ZC channel-estimation bias가 주원인은 아니다.
 > - 현재 저장 EVM pipeline은 이미 full-reference/ref-FDE 후보를 사용한다. 순수 ZC-pilot-only
 >   receiver의 EVM으로 해석하면 안 된다.
+> - `isac_gui.py`의 component-level 물리 시뮬레이션(`run_isac_sim`)이 4~20 GBaud 측정 EVM을
+>   0.1~0.3 dB 이내로, 2 GBaud도 약 1 dB 이내로 재현한다. **저속 구간은 LNA/IF-amp 열잡음과
+>   ZBD NEP가 지배**하고(둘이 합쳐 모든 symbol rate에서 거의 일정하게 ~4 dB 기여), **고속
+>   구간의 추가 열화는 MZM 3차 광비선형성(=SSBI의 물리적 대응) 때문**이다 — 이 항만 켜둔
+>   "electronic-noise-free bound"가 2 GBaud −31.8 dB에서 20 GBaud −21.1 dB로 단조 열화한다.
+> - AWG DAC 양자화를 이상적인 균일 quantizer로 모델에 추가하고 ENOB을 4~8 bit로 스윕했지만,
+>   2 GBaud만 선택적으로 열화시키지 않았다(오히려 20 GBaud가 약간 더 민감했다). 따라서
+>   AWG PAPR 기반 DAC 가설은 이 형태로는 **기각**된다. 자세한 내용은 6절 참고.
+> - EVM vs photocurrent(4.5~7 mA, 15/16 GBaud)는 `log10(Iph)` 대비 −20~−22 dB/decade로 깨끗하게
+>   선형이다(R²=0.95~0.996) — quadratic UTC-PD photomixing 하 AWGN 이론(−20 dB/decade)과 거의
+>   일치한다. 다만 ZBD square-law 물리 시뮬레이션은 더 가파른 −28 dB/decade를 예측해, 실측이
+>   이보다 완만한 것은 photocurrent와 무관한 고정 floor의 존재를 정성적으로 다시 지지한다.
+>   절대 기울기 보정치로는 여전히 미확정(current-capture 비동기화, 4.5절).
 
 ---
 
@@ -501,26 +514,58 @@ Y_{m,k}=H_kX_{m,k}+G_kQ_{m,k}+N_{m,k},
 따라서 현재 estimator 결과는 **identifiable lower bound/진단값**일 뿐, 논문에서 SSBI 절대
 power로 사용하면 안 된다. 0.7절의 capture 보강 또는 carrier-off/CSPR 대조 측정이 필요하다.
 
-### 4.5 Photocurrent sweep — current drift로 인해 정량 근거에서 제외
+### 4.5 Photocurrent sweep — current drift로 인해 절대 보정 근거에서는 제외, 그러나 추세는 물리적으로 유의미
 
-15 GBaud, 32QAM 실측:
+16QAM 15 GBaud, 32QAM 16 GBaud 실측 (32QAM 행은 과거 버전에서 "15 GBaud"로 잘못 표기되어
+있었다 — 원본 스프레드시트 헤더 기준 16 GBaud로 정정):
 
-| 기록된 `Iph` label (mA, 미검증) | EVM (dB) |
-| ------------------------------: | -------: |
-|                             4.5 |   −13.48 |
-|                             5.0 |   −13.68 |
-|                             5.5 |   −14.53 |
-|                             6.0 |   −15.39 |
-|                             6.5 |   −16.57 |
-|                             7.0 |   −17.49 |
+| 기록된 `Iph` label (mA, 미검증) | 16QAM EVM (dB) | 32QAM EVM (dB) |
+| ------------------------------: | -------------: | -------------: |
+|                             4.5 |         −13.78 |         −13.48 |
+|                             5.0 |         −14.45 |         −13.68 |
+|                             5.5 |         −15.55 |         −14.53 |
+|                             6.0 |         −16.22 |         −15.39 |
+|                             6.5 |         −16.90 |         −16.57 |
+|                             7.0 |         −17.59 |         −17.49 |
 
-위 표의 photocurrent는 capture 시점에 동기화된 값이 아니며 실제 current가 시간에 따라
-느리게 변했다. 따라서 기존에 계산한 4.5→5 mA 구간의 log-log 기울기 −0.22를 포함해 모든
-`EVM vs photocurrent` 기울기는 **무효/보류**한다. 이 데이터는 시간 순서에 따른 EVM 변화만
-보여줄 뿐, photocurrent 의존성이나 SSBI scaling을 증명하지 못한다.
+위 표의 photocurrent는 capture 시점에 동기화된 값이 아니며 실제 current가 시간에 따라 느리게
+변했다. 따라서 **절대 기울기를 정량 보정치로 사용하는 것은 여전히 보류**한다 — capture 순서에
+따른 다른 drift(온도, 정렬 등)가 우연히 같은 방향으로 겹쳤을 가능성을 배제할 수 없다. 다만 아래
+분석은 이 데이터가 순수 노이즈가 아니라 **물리적으로 그럴듯한 추세**를 담고 있다는 근거를
+제공하므로, 재측정의 우선순위를 정하는 데는 참고할 수 있다.
+
+**EVM(dB) vs `log10(Iph)` 선형 fit** ([plot_evm_photocurrent_figure.py](../code/plot_evm_photocurrent_figure.py)):
+
+| 계열 | Fit 기울기 [dB/decade] | R² |
+| --- | ---: | ---: |
+| 16QAM @ 15 GBaud | −20.2 | 0.996 |
+| 32QAM @ 16 GBaud | −21.8 | 0.947 |
+
+UTC-PD photomixing은 `calc_utcpd_output_dbm`에서 `P_THz ∝ Iph²` (quadratic law)이므로, 시스템이
+순수 열잡음(AWGN)-limited라면 이론적으로 −20 dB/decade가 나와야 한다. 측정 기울기(−20.2,
+−21.8 dB/decade)는 이 예측과 거의 정확히 일치하며, R²가 0.95~0.996으로 매우 높아 6개 점이
+우연이 아니라 뚜렷한 단조 관계를 따른다.
+
+`isac_gui.run_isac_sim`으로 같은 조건(rx_mode=ZBD, 동일 파라미터 프리셋)에서 photocurrent만
+스윕하면:
+
+| 계열 | Sim EVM @ 4.5 mA | Sim EVM @ 7.0 mA | Sim fit 기울기 |
+| --- | ---: | ---: | ---: |
+| 16QAM @ 15 GBaud | −12.08 dB | −17.50 dB | −28.3 dB/decade |
+| 32QAM @ 16 GBaud | −11.76 dB | −17.15 dB | −28.1 dB/decade |
+
+7 mA 지점은 측정과 0.1~0.3 dB 이내로 맞지만(6.1절 baseline 재현도와 일관), **시뮬레이션의
+기울기(약 −28 dB/decade)가 측정 기울기(약 −20~−22 dB/decade)보다 뚜렷이 가파르다.** ZBD는
+square-law(envelope) detector라서 순수 선형-detection AWGN 이론(−20 dB/decade)보다 가파른
+반응이 예상되는데, 실측은 오히려 더 완만하다. 이는 6.4절에서 확인한 것과 같은 방향의
+현상이다 — **photocurrent에 무관한 고정 floor(0.3~0.4절에서 분리하려는 AWG/DSO/link
+residual)가 존재하면, photocurrent를 올려도 그 floor 밑으로는 개선이 안 되므로 실측 곡선이
+이상적인 square-law 예측보다 완만해진다.** 즉 이 기울기 차이 자체가 "저속·중간 symbol rate
+floor"가 실재한다는 독립적인 정성적 증거로 볼 수 있다.
 
 재측정은 0.2절의 동시 current logging과 안정도 조건을 만족하고, 0.7절의 interleaved power
-sequence를 사용한 경우에만 정량 근거로 채택한다.
+sequence를 사용한 경우에만 절대 보정 근거로 채택한다. 다만 위 fit이 이미 상당히 깨끗하므로,
+동기화된 재측정에서도 비슷한 기울기가 재현될 가능성이 높다.
 
 ---
 
@@ -552,9 +597,133 @@ Photocurrent-dependent scaling은 current trace가 capture와 동기화된 재�
 
 ---
 
+## 6. `isac_gui.py` 물리 시뮬레이션 기반 교차검증
+
+측정과 별개로 `isac_gui.py`의 component-level 시뮬레이션(`run_isac_sim`)이 저장된 GUI 파라미터
+프리셋([isac_sim_params_20260715_145824.json](../code/data/isac_sim_params_20260715_145824.json),
+16QAM/32QAM DFT-s-OFDM, ZBD 수신, free-running coherence)으로 실제 측정 EVM을 얼마나 재현하는지
+확인했다. One-way comm 경로만 사용하므로 radar self-interference/RCS 등 복잡한 항은 관여하지
+않는다.
+
+### 6.1 Baseline 재현도
+
+시드 4개 평균(block 수는 실측과 동일하게 baud당 5~17개):
+
+| GBaud | 측정 (16QAM) | Sim baseline | 측정 (32QAM) | Sim baseline |
+| ----: | -----------: | -----------: | -----------: | -----------: |
+|     2 |       −25.22 |       −26.24 |       −25.16 |       −26.31 |
+|     4 |       −23.22 |       −23.47 |       −23.37 |       −23.50 |
+|     8 |       −20.68 |       −20.45 |       −19.76 |       −20.43 |
+|    10 |       −19.66 |       −19.44 |       −19.80 |       −19.42 |
+|    12 |       −18.49 |       −18.55 |       −18.71 |       −18.56 |
+|    15 |       −17.42 |       −17.51 |       −17.49 |       −17.49 |
+|    17 |       −16.90 |       −16.88 |       −16.50 |       −16.89 |
+|    20 |       −15.94 |       −16.05 |       −15.77 |       −16.05 |
+
+4~20 GBaud 전 구간이 0.1~0.7 dB 이내로 맞는다. 즉 이미 알려진 장비 스펙(LNA/IF-amp NF, ZBD
+responsivity/NEP, DSO ADC noise, laser linewidth, MZM Vpi/bias/EO 대역폭)만으로 measured EVM
+곡선의 형태 대부분이 설명된다 — 미지의 메커니즘을 가정할 필요가 없다.
+
+### 6.2 Impairment ablation: 무엇이 dominant한가
+
+각 impairment를 개별적으로 최소화하고 baseline과의 EVM 차이(dB)를 봤다
+([sim_evm_impairment_sweep.py](../code/sim_evm_impairment_sweep.py),
+[sim_impairment_sweep_16QAM.csv](../code/data/sim_impairment_sweep_16QAM.csv),
+[sim_impairment_sweep_32QAM.csv](../code/data/sim_impairment_sweep_32QAM.csv)):
+
+| 제거한 impairment | 2 GBaud 개선 | 20 GBaud 개선 | Symbol rate 의존성 |
+| ------------------------------ | -----------: | ------------: | -------------------------- |
+| LNA + IF-amp 열잡음 (NF→0) | 2.06 dB | 1.87 dB | 거의 flat |
+| ZBD NEP | 1.85 dB | 1.73 dB | 거의 flat |
+| DSO ADC 양자화 잡음 | 0.22 dB | 0.20 dB | 거의 flat |
+| AWG DAC 양자화 (8→16 bit) | 0.01 dB | 0.01 dB | 무시 가능 |
+| Laser phase noise + carrier wander | ~0.00 dB | ~0.00 dB | 무시 가능 |
+
+**결론: AWGN 성격의 항(열잡음 + ZBD NEP)이 모든 symbol rate에서 지배적이며, 합쳐서 약 4 dB의
+거의 고정된 예산을 차지한다.** 이는 baud에 무관하게 균일하므로 "2/4 GBaud만 유독 나쁜" 현상을
+설명하지 못한다. 두 양자화 항(AWG DAC, DSO ADC)은 현재 스펙에서는 부차적이다. ZBD 구조상
+(square-law envelope detector) narrow-linewidth laser phase noise/carrier wander에는 거의
+영향받지 않는다.
+
+### 6.3 SSBI의 물리적 대응: MZM 비선형성만 남긴 bound
+
+위 표의 모든 잡음원(열잡음, ZBD NEP, DSO/AWG 양자화, phase noise)을 동시에 최소화하면 남는
+것은 MZM의 3차 Taylor-model 광비선형성뿐이다. 이 "electronic-noise-free bound"는 symbol rate에
+따라 뚜렷하게 나빠진다.
+
+| GBaud | MZM-비선형성-only bound |
+| ----: | -----------------------: |
+|     2 |                  −31.8 dB |
+|     4 |                  −29.7 dB |
+|     8 |                  −26.6 dB |
+|    10 |                  −25.4 dB |
+|    12 |                  −24.3 dB |
+|    15 |                  −23.0 dB |
+|    17 |                  −22.2 dB |
+|    20 |                  −21.1 dB |
+
+2→20 GBaud 사이 10.7 dB나 열화한다. 즉 **SSBI의 물리적 대응물인 MZM 비선형성은 baud-selective
+하며, guard-band가 줄어드는 고속 구간에서만 유의미**하다: 2 GBaud에서는 bound가 baseline보다
+5.5 dB 낮아(=noise floor 대비 무시 가능) AWGN이 완전히 지배하지만, 20 GBaud에서는 bound와
+baseline의 차이가 약 5 dB로 좁혀져 MZM 비선형성이 총 열화의 상당 부분을 차지하기 시작한다.
+이는 1절의 guard-margin 논리 및 4.3절의 passband 비대칭 반전(17→20 GBaud)과 정확히 같은
+그림이다.
+
+### 6.4 2 GBaud만의 ~1 dB gap: AWG DAC 양자화 가설 기각
+
+사용자가 GUI에서 직접 읽은 값(2/4/15/20 GBaud = −26.3/−23.5/−17.5/−16.0 dB)은 baseline
+시뮬레이션과 거의 일치했지만, 측정값과 비교하면 2 GBaud만 약 1 dB 차이가 난다(4~20 GBaud는
+0.1 dB 이내). PAPR이 높은 low-rate DFT-s-OFDM 파형이 AWG DAC의 실효 dynamic range를 더 적게
+쓸 것이라는 가설로 `awg_dac_bits` 파라미터를 추가하고(`isac_gui.py`의
+`apply_awg_dac_quantization`, 파형 자체 peak 기준 균일 quantizer) ENOB을 4~8 bit로 낮춰봤다.
+
+| ENOB [bit] | 2 GBaud EVM | 20 GBaud EVM |
+| ---------: | ----------: | -----------: |
+|         8 |     −26.24 dB |     −16.04 dB |
+|         6 |     −26.13 dB |     −15.94 dB |
+|         5 |     −25.89 dB |     −15.63 dB |
+|         4 |     −24.96 dB |     −14.63 dB |
+
+ENOB을 낮추면 두 rate가 거의 동일하게(오히려 20 GBaud가 살짝 더) 나빠진다 — 2 GBaud만 선택적으로
+나빠지는 효과가 없다. **따라서 "낮은 symbol rate의 높은 PAPR 때문에 AWG DAC 양자화가 더
+문제된다"는 가설은 이 형태로는 기각한다.** 남은 ~1 dB gap은 특정 impairment로 재현되지 않으며,
+3.5절에서 이미 관찰된 것처럼 서로 다른 장비 조건에서도 저속 floor가 0.2~0.7 dB 수준으로
+흔들리는 것과 같은 **측정 스캐터 범위 안**일 가능성이 높다 — 5개 DFT block만 평균하는 조건에서는
+특히 그렇다.
+
+### 6.5 다음 물리 측정 제안: AWG→DSO 직결 + Vpp sweep
+
+0.3절의 "AWG+DSO 분리 측정" 계획을 이 결과가 더 구체화한다. 현재 모델대로라면 MZM/UTC-PD/LNA/ZBD를
+모두 제거하고 AWG를 RF 케이블로 DSO에 직결하면, 남는 건 AWG DAC + 케이블 + DSO 프론트엔드/ADC뿐이고
+시뮬레이션상 이 조합은 EVM에 0.2~0.3 dB만 기여해야 한다 — 즉 직결 측정은 optical/RF chain 전체
+없이도 훨씬 낮은(예: −35 dB 이하) EVM이 나와야 한다는 것이 현재 모델의 예측이다.
+
+Vpp를 sweep하면서 이 직결 구성으로 raw data를 측정하는 것은 **의미가 있고, 지금 시점에서 가장
+결정적인 다음 측정**이다. 두 가지 상반된 결과가 가능하며 각각이 강하게 판별적이다.
+
+- **직결 EVM이 −25~−27 dB 근처에서 floor를 보이면** (Vpp를 아무리 최적화해도), 현재 시뮬레이션이
+  AWG/DSO 기여를 과소평가하고 있다는 뜻이다 — 실제 AWG의 non-ideal ENOB, DNL/INL, 주파수 의존
+  spur, 또는 DSO clock jitter처럼 지금 모델에 없는 항을 추가해야 한다.
+- **직결 EVM이 뚜렷하게 더 좋으면** (예: −35 dB 이상), 현재 모델의 결론 — 저속 floor는
+  LNA/ZBD 열잡음이 지배하고 AWG/DSO는 부차적이다 — 이 확인된다.
+
+Vpp sweep 자체는 quantization-limited 영역(신호가 작을수록 step 대비 SNR 저하)과 고정
+noise-floor-limited 영역(신호 크기와 무관하게 일정한 EVM)을 구분하는 표준적인 진단이므로, 한
+symbol rate만이 아니라 **2 GBaud와 15~20 GBaud 양쪽에서** 수행해 low-rate floor가 순수 전기
+경로만으로 재현되는지 확인해야 한다. 0.2절의 photocurrent 동시 logging 문제와 무관하게 지금
+바로 수행할 수 있는 측정이라는 점도 우선순위를 높인다.
+
+관련 코드: [sim_evm_impairment_sweep.py](../code/sim_evm_impairment_sweep.py) (ablation 스윕),
+`isac_gui.py`의 `apply_awg_dac_quantization`/`SimConfig.awg_dac_bits` (AWG DAC 양자화 모델),
+[plot_evm_tradeoff_gui.py](../code/plot_evm_tradeoff_gui.py) (측정+물리 시뮬레이션 결합 Fig. 3).
+
+---
+
 ## 관련 파일
 
-- [plot_evm_tradeoff_gui.py](../code/plot_evm_tradeoff_gui.py) — GUI figure, marker, SNR/equipment/SSBI control
+- [plot_evm_tradeoff_gui.py](../code/plot_evm_tradeoff_gui.py) — 측정 EVM + `isac_gui.run_isac_sim` 물리 시뮬레이션 결합 Fig. 3 GUI
+- [plot_evm_photocurrent_figure.py](../code/plot_evm_photocurrent_figure.py) — EVM vs photocurrent 측정+fit+물리 시뮬레이션 비교 (4.5절)
+- [sim_evm_impairment_sweep.py](../code/sim_evm_impairment_sweep.py) — impairment별 ablation 스윕(6절), `sim_impairment_sweep_{16,32}QAM.csv` 생성
 - [remeasure_cpe_evm.py](../code/remeasure_cpe_evm.py) — 저장 raw capture의 CPE 보상 EVM 재측정
 - [analyze_low_rate_repeatability.py](../code/analyze_low_rate_repeatability.py) — 동일 TX sequence의 cross-capture error 상관 분석
 - [compare_dfts_channel_estimators.py](../code/compare_dfts_channel_estimators.py) — ZC-only와 full-TX LOOCV LS channel estimator 비교

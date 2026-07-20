@@ -87,11 +87,70 @@ def normalize_db(profile_db: np.ndarray) -> np.ndarray:
 
 
 def target_roi_m() -> tuple[float, float]:
-    return (1.05, 1.15)
+    return (1.08, 1.12)
+
+
+def roi_psnr_db(xr_m: np.ndarray, yr_db: np.ndarray, guard_m: float = 0.025) -> float:
+    x = np.asarray(xr_m, dtype=float).reshape(-1)
+    y = normalize_db(np.asarray(yr_db, dtype=float).reshape(-1))
+    n = min(len(x), len(y))
+    if n < 8:
+        return float("nan")
+    x = x[:n]
+    y = y[:n]
+    lo_m, hi_m = target_roi_m()
+    roi = np.isfinite(x) & np.isfinite(y) & (x >= lo_m) & (x <= hi_m)
+    if np.count_nonzero(roi) < 8:
+        return float("nan")
+    roi_idx = np.flatnonzero(roi)
+    pk = int(roi_idx[int(np.nanargmax(y[roi_idx]))])
+    floor_mask = roi & (np.abs(x - x[pk]) > guard_m)
+    if np.count_nonzero(floor_mask) < 4:
+        floor_mask = roi
+    return float(y[pk] - np.nanmedian(y[floor_mask]))
+
+
+def roi_pslr_db(
+    xr_m: np.ndarray, yr_db: np.ndarray, guard_m: float = 0.006
+) -> tuple[float, float, float]:
+    """Peak-to-sidelobe ratio inside the ROI: main peak vs. the highest
+    *local maximum* elsewhere in the ROI (outside a small guard around the
+    peak) -- not just the peak vs. the median floor (that's roi_psnr_db).
+    Returns (pslr_db, peak_range_m, sidelobe_range_m)."""
+    x = np.asarray(xr_m, dtype=float).reshape(-1)
+    y = normalize_db(np.asarray(yr_db, dtype=float).reshape(-1))
+    n = min(len(x), len(y))
+    if n < 8:
+        return float("nan"), float("nan"), float("nan")
+    x = x[:n]
+    y = y[:n]
+    lo_m, hi_m = target_roi_m()
+    roi = np.isfinite(x) & np.isfinite(y) & (x >= lo_m) & (x <= hi_m)
+    if np.count_nonzero(roi) < 8:
+        return float("nan"), float("nan"), float("nan")
+    roi_idx = np.flatnonzero(roi)
+    pk = int(roi_idx[int(np.nanargmax(y[roi_idx]))])
+    peak_val, peak_x = float(y[pk]), float(x[pk])
+
+    side_idx = roi_idx[np.abs(x[roi_idx] - peak_x) > guard_m]
+    if len(side_idx) < 3:
+        return float("nan"), peak_x, float("nan")
+    local_max = [
+        i for i in side_idx
+        if 0 < i < n - 1 and y[i] >= y[i - 1] and y[i] >= y[i + 1]
+    ]
+    if not local_max:
+        local_max = list(side_idx)
+    side_i = local_max[int(np.nanargmax(y[local_max]))]
+    return peak_val - float(y[side_i]), peak_x, float(x[side_i])
 
 
 def default_compare_capture_path() -> Path:
     return default_range_dir() / "Data_fIF11_fsym15_P-7_fRF280_DFT-s-OFDM_16QAM_Iph7.npz"
+
+
+def default_data_range_compare_path() -> Path:
+    return default_range_dir() / "Data_range_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph7.npz"
 
 
 def get_npz_scalar(loaded: np.lib.npyio.NpzFile, key: str, default: Any = "") -> Any:
@@ -1086,8 +1145,8 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
         hint = ttk.Label(
             right,
             text=(
-                "Compare panel uses the 1000 mm Data capture for MF and normalized CFR.\n"
-                "The Range NPZ normalized CFR is overlaid as a dotted trace."
+                "Compare panel overlays MF and normalized CFR profiles.\n"
+                "MF: selected Range NPZ, dotted: 1000 mm Data capture, solid blue: Data_range CFR."
             ),
             wraplength=330,
             foreground="#475569",
@@ -1178,11 +1237,11 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                 for ax_i in (ax_compare, ax_low, ax_high):
                     ax_i.clear()
                 x_rng = parse_pair_text(x_range_var.get(), (900.0, 1100.0))
-                y_rng = parse_pair_text(y_range_var.get(), (-40.0, 10.0))
+                y_rng = parse_pair_text(y_range_var.get(), (-50.0, 10.0))
                 x_scale = 1e3 if x_unit_var.get() == "mm" else 1.0
                 x_unit = x_unit_var.get()
                 colors = ["#64748b", "#dc2626", "#2563eb", "#0f766e", "#b45309", "#7c3aed"]
-                compare_x_rng = (500.0, 1500.0) if x_unit == "mm" else (0.5, 1.5)
+                compare_x_rng = (800.0, 1600.0) if x_unit == "mm" else (0.8, 1.6)
                 def parse_step(text: str) -> float:
                     try:
                         return float(str(text).strip())
@@ -1190,7 +1249,7 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                         return float("nan")
                 x_grid_step = parse_step(x_grid_var.get())
                 y_grid_step = parse_step(y_grid_var.get())
-                compare_x_grid_step = 250.0 if x_unit == "mm" else 0.25
+                compare_x_grid_step = 200.0 if x_unit == "mm" else 0.2
 
                 def plot_gui_profile(
                     ax_plot,
@@ -1237,35 +1296,19 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                     )
                     ax_plot.text(
                         0.5 * (lo_m + hi_m) * x_scale,
-                        8.0,
+                        9.0,
                         "ROI",
                         ha="center",
                         va="top",
-                        fontsize=8,
+                        fontsize=11,
                         color="#166534",
                     )
 
-                def roi_psnr_db(xr_m: np.ndarray, yr_db: np.ndarray, guard_m: float = 0.025) -> float:
-                    x = np.asarray(xr_m, dtype=float).reshape(-1)
-                    y = normalize_db(np.asarray(yr_db, dtype=float).reshape(-1))
-                    n = min(len(x), len(y))
-                    if n < 8:
-                        return float("nan")
-                    x = x[:n]
-                    y = y[:n]
-                    lo_m, hi_m = target_roi_m()
-                    roi = np.isfinite(x) & np.isfinite(y) & (x >= lo_m) & (x <= hi_m)
-                    if np.count_nonzero(roi) < 8:
-                        return float("nan")
-                    roi_idx = np.flatnonzero(roi)
-                    pk = int(roi_idx[int(np.nanargmax(y[roi]))])
-                    floor_mask = roi & (np.abs(x - x[pk]) > guard_m)
-                    if np.count_nonzero(floor_mask) < 4:
-                        floor_mask = roi
-                    return float(y[pk] - np.nanmedian(y[floor_mask]))
-
-                def capture_compare_profiles(case: RangeCase) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-                    ref_path = default_compare_capture_path()
+                def capture_compare_profiles(
+                    case: RangeCase,
+                    path: Path | None = None,
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                    ref_path = path if path is not None else default_compare_capture_path()
                     key = f"{channel_var.get().strip().upper()}::{ref_path}::{len(case.si_range_m)}"
                     if key not in capture_profile_cache:
                         axis = case.si_range_m if len(case.si_range_m) else np.linspace(0.0, 2.0, 4096)
@@ -1320,6 +1363,11 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                     idx = int(np.nanargmax(yv))
                     return float(xv[idx]), float(yv[idx])
 
+                def peak_label(px: float) -> str:
+                    if x_unit == "mm":
+                        return f"{px:.0f} mm"
+                    return f"{px:.3f} m"
+
                 def mark_peak(
                     ax_plot,
                     xr_m: np.ndarray,
@@ -1338,13 +1386,43 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                     ax_plot.text(
                         px,
                         ypos,
-                        f"{px:.1f}",
+                        peak_label(px),
                         color=color,
                         ha="center",
                         va="bottom",
                         fontsize=8,
                         bbox={"fc": "white", "ec": "none", "alpha": 0.75, "pad": 0.6},
                     )
+
+                def annotate_peak_value(
+                    ax_plot,
+                    xr_m: np.ndarray,
+                    yr_db: np.ndarray,
+                    x_window: tuple[float, float],
+                    y_window: tuple[float, float],
+                    color: str,
+                    x_offset: float = 0.0,
+                    y_offset_db: float = 2.0,
+                ) -> None:
+                    px, py = peak_point(xr_m, yr_db, x_window)
+                    if not (math.isfinite(px) and math.isfinite(py)):
+                        return
+                    y0, y1 = y_window
+                    ypos = min(y1 - 2.0, max(y0 + 2.0, py + y_offset_db))
+                    ax_plot.text(
+                        px + x_offset,
+                        ypos,
+                        peak_label(px),
+                        color=color,
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        bbox={"fc": "white", "ec": "none", "alpha": 0.78, "pad": 0.6},
+                        zorder=25,
+                    )
+
+                def mm_window(lo_mm: float, hi_mm: float) -> tuple[float, float]:
+                    return (lo_mm, hi_mm) if x_unit == "mm" else (lo_mm * 1e-3, hi_mm * 1e-3)
 
                 def closest_case(target_gbaud: float) -> RangeCase | None:
                     finite = [c for c in current_cases if math.isfinite(c.baud_gbaud)]
@@ -1401,8 +1479,13 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
 
                 if compare_case is not None:
                     _, _, cap_norm_rng, cap_norm_prof = capture_compare_profiles(compare_case)
+                    _, _, extra_norm_rng, extra_norm_prof = capture_compare_profiles(
+                        compare_case,
+                        default_data_range_compare_path(),
+                    )
                     if len(cap_norm_rng) < 2:
                         cap_norm_rng, cap_norm_prof = compare_case.si_range_m, compare_case.si_profile_db
+                    compare_y_rng = (-50.0, 10.0)
                     plot_gui_profile(
                         ax_compare,
                         compare_case.mf_range_m,
@@ -1417,39 +1500,71 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                         ax_compare,
                         cap_norm_rng,
                         normalized_cfr_display_profile(cap_norm_rng, cap_norm_prof),
-                        "Normalized CFR",
-                        x_window=compare_x_rng,
-                        max_points=850,
-                        color="#0000ff",
-                        lw=1.0,
-                        alpha=0.82,
-                        zorder=2,
-                    )
-                    plot_gui_profile(
-                        ax_compare,
-                        compare_case.si_range_m,
-                        normalized_cfr_display_profile(compare_case.si_range_m, compare_case.si_profile_db),
-                        "Normalized CFR (Range NPZ)",
+                        "_nolegend_",
                         x_window=compare_x_rng,
                         max_points=850,
                         color="#0000ff",
                         lw=1.0,
                         ls="--",
-                        alpha=0.88,
+                        alpha=0.78,
+                        zorder=2,
+                    )
+                    plot_gui_profile(
+                        ax_compare,
+                        extra_norm_rng,
+                        normalized_cfr_display_profile(extra_norm_rng, extra_norm_prof),
+                        "Normalized CFR",
+                        x_window=compare_x_rng,
+                        max_points=850,
+                        color="#0000ff",
+                        lw=1.15,
+                        alpha=0.92,
                         zorder=3,
+                    )
+                    annotate_peak_value(
+                        ax_compare,
+                        extra_norm_rng,
+                        normalized_cfr_display_profile(extra_norm_rng, extra_norm_prof),
+                        mm_window(1050.0, 1150.0),
+                        compare_y_rng,
+                        "#0000ff",
+                        y_offset_db=1.0,
+                    )
+                    annotate_peak_value(
+                        ax_compare,
+                        cap_norm_rng,
+                        normalized_cfr_display_profile(cap_norm_rng, cap_norm_prof),
+                        mm_window(950.0, 1050.0),
+                        compare_y_rng,
+                        "#0000ff",
+                        y_offset_db=4.0,
                     )
                     psnr_values = [
                         ("MF", roi_psnr_db(compare_case.mf_range_m, compare_case.mf_profile_db)),
-                        ("Norm. CFR", roi_psnr_db(compare_case.si_range_m, compare_case.si_profile_db)),
+                        ("Norm. CFR/Data", roi_psnr_db(cap_norm_rng, cap_norm_prof)),
+                        ("Norm. CFR/Data_range", roi_psnr_db(extra_norm_rng, extra_norm_prof)),
                     ]
                     psnr_text = "\n".join(
                         f"{label}: {value:.1f} dB" if math.isfinite(value) else f"{label}: N/A"
                         for label, value in psnr_values
                     )
-                    compare_y_rng = (-40.0, 10.0)
+                    pslr_values = [
+                        ("Matched filtering", roi_pslr_db(compare_case.mf_range_m, compare_case.mf_profile_db)),
+                        ("Normalized CFR", roi_pslr_db(extra_norm_rng, extra_norm_prof)),
+                    ]
+                    pslr_text = "\n".join(
+                        (
+                            f"{label}: {pslr:.1f} dB (peak {peak_x * 1e3:.0f} mm, "
+                            f"sidelobe {side_x * 1e3:.0f} mm)"
+                        )
+                        if math.isfinite(pslr)
+                        else f"{label}: N/A"
+                        for label, (pslr, peak_x, side_x) in pslr_values
+                    )
                 else:
                     psnr_text = ""
-                    compare_y_rng = (-40.0, 10.0)
+                    pslr_text = ""
+                    compare_y_rng = (-50.0, 10.0)
 
                 def plot_ref_and_moved(ax_plot, case: RangeCase | None) -> None:
                     if case is None:
@@ -1484,28 +1599,14 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                 plot_ref_and_moved(ax_high, high_case)
 
                 finite_baud = [c for c in current_cases if math.isfinite(c.baud_gbaud)]
-                for ax_i in (ax_compare, ax_low, ax_high):
-                    shade_target_roi(ax_i)
+                shade_target_roi(ax_compare)
                 style_ieee_axis(
                     ax_compare,
                     compare_x_rng,
                     compare_y_rng,
                     x_step_override=compare_x_grid_step,
-                    legend_loc="upper left",
+                    legend_loc="upper right",
                 )
-                if psnr_text:
-                    ax_compare.text(
-                        0.98,
-                        0.04,
-                        "ROI PSNR (Range NPZ)\n" + psnr_text,
-                        transform=ax_compare.transAxes,
-                        ha="right",
-                        va="bottom",
-                        fontsize=8,
-                        color="#111827",
-                        bbox={"fc": "white", "ec": "#cbd5e1", "alpha": 0.9, "pad": 2.0},
-                        zorder=20,
-                    )
                 style_ieee_axis(ax_low, x_rng, y_rng)
                 style_ieee_axis(ax_high, x_rng, y_rng, legend=False)
                 fig.tight_layout()
@@ -1513,6 +1614,8 @@ def prompt_cases_gui(args: argparse.Namespace) -> bool:
                 status = f"Preview updated: {len(current_cases)} case(s)."
                 if psnr_text:
                     status += "  ROI PSNR: " + psnr_text.replace("\n", " | ")
+                if pslr_text:
+                    status += "  |  ROI PSLR: " + pslr_text.replace("\n", " | ")
                 status_var.set(status)
             except Exception as exc:
                 messagebox.showerror("Preview error", str(exc), parent=root)
@@ -1652,7 +1755,7 @@ def main() -> None:
     parser.add_argument("--profile-x-m", nargs=2, type=float, default=(0.0, 3.0), metavar=("MIN", "MAX"))
     parser.add_argument("--profile-y-db", nargs=2, type=float, default=(-50.0, 3.0), metavar=("MIN", "MAX"))
     parser.add_argument("--zoom-x-mm", nargs=2, type=float, default=(900.0, 1100.0), metavar=("MIN", "MAX"))
-    parser.add_argument("--zoom-y-db", nargs=2, type=float, default=(-40.0, 10.0), metavar=("MIN", "MAX"))
+    parser.add_argument("--zoom-y-db", nargs=2, type=float, default=(-50.0, 10.0), metavar=("MIN", "MAX"))
     parser.add_argument("--ref-mm", type=float, default=1018.0, help="Reference position marker in mm.")
     parser.add_argument("--move-mm", type=float, default=1011.0, help="Moved position marker in mm.")
     parser.add_argument("--si-bins", type=int, default=4096, help="Range bins for normalized CFR recomputation.")

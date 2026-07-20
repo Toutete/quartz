@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.ticker import AutoMinorLocator, FixedLocator
 
 # Import the existing OSA control library functions
 from osa_control import (
@@ -23,6 +24,11 @@ from osa_control import (
 )
 
 class OSALiveViewerApp(tk.Tk):
+    PAPER_X_MIN_NM = 1549.0
+    PAPER_X_MAX_NM = 1553.0
+    PAPER_Y_MIN_DB = -50.0
+    PAPER_Y_MAX_DB = 10.0
+
     def __init__(self):
         super().__init__()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -41,8 +47,8 @@ class OSALiveViewerApp(tk.Tk):
         self.resource_var = tk.StringVar(value="GPIB0::1::INSTR")
         
         # Sweep Variables
-        self.center_freq_var = tk.DoubleVar(value=193.4) # THz (approx 1550.1 nm)
-        self.span_thz_var = tk.DoubleVar(value=0.5) # THz
+        self.center_freq_var = tk.DoubleVar(value=193.275) # THz
+        self.span_thz_var = tk.DoubleVar(value=0.35) # THz
         self.res_ghz_var = tk.DoubleVar(value=10.0) # GHz
         self.wait_s_var = tk.DoubleVar(value=10.0)
         
@@ -100,6 +106,9 @@ class OSALiveViewerApp(tk.Tk):
         # Save Button
         self.btn_save = ttk.Button(control_frame, text="Save Data (.csv & .png)", command=self.save_data, state=tk.DISABLED)
         self.btn_save.pack(fill=tk.X, pady=(5, 0))
+
+        self.btn_save_fig = ttk.Button(control_frame, text="Save Figure", command=self.save_figure, state=tk.DISABLED)
+        self.btn_save_fig.pack(fill=tk.X, pady=(5, 0))
         
         # Load Button
         self.btn_load = ttk.Button(control_frame, text="Load Data (.csv)", command=self.load_data)
@@ -109,8 +118,17 @@ class OSALiveViewerApp(tk.Tk):
         plot_frame = ttk.Frame(main_frame)
         plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
-        self.fig, self.ax = plt.subplots(figsize=(8, 5))
-        self.fig.patch.set_facecolor('#f4f6f9')
+        plt.rcParams.update({
+            "font.family": "Times New Roman",
+            "font.size": 18,
+            "axes.labelsize": 20,
+            "xtick.labelsize": 17,
+            "ytick.labelsize": 17,
+            "legend.fontsize": 17,
+            "mathtext.fontset": "stix",
+        })
+        self.fig, self.ax = plt.subplots(figsize=(5.6, 5.6), dpi=110)
+        self.fig.patch.set_facecolor('#ffffff')
         self.ax.set_facecolor('#ffffff')
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
@@ -137,12 +155,49 @@ class OSALiveViewerApp(tk.Tk):
 
     def _setup_blank_plot(self):
         self.ax.clear()
-        self.ax.set_title("Optical Spectrum vs Frequency", fontsize=12, fontweight='bold', color="#1e293b")
-        self.ax.set_xlabel("Frequency [THz]", fontsize=10)
-        self.ax.set_ylabel("Power [dBm]", fontsize=10)
-        self.ax.grid(True, alpha=0.35)
+        self._style_paper_axis()
         self.fig.tight_layout()
         self.canvas.draw_idle()
+
+    def _style_paper_axis(self):
+        self.ax.set_title("")
+        self.ax.set_xlabel("Wavelength (nm)")
+        self.ax.set_ylabel("Normalized power (dB)")
+        self.ax.set_xlim(self.PAPER_X_MIN_NM, self.PAPER_X_MAX_NM)
+        self.ax.set_ylim(self.PAPER_Y_MIN_DB, self.PAPER_Y_MAX_DB)
+        self.ax.set_box_aspect(1.0)
+        self.ax.xaxis.set_major_locator(FixedLocator(np.linspace(self.PAPER_X_MIN_NM, self.PAPER_X_MAX_NM, 5)))
+        self.ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+        self.ax.yaxis.set_major_locator(FixedLocator(np.linspace(self.PAPER_Y_MIN_DB, self.PAPER_Y_MAX_DB, 7)))
+        self.ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+        self.ax.grid(True, which="major", color="#b0b7c3", alpha=0.55, linewidth=0.7)
+        self.ax.grid(True, which="minor", color="#d3d8e0", alpha=0.25, linewidth=0.45)
+        self.ax.tick_params(direction="in", top=True, right=True, length=5, width=0.9)
+        self.ax.tick_params(which="minor", direction="in", top=True, right=True, length=3, width=0.7)
+        for side in ("top", "right", "bottom", "left"):
+            self.ax.spines[side].set_visible(True)
+            self.ax.spines[side].set_linewidth(1.0)
+
+    @staticmethod
+    def _welch_like_smooth_norm_db(power_dbm: np.ndarray) -> np.ndarray:
+        y = np.asarray(power_dbm, dtype=np.float64).reshape(-1)
+        if len(y) == 0:
+            return y
+        y = y - float(np.nanmax(y[np.isfinite(y)]))
+        p_lin = np.maximum(10.0 ** (y / 10.0), 1e-18)
+        n = len(p_lin)
+        win_len = max(9, int(round(n / 70)))
+        if win_len % 2 == 0:
+            win_len += 1
+        win_len = min(win_len, n if n % 2 else max(1, n - 1))
+        if win_len >= 5:
+            win = np.hanning(win_len)
+            win = win / max(float(np.sum(win)), 1e-30)
+            p_smooth = np.convolve(p_lin, win, mode="same")
+        else:
+            p_smooth = p_lin
+        p_smooth = p_smooth / max(float(np.nanmax(p_smooth)), 1e-30)
+        return 10.0 * np.log10(np.maximum(p_smooth, 1e-18))
 
     def test_connection(self):
         resource = self.resource_var.get().strip()
@@ -293,64 +348,50 @@ class OSALiveViewerApp(tk.Tk):
             self._setup_blank_plot()
             return
             
-        # Store for saving
-        self.last_freq_thz = freq_thz
-        self.last_power_dbm = power_dbm
-        self.last_wavelength_nm = wavelength_nm
-        self.btn_save.config(state=tk.NORMAL)
-        
         # Sort values ascending by frequency
         order = np.argsort(freq_thz)
         freq_thz = freq_thz[order]
         power_dbm = power_dbm[order]
         wavelength_nm = wavelength_nm[order]
-        
-        # Better plot styling for paper
-        self.ax.plot(freq_thz, power_dbm, color="#1d4ed8", linewidth=1.5, alpha=0.9)
-        self.ax.set_title("Optical Spectrum vs Frequency", fontsize=14, fontweight='bold', color="#1e293b", pad=15)
-        self.ax.set_xlabel("Frequency [THz]", fontsize=11, fontweight='500')
-        self.ax.set_ylabel("Power [dBm]", fontsize=11, fontweight='500')
-        self.ax.grid(True, alpha=0.4, linestyle='--')
-        
-        # Automatically set Y limits to make noise floor look realistic
-        ymax = np.max(power_dbm) + 5
-        ymin = max(np.min(power_dbm) - 10, -100) # Floor at -100 if data goes lower
-        self.ax.set_ylim(ymin, ymax)
-        
-        # Explicitly set X-axis limits based on the swept range
-        span_thz_approx = float(self.span_thz_var.get())
-        f_min = target_center_freq_thz - (span_thz_approx / 2) * 1.1
-        f_max = target_center_freq_thz + (span_thz_approx / 2) * 1.1
-            
-        # Fallback to actual data bounds if approximation is way off
-        if len(freq_thz) > 0:
-            f_min = min(f_min, freq_thz.min() - 0.02)
-            f_max = max(f_max, freq_thz.max() + 0.02)
-            
-        self.ax.set_xlim([f_min, f_max])
-        
-        # Add center marker
-        self.ax.axvline(target_center_freq_thz, color="#dc2626", linestyle="--", linewidth=1.0, label=f"Center ({target_center_freq_thz:.3f} THz)")
-        
-        # Annotate Peak
-        peak_idx = int(np.argmax(power_dbm))
-        self.ax.annotate(
-            f"Peak: {freq_thz[peak_idx]:.3f} THz\n{power_dbm[peak_idx]:.1f} dBm",
-            xy=(freq_thz[peak_idx], power_dbm[peak_idx]),
-            xytext=(10, 10),
-            textcoords="offset points",
-            fontsize=9,
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="#94a3b8"),
+
+        paper_mask = (
+            np.isfinite(wavelength_nm)
+            & np.isfinite(power_dbm)
+            & (wavelength_nm >= self.PAPER_X_MIN_NM)
+            & (wavelength_nm <= self.PAPER_X_MAX_NM)
         )
+        if np.count_nonzero(paper_mask) >= 2:
+            freq_plot = wavelength_nm[paper_mask]
+            power_plot_dbm = power_dbm[paper_mask]
+            wavelength_plot_nm = wavelength_nm[paper_mask]
+        else:
+            freq_plot = wavelength_nm
+            power_plot_dbm = power_dbm
+            wavelength_plot_nm = wavelength_nm
+
+        norm_power_db = self._welch_like_smooth_norm_db(power_plot_dbm)
+
+        # Store raw and plotted traces for saving/click readout.
+        self.last_freq_thz = freq_thz
+        self.last_power_dbm = power_dbm
+        self.last_wavelength_nm = wavelength_nm
+        self.plot_x_nm = freq_plot
+        self.plot_power_norm_db = norm_power_db
+        self.plot_wavelength_nm = wavelength_plot_nm
+        self.btn_save.config(state=tk.NORMAL)
+        self.btn_save_fig.config(state=tk.NORMAL)
         
-        self.ax.legend(loc="upper right")
+        self.ax.plot(freq_plot, norm_power_db, color="#000000", linewidth=5)
+        self._style_paper_axis()
+
+        self.ax.set_ylim(self.PAPER_Y_MIN_DB, self.PAPER_Y_MAX_DB)
         
         # Setup marker elements
         self.marker_anno = self.ax.annotate(
             "", xy=(0, 0), xytext=(10, 10),
             textcoords="offset points",
             fontsize=9,
-            bbox=dict(boxstyle="round", facecolor="yellow", alpha=0.8, edgecolor="#d97706"),
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="#d97706"),
             arrowprops=dict(arrowstyle="->", connectionstyle="arc3"),
             visible=False
         )
@@ -361,15 +402,6 @@ class OSALiveViewerApp(tk.Tk):
             self.canvas.mpl_disconnect(self.cid_click)
         self.cid_click = self.canvas.mpl_connect('button_press_event', self.on_click_plot)
         
-        # Add secondary axis for Wavelength
-        try:
-            self.ax.secondary_xaxis("top", functions=(
-                lambda f: center_wavelength_from_frequency(f),
-                lambda w: center_frequency_from_wavelength(w)
-            )).set_xlabel("Wavelength [nm]", fontsize=10)
-        except Exception:
-            pass # Ignore warning if limits cross 0
-            
         self.fig.tight_layout()
         self.canvas.draw_idle()
         
@@ -399,12 +431,30 @@ class OSALiveViewerApp(tk.Tk):
             
             # Save Image
             png_path = str(Path(file_path).with_suffix(".png"))
-            self.fig.savefig(png_path, dpi=300, bbox_inches='tight')
+            self.fig.savefig(png_path, dpi=600, bbox_inches='tight')
             
             self._log_debug(f"Data successfully saved to {file_path} and {png_path}")
             messagebox.showinfo("Saved", f"Data and plot saved successfully:\n{file_path}\n{png_path}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save data: {e}")
+
+    def save_figure(self):
+        if not hasattr(self, 'plot_x_nm'):
+            return
+        from tkinter import filedialog
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"), ("All files", "*.*")],
+            title="Save Paper Figure"
+        )
+        if not file_path:
+            return
+        try:
+            self.fig.savefig(file_path, dpi=600, bbox_inches='tight')
+            self._log_debug(f"Figure saved to {file_path}")
+            messagebox.showinfo("Saved", f"Figure saved successfully:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save figure: {e}")
 
     def load_data(self):
         from tkinter import filedialog
@@ -461,7 +511,7 @@ class OSALiveViewerApp(tk.Tk):
     def on_click_plot(self, event):
         if not event.inaxes == self.ax:
             return
-        if not hasattr(self, 'last_freq_thz') or len(self.last_freq_thz) == 0:
+        if not hasattr(self, 'plot_x_nm') or len(self.plot_x_nm) == 0:
             return
             
         # Left click to set marker, right click to clear
@@ -473,9 +523,9 @@ class OSALiveViewerApp(tk.Tk):
             return
             
         x_click = event.xdata
-        idx = np.argmin(np.abs(self.last_freq_thz - x_click))
-        x_nearest = self.last_freq_thz[idx]
-        y_nearest = self.last_power_dbm[idx]
+        idx = np.argmin(np.abs(self.plot_x_nm - x_click))
+        x_nearest = self.plot_x_nm[idx]
+        y_nearest = self.plot_power_norm_db[idx]
         
         self.marker_point.set_data([x_nearest], [y_nearest])
         self.marker_point.set_visible(True)
@@ -484,7 +534,7 @@ class OSALiveViewerApp(tk.Tk):
         self.marker_line.set_visible(True)
         
         self.marker_anno.xy = (x_nearest, y_nearest)
-        self.marker_anno.set_text(f"{x_nearest:.3f} THz\n{y_nearest:.1f} dBm")
+        self.marker_anno.set_text(f"{x_nearest:.2f} nm\n{y_nearest:.1f} dB")
         self.marker_anno.set_visible(True)
         
         self.canvas.draw_idle()
