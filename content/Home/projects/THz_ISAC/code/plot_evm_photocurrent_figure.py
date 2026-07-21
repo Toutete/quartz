@@ -37,69 +37,43 @@ def make_figure(args: argparse.Namespace) -> None:
     plt.rcParams.update({
         "font.family": "Times New Roman",
         "mathtext.fontset": "stix",
-        "font.size": 9,
-        "axes.labelsize": 10,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "legend.fontsize": 8,
+        "axes.labelsize": 9,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 7.5,
         "xtick.direction": "in",
         "ytick.direction": "in",
         "xtick.top": True,
         "ytick.right": True,
-        "axes.linewidth": 0.9,
-        "lines.linewidth": 1.2,
-        "savefig.dpi": args.dpi,
+        "axes.linewidth": 0.8,
     })
 
-    styles = {
-        "16QAM @ 15 GBaud": dict(color="#d62728", marker="o", markerfacecolor="#d62728"),
-        "32QAM @ 16 GBaud": dict(color="#1f77b4", marker="s", markerfacecolor="none"),
+    markers = {
+        "16QAM @ 15 GBaud": dict(marker="o", markerfacecolor="red", markeredgecolor="red"),
+        "32QAM @ 16 GBaud": dict(marker="o", markerfacecolor="none", markeredgecolor="blue"),
     }
 
-    fig, ax = plt.subplots(figsize=(3.5, 2.6), dpi=args.dpi)
+    fig, ax = plt.subplots(figsize=(3, 2.5), dpi=args.dpi)
 
     for label, entry in MEASURED.items():
         iph = np.asarray(entry["iph_ma"], dtype=float)
         evm = np.asarray(entry["evm_db"], dtype=float)
-        style = styles[label]
-        ax.plot(
-            iph,
-            evm,
-            label=label,
-            color=style["color"],
-            marker=style["marker"],
-            markerfacecolor=style["markerfacecolor"],
-            markeredgecolor=style["color"],
-            markeredgewidth=0.9,
-            markersize=4.0,
-            linewidth=1.25,
-        )
+        ax.plot(iph, evm, "none", label=label, **markers[label])
 
     ax.set_xlabel("UTC-PD photocurrent (mA)")
     ax.set_ylabel("EVM (dB)")
+    ax.set_xscale("log")
     ax.set_xticks([4.5, 5, 5.5, 6, 6.5, 7])
-    ax.set_xlim(4.35, 7.15)
-    ax.set_ylim(-18.5, -13.0)
+    ax.set_ylim(-20, -10)
+    ax.set_xlim(4.5, 7)
     ax.xaxis.set_major_formatter(ScalarFormatter())
     ax.xaxis.set_minor_formatter(NullFormatter())
-    ax.grid(True, color="#cbd5e1", linewidth=0.45, alpha=0.75)
-    ax.legend(
-        loc="lower left",
-        frameon=True,
-        facecolor="white",
-        edgecolor="#cbd5e1",
-        framealpha=0.92,
-        handlelength=1.7,
-        borderpad=0.35,
-        labelspacing=0.3,
-    )
-    for side in ("top", "right", "bottom", "left"):
-        ax.spines[side].set_visible(True)
-        ax.spines[side].set_linewidth(0.9)
-    fig.tight_layout(pad=0.35)
+    ax.grid(True, alpha=0.3, which="major")
+    ax.legend(loc="best", frameon=False, fontsize=7)
+    fig.tight_layout()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, bbox_inches="tight", pad_inches=0.02)
+    fig.savefig(args.out, bbox_inches="tight")
     print(f"Saved: {args.out}")
     if args.show:
         plt.show()
@@ -114,7 +88,7 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent / "data" / "fig_evm_vs_photocurrent.png",
     )
-    parser.add_argument("--dpi", type=int, default=600)
+    parser.add_argument("--dpi", type=int, default=300)
     display_group = parser.add_mutually_exclusive_group()
     display_group.add_argument("--show", dest="show", action="store_true")
     display_group.add_argument("--no-show", dest="show", action="store_false")

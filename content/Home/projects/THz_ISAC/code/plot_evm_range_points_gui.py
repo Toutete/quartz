@@ -1,8 +1,8 @@
-"""Plot measured EVM and radar SNR points versus manually assigned range.
+"""Plot measured EVM and sensing SINR points versus manually assigned range.
 
 The default dataset is the three NPZ files in ``data/EVM_range``.  EVM is
 recomputed from the saved raw C1 capture using the same DFT-s-OFDM demodulation
-helpers used by ``isac_gui.py`` via ``remeasure_cpe_evm.py``.  Radar SNR is
+helpers used by ``isac_gui.py`` via ``remeasure_cpe_evm.py``. Sensing SINR is
 read from the saved metric by default, with an optional range-profile fallback.
 
 This GUI intentionally shows measured points only.  It does not draw simulated,
@@ -259,7 +259,7 @@ def launch_gui() -> None:
     })
 
     root = tk.Tk()
-    root.title("EVM and Radar SNR vs Range")
+    root.title("EVM and Sensing SINR vs Range")
     root.geometry("1120x760")
 
     points: list[Point] = []
@@ -268,7 +268,7 @@ def launch_gui() -> None:
     x_min_var = tk.StringVar(value="980")
     x_max_var = tk.StringVar(value="1120")
     x_step_var = tk.StringVar(value="20")
-    out_var = tk.StringVar(value=str(DEFAULT_DIR / "evm_radar_snr_vs_range.png"))
+    out_var = tk.StringVar(value=str(DEFAULT_DIR / "evm_sensing_sinr_vs_range.png"))
     status_var = tk.StringVar(value="Load defaults to plot measured EVM_range points.")
 
     root.columnconfigure(1, weight=1)
@@ -291,7 +291,7 @@ def launch_gui() -> None:
         width=15,
         state="readonly",
     ).grid(row=0, column=1, sticky="ew", pady=2)
-    ttk.Label(ctrl, text="Radar SNR").grid(row=1, column=0, sticky="w", pady=2)
+    ttk.Label(ctrl, text="Sensing SINR").grid(row=1, column=0, sticky="w", pady=2)
     ttk.Combobox(
         ctrl,
         textvariable=radar_mode_var,
@@ -342,7 +342,7 @@ def launch_gui() -> None:
             pg_text = f", PG={p.processing_gain_db:.1f} dB" if math.isfinite(p.processing_gain_db) else ""
             point_list.insert(
                 tk.END,
-                f"{p.label}: x={p.range_mm:.0f} mm, EVM={p.evm_db:.2f} dB, Radar={p.radar_snr_db:.2f} dB{pg_text}",
+                f"{p.label}: x={p.range_mm:.0f} mm, EVM={p.evm_db:.2f} dB, Sensing={p.radar_snr_db:.2f} dB{pg_text}",
             )
 
     def redraw() -> None:
@@ -373,7 +373,7 @@ def launch_gui() -> None:
             xmax = xmin + 10.0
 
         ax_evm.set_ylabel("EVM (dB)")
-        ax_snr.set_ylabel("Radar SNR (dB)")
+        ax_snr.set_ylabel("Sensing SINR (dB)")
         ax_snr.set_xlabel("Range (mm)")
         xstep = f(x_step_var, 20.0)
         for ax in axes:
@@ -385,7 +385,7 @@ def launch_gui() -> None:
             ax_snr.legend(loc="best", frameon=True, facecolor="white", edgecolor="#cbd5e1", framealpha=0.9)
         fig.tight_layout()
         canvas.draw_idle()
-        status_var.set(f"{len(points)} measured point(s), EVM={evm_mode_var.get()}, Radar={radar_mode_var.get()}")
+        status_var.set(f"{len(points)} measured point(s), EVM={evm_mode_var.get()}, Sensing={radar_mode_var.get()}")
 
     def load_defaults() -> None:
         points.clear()
@@ -454,7 +454,7 @@ def launch_gui() -> None:
             parent=root,
             title="Save CSV",
             initialdir=str(DEFAULT_DIR),
-            initialfile="evm_radar_snr_vs_range.csv",
+            initialfile="evm_sensing_sinr_vs_range.csv",
             defaultextension=".csv",
             filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
         )

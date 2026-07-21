@@ -1,0 +1,58 @@
+% Default values extracted from code/data/isac_sim_params_20260720.json.
+% Derived values use the same equations as isac_gui.py.
+\begin{table*}[t]
+\caption{Default simulation and link-budget parameters.}
+\label{tab:simulation_parameters}
+\centering
+\small
+\renewcommand{\arraystretch}{1.06}
+\setlength{\tabcolsep}{4.2pt}
+\begin{tabular}{@{}lll@{\hspace{1.3em}}lll@{}}
+\toprule
+Parameter & Symbol & Value & Parameter & Symbol & Value \\
+\midrule
+\multicolumn{6}{@{}l}{\textit{Waveform and signal model}} \\
+THz carrier frequency & $f_c$ & $280$ GHz & Intermediate frequency & $f_{\mathrm{IF}}$ & $11$ GHz \\
+Symbol rate / bandwidth & $B$ & $15$ GBd / $15$ GHz & Waveform / modulation & -- & DFT-s-OFDM / 16-QAM \\
+Sensing power fraction & $\rho$ & $0.20$ & Pilot length & $N_p$ & $1024$ symbols \\
+Nominal time-bandwidth gain & $G_p=BT_p$ & $30.10$ dB & Laser linewidth & $\Delta\nu$ & $0.015$ MHz \\
+Optical sideband mode & -- & DSB & RRC roll-off & $\beta_{\mathrm{RRC}}$ & $0.20$ \\
+\addlinespace[2pt]
+\multicolumn{6}{@{}l}{\textit{MZM and AWG}} \\
+AWG RF output power & $P_{\mathrm{AWG}}$ & $-6$ dBm & Drive-amplifier gain & $G_{\mathrm{drv}}$ & $8$ dB \\
+Half-wave voltage & $V_\pi$ & $3$ V & Bias phase & $\phi_b$ & $45^\circ$ \\
+Effective modulation index & $m$ & $0.1474$ & Effective CSPR & $1/m^2$ & $16.63$ dB \\
+Measured CSPR entry$^a$ & -- & $13$ dB & Electro-optic bandwidth & -- & $30$ GHz \\
+AWG effective resolution & -- & $8$ bits & MZM input resistance & -- & $50\ \Omega$ \\
+\addlinespace[2pt]
+\multicolumn{6}{@{}l}{\textit{THz link budget at the reference distance $R_0=1$ m}} \\
+UTC-PD photocurrent & $I_{\mathrm{ph}}$ & $7$ mA & UTC-PD responsivity & $\mathcal R_{\mathrm{UTC}}$ & $0.24$ A/W \\
+Transmitted THz power & $P_t$ & $-10$ dBm & Tx/Rx antenna gains & $G_t,G_r$ & $33/33$ dBi \\
+Target antenna gain & $G_{\mathrm{tar}}$ & $33$ dBi & OMT insertion loss & $L_{\mathrm{OMT}}$ & $2$ dB/pass \\
+OMT isolation (SI on) & $\mathrm{ISO}$ & $24$ dB & SI field coefficient & $\alpha$ & $0.06310$ \\
+Structural RCS & $\sigma_{\mathrm{str}}$ & $0.01$ m$^2$ & $|\Gamma|$ / pol. efficiency & -- & $1/1$ \\
+Antenna-mode RCS & $\sigma_{\mathrm{ant}}$ & $0.3637$ m$^2$ & Effective RCS & $\sigma_{\mathrm{eff}}$ & $0.3737$ m$^2$ \\
+Round-trip delay & $\tau_0$ & $6.667$ ns & One-way FSPL & -- & $81.38$ dB \\
+C2 RF echo power & -- & $-44.65$ dBm & SI power before LNA & -- & $-34.0$ dBm \\
+\addlinespace[2pt]
+\multicolumn{6}{@{}l}{\textit{Receiver and acquisition}} \\
+THz LNA gain / NF & -- & $13/8$ dB & ZBD responsivity & $\mathcal R$ & $1500$ V/W \\
+ZBD NEP & -- & $5$ pW/$\sqrt{\mathrm{Hz}}$ & IF-amplifier NF & -- & $5$ dB \\
+C1 IF gain / loss & -- & $27/10$ dB & C2 IF gain / loss & -- & $22/13$ dB \\
+DSO bandwidth & -- & $40$ GHz & DSO vertical scale & -- & $100$ mV/div \\
+\addlinespace[2pt]
+\multicolumn{6}{@{}l}{\textit{ISAC-range validation}} \\
+Required comm. SINR & $\gamma_c$ & $15.75$ dB & Required sensing SINR & $\gamma_{\mathrm{th}}$ & $13.2$ dB \\
+Calibrated C2 noise & $N$ & $-46.47$ dBm & Calibrated proc. gain$^b$ & $G_p$ & $16.6$ dB \\
+SI-off isolation & -- & $1000$ dB & Distance sweep / samples & -- & $0.25$--$2$ m / $9$ \\
+\bottomrule
+\multicolumn{6}{@{}l}{\footnotesize $^a$Reference metadata only; the simulator uses the drive-derived CSPR of $16.63$ dB.} \\
+\multicolumn{6}{@{}l}{\footnotesize $^b$Profile-domain calibrated gain used by the validation GUI; it is distinct from the ideal $BT_p=30.10$ dB.} \\
+\end{tabular}
+\end{table*}
+
+% Sec. II convention check:
+% isac_gui.py applies P_t exactly once in calc_isac_link_budget(). Therefore,
+% either (i) A_c is a normalized carrier amplitude while K contains P_t, or
+% (ii) A_c^2 contains P_t and P_t must be removed from K. State one convention
+% explicitly in the manuscript to avoid double-counting transmit power.

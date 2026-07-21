@@ -4,7 +4,7 @@ The input files are the .npz files created by the DSO tab's "Save Range"
 button in isac_gui.py / isac_unified_gui.py.  Each saved range file can already
 contain both the stored reference profile (`ref_rng`, `ref_prof_db`,
 `range_zero__...`) and the current moved-target profile (`rng`, `prof_db`).
-The script extracts only the selected radar channel, usually C2, and plots both
+The script extracts only the selected sensing channel, usually C2, and plots both
 the matched-filter range profile and the normalized CFR delay profile.
 
 Example
@@ -644,16 +644,16 @@ def make_figure(cases: list[RangeCase], args: argparse.Namespace) -> None:
     for ax in (ax_mf, ax_si):
         ax.set_xlim(*profile_xlim)
         ax.set_ylim(*profile_ylim)
-        ax.set_xlabel("Range (m)")
-        ax.set_ylabel("Normalized magnitude (dB)")
+        ax.set_xlabel("Distance (m)")
+        ax.set_ylabel("Normalized Amplitude (dB)")
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=20)
 
     for ax in (ax_zoom_mf, ax_zoom_si):
         ax.set_xlim(*zoom_xlim)
         ax.set_ylim(*zoom_ylim)
-        ax.set_xlabel("Range (mm)")
-        ax.set_ylabel("Normalized magnitude (dB)")
+        ax.set_xlabel("Distance (mm)")
+        ax.set_ylabel("Normalized Amplitude (dB)")
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=20)
 
@@ -1749,7 +1749,7 @@ def main() -> None:
         action="append",
         help="Additional case as LABEL=path.npz. Can be repeated.",
     )
-    parser.add_argument("--channel", default="C2", help="Radar channel to extract. Default: C2.")
+    parser.add_argument("--channel", default="C2", help="Sensing channel to extract. Default: C2.")
     parser.add_argument("--out", type=Path, default=default_out, help=f"Output figure path. Default: {default_out}")
     parser.add_argument("--summary-csv", type=Path, default=None, help="Optional CSV summary output path.")
     parser.add_argument("--profile-x-m", nargs=2, type=float, default=(0.0, 3.0), metavar=("MIN", "MAX"))
