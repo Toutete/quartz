@@ -61,7 +61,7 @@ What’s more, it is well known that satellite signals are easily interfered by 
      │  net +19 dB, AWG ≈ 122 mVpp → MZM +7.7 dBm
      ▼
 [MZM iXblue MXAN-LN-40]  ← DC bias controller (quadrature +3.25 V)
-     │  광 DSB: f_c, f_c ± 15 GHz
+     │  MZM 광 DSB 생성 후 WSS로 한쪽 sideband 제거: UTC-PD 입력은 SSB
      ▼
 [광 커플러]  ← LD2 (193.140 THz, f1-f2 = 270 GHz)
      │

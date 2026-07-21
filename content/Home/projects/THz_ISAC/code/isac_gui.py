@@ -2093,7 +2093,8 @@ class SimConfig:
 
     coherence_mode: str = "Free-running"
     rx_mode: str = "Mixer"
-    optical_sideband_mode: str = "DSB"
+    # The MZM creates DSB, then the WSS passes one sideband to the UTC-PD.
+    optical_sideband_mode: str = "SSB"
     si_enable: bool = True
     carrier_wander_enable: bool = False
     carrier_wander_mhz: float = 0.0
@@ -2103,7 +2104,9 @@ class SimConfig:
     # Optical front-end / MZM settings. UTC-PD photocurrent sets absolute
     # optical power; AWG RF power moves the signal-to-carrier ratio.
     awg_rf_power_dbm: float = -10.0
-    awg_ref_power_dbm: float = -10.0
+    # Measured pre-WSS DSB CSPR calibration point from
+    # isac_sim_params_20260720.json; both sidebands are in the denominator.
+    awg_ref_power_dbm: float = -6.0
     mzm_drive_gain_db: float = 8.0
     mzm_vpi_v: float = 3.0
     mzm_phi_bias_deg: float = 45.0
@@ -2201,6 +2204,24 @@ def w_to_dbm(p_w: float) -> float:
     return 10.0 * np.log10(max(float(p_w), 1e-30) * 1e3)
 
 def effective_cspr_db(cfg: SimConfig) -> float:
+    """CSPR at the UTC-PD input after optional WSS sideband selection."""
+    metrics = calc_mzm_drive_metrics(
+        cfg.awg_rf_power_dbm,
+        cfg.mzm_drive_gain_db,
+        cfg.cspr_db,
+        cfg.awg_ref_power_dbm,
+        cfg.mzm_vpi_v,
+        cfg.mzm_phi_bias_deg,
+        cfg.mzm_input_ohm,
+    )
+    cspr_db = float(metrics["effective_cspr_db"])
+    if optical_sideband_mode(cfg) == "SSB":
+        cspr_db += 10.0 * np.log10(2.0)
+    return cspr_db
+
+
+def pre_wss_cspr_db(cfg: SimConfig) -> float:
+    """Total-sideband DSB CSPR measured before the WSS."""
     metrics = calc_mzm_drive_metrics(
         cfg.awg_rf_power_dbm,
         cfg.mzm_drive_gain_db,
@@ -2213,7 +2234,7 @@ def effective_cspr_db(cfg: SimConfig) -> float:
     return float(metrics["effective_cspr_db"])
 
 def optical_sideband_mode(cfg: SimConfig) -> str:
-    mode = str(getattr(cfg, "optical_sideband_mode", "DSB") or "DSB").strip().upper()
+    mode = str(getattr(cfg, "optical_sideband_mode", "SSB") or "SSB").strip().upper()
     return "SSB" if mode == "SSB" else "DSB"
 
 def calc_mzm_drive_metrics(
@@ -2229,19 +2250,32 @@ def calc_mzm_drive_metrics(
     p_rf_w = dbm_to_w(rf_in_dbm)
     v_rms = np.sqrt(max(p_rf_w, 0.0) * max(float(input_ohm), 1e-12))
     phi_b = np.deg2rad(float(np.clip(phi_bias_deg, 1e-3, 89.999)))
-    u_rms = np.pi * v_rms / (2.0 * max(float(vpi_v), 1e-12))
-    m_eff = abs(u_rms * np.tan(phi_b))
-    cspr_from_drive = -20.0 * np.log10(max(m_eff, 1e-12))
-    # The entered/measured CSPR is kept as a reference value only. Simulation
-    # uses the drive-derived CSPR so IF input power changes modulation index,
-    # MZM distortion, UTC-PD sideband power, and ZBD output band power together.
-    eff_cspr = cspr_from_drive
+    tan_phi = np.tan(phi_b)
+
+    # Keep the voltage/Vpi result as a diagnostic, but anchor the simulation
+    # to the pre-WSS, total-sideband DSB CSPR measured at awg_ref_dbm. This
+    # absorbs unmodelled RF
+    # chain gain, frequency response, and CSPR measurement conventions while
+    # retaining the physical m proportional to sqrt(P_AWG) power dependence.
+    u_from_voltage = np.pi * v_rms / (2.0 * max(float(vpi_v), 1e-12))
+    m_from_voltage = abs(u_from_voltage * tan_phi)
+    cspr_from_voltage = -20.0 * np.log10(max(m_from_voltage, 1e-12))
+    power_offset_db = float(awg_rf_dbm) - float(awg_ref_dbm)
+    m_ref = 10.0 ** (-float(cspr_ref_db) / 20.0)
+    m_eff = m_ref * 10.0 ** (power_offset_db / 20.0)
+    u_rms = m_eff / max(abs(tan_phi), 1e-12)
+    eff_cspr = -20.0 * np.log10(max(m_eff, 1e-12))
     return {
         "rf_in_dbm": rf_in_dbm,
         "rf_power_w": p_rf_w,
         "v_rms": float(v_rms),
         "u_rms": float(u_rms),
         "m_eff": float(m_eff),
+        "u_rms_from_voltage": float(u_from_voltage),
+        "m_from_voltage": float(m_from_voltage),
+        "cspr_from_voltage_db": float(cspr_from_voltage),
+        "cspr_calibration_power_dbm": float(awg_ref_dbm),
+        "power_offset_from_calibration_db": float(power_offset_db),
         "phi_bias_deg": float(phi_bias_deg),
         "vpi_v": float(vpi_v),
         "input_ohm": float(input_ohm),
@@ -2257,12 +2291,13 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
         1e-15,
     )
     cspr_eff_db = effective_cspr_db(cfg)
-    cspr_lin = max(10.0 ** (abs(cspr_eff_db) / 10.0), 1e-12)
+    cspr_lin = max(10.0 ** (cspr_eff_db / 10.0), 1e-12)
     mode = optical_sideband_mode(cfg)
     n_sidebands = 1.0 if mode == "SSB" else 2.0
-    # CSPR is carrier power divided by total modulated signal power. For DSB,
-    # that signal power is shared by the two sidebands; for SSB it is all in
-    # the retained sideband.
+    dsb_reconstruction_factor = 2.0 if mode == "SSB" else 1.0
+    # cfg.cspr_db is the pre-WSS DSB CSPR, whose denominator contains both
+    # symmetric sidebands.  Selecting one sideband raises the post-WSS CSPR
+    # by 3.0103 dB and reduces the effective modulation index by sqrt(2).
     p_mzm_carrier_w = p_total_w / max(2.0 + 1.0 / cspr_lin, 1e-30)
     p_tone1_w = p_mzm_carrier_w
     p_signal_total_w = p_mzm_carrier_w / cspr_lin
@@ -2273,25 +2308,28 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
         "mzm_carrier_w": p_mzm_carrier_w,
         "sideband_each_w": p_sideband_each_w,
         "signal_total_w": p_signal_total_w,
-        "dsb_total_w": p_signal_total_w,
+        "dsb_total_w": p_signal_total_w * dsb_reconstruction_factor,
         "mzm_branch_w": p_mzm_carrier_w + p_signal_total_w,
         "tone_ratio": 1.0,
         "effective_cspr_db": float(cspr_eff_db),
+        "pre_wss_cspr_db": float(pre_wss_cspr_db(cfg)),
+        "post_wss_modulation_index": float(10.0 ** (-cspr_eff_db / 20.0)),
         "sideband_mode": mode,
         "total_dbm": w_to_dbm(p_total_w),
         "tone1_dbm": w_to_dbm(p_tone1_w),
         "mzm_carrier_dbm": w_to_dbm(p_mzm_carrier_w),
         "sideband_each_dbm": w_to_dbm(p_sideband_each_w),
         "signal_total_dbm": w_to_dbm(p_signal_total_w),
-        "dsb_total_dbm": w_to_dbm(p_signal_total_w),
+        "dsb_total_dbm": w_to_dbm(p_signal_total_w * dsb_reconstruction_factor),
     }
 
 def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
     """Expected UTC-PD RF line powers after photomixing, normalized to TX power."""
     total_rf_w = dbm_to_w(cfg.utcpd_target_dbm)
-    cspr_lin = max(10.0 ** (abs(effective_cspr_db(cfg)) / 10.0), 1e-12)
+    cspr_lin = max(10.0 ** (effective_cspr_db(cfg) / 10.0), 1e-12)
     mode = optical_sideband_mode(cfg)
     n_sidebands = 1.0 if mode == "SSB" else 2.0
+    dsb_reconstruction_factor = 2.0 if mode == "SSB" else 1.0
     carrier_w = total_rf_w / max(1.0 + 1.0 / cspr_lin, 1e-30)
     signal_total_w = carrier_w / cspr_lin
     sideband_each_w = signal_total_w / n_sidebands
@@ -2300,13 +2338,15 @@ def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
         "carrier_w": carrier_w,
         "sideband_each_w": sideband_each_w,
         "signal_total_w": signal_total_w,
-        "dsb_total_w": signal_total_w,
+        "dsb_total_w": signal_total_w * dsb_reconstruction_factor,
         "sideband_mode": mode,
         "total_dbm": w_to_dbm(total_rf_w),
         "carrier_dbm": w_to_dbm(carrier_w),
         "sideband_each_dbm": w_to_dbm(sideband_each_w),
         "signal_total_dbm": w_to_dbm(signal_total_w),
-        "dsb_total_dbm": w_to_dbm(signal_total_w),
+        "dsb_total_dbm": w_to_dbm(signal_total_w * dsb_reconstruction_factor),
+        "effective_cspr_db": float(effective_cspr_db(cfg)),
+        "pre_wss_cspr_db": float(pre_wss_cspr_db(cfg)),
     }
 
 def add_display_line_mw(
@@ -2941,20 +2981,23 @@ def run_isac_sim(cfg: SimConfig):
     )
     phi_b = np.deg2rad(float(np.clip(cfg.mzm_phi_bias_deg, 1e-3, 89.999)))
     u_rms = float(mzm_metrics.get("u_rms", 0.0))
+    tan_phi = np.tan(phi_b)
+    e_shape = np.cos(phi_b) * (
+        1.0
+        - u_rms * tan_phi * s_mzm
+        - 0.5 * (u_rms ** 2) * (s_mzm ** 2)
+        + (u_rms ** 3) * tan_phi * (s_mzm ** 3) / 6.0
+    )
     if optical_sideband_mode(cfg) == "SSB":
-        # A single-drive Taylor model is a DSB MZM model.  For the optional SSB
-        # display mode, keep the complex single-sideband envelope but scale it
-        # from the drive-derived CSPR so power sweeps remain physical.
-        m_ssb = x_if_cplx / (np.sqrt(np.mean(np.abs(x_if_cplx) ** 2)) + 1e-12)
-        e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_signal_w, 0.0)) * m_ssb
+        # Physical order: real-drive MZM produces DSB (including Taylor IMD),
+        # then the WSS rejects the negative-frequency optical sideband. The
+        # analytic AC component models the retained upper sideband. Its power
+        # is one half of the measured pre-WSS total sideband power.
+        e_ac = e_shape - np.mean(e_shape)
+        e_ssb = hilbert(np.asarray(e_ac, dtype=np.float64))
+        e_ssb /= np.sqrt(np.mean(np.abs(e_ssb) ** 2)) + 1e-15
+        e_mod = np.sqrt(max(p_carrier_w, 0.0)) + np.sqrt(max(p_signal_w, 0.0)) * e_ssb
     else:
-        tan_phi = np.tan(phi_b)
-        e_shape = np.cos(phi_b) * (
-            1.0
-            - u_rms * tan_phi * s_mzm
-            - 0.5 * (u_rms ** 2) * (s_mzm ** 2)
-            + (u_rms ** 3) * tan_phi * (s_mzm ** 3) / 6.0
-        )
         e_mod = np.sqrt(max(p_data_laser_w, 0.0)) * e_shape / (np.sqrt(np.mean(np.abs(e_shape) ** 2)) + 1e-15)
 
     #
@@ -3583,13 +3626,13 @@ def run_isac_sim(cfg: SimConfig):
         "optical_data_laser_w": p_data_laser_w,
         "optical_lo_laser_w": p_lo_laser_w,
         "optical_carrier_w": p_carrier_w,
-        "optical_dsb_w": p_signal_w,
+        "optical_dsb_w": optical_lines["dsb_total_w"],
         "optical_signal_w": p_signal_w,
         "optical_sideband_each_w": optical_lines["sideband_each_w"],
         "optical_line_powers": optical_lines,
         "utcpd_rf_line_powers": rf_line_powers,
         "mzm_metrics": mzm_metrics,
-        "observed_cspr_db": mzm_metrics.get("effective_cspr_db", cfg.cspr_db),
+        "observed_cspr_db": optical_lines.get("effective_cspr_db", cfg.cspr_db),
         "osa_display": osa_display,
         "utcpd_rf_display": rf_display,
     }
@@ -3608,7 +3651,7 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=True)
         self.si_enable_var = tk.BooleanVar(value=True)
-        self.ssb_enable_var = tk.BooleanVar(value=False)
+        self.ssb_enable_var = tk.BooleanVar(value=True)
         self.sim_welch_psd_var = tk.BooleanVar(value=True)
         self.show_si_norm_range_var = tk.BooleanVar(value=False)
         self.rx_mode_var = tk.StringVar(value="ZBD")
@@ -3634,6 +3677,9 @@ class PhotonicIsacSimPanel:
             with open(preset_path, "r", encoding="utf-8") as f:
                 preset = json.load(f)
             self._apply_sim_preset(preset)
+            # The measured transmitter always places a WSS before the UTC-PD.
+            # Keep legacy presets from silently restoring the old DSB model.
+            self.ssb_enable_var.set(True)
             if "omt_iso_db" in self.params:
                 self.params["omt_iso_db"].set("24")
             self.status_var.set(f"Default preset: {preset_path.name}")
@@ -3907,7 +3953,7 @@ class PhotonicIsacSimPanel:
 
         # removed fs_gsps
         add_p(1, "linewidth_mhz", "Laser Linewidth [MHz]", "0.015")
-        add_p(2, "cspr_db", "Measured CSPR Ref [dB]", "13")
+        add_p(2, "cspr_db", "Pre-WSS DSB CSPR [dB]", "13")
         add_p(3, "opt_center_thz", "Opt Tone Center [THz]", "193.41")
         add_p(4, "mzm_drive_gain_db", "MZM Drive Amp [dB]", "8.0")
         add_p(5, "utcpd_resp_aw", "UTC-PD Resp. [A/W]", "0.24")
@@ -3918,7 +3964,7 @@ class PhotonicIsacSimPanel:
 
         ttk.Checkbutton(grp, text="Enable Carrier Wander", variable=self.carrier_wander_enable_var).grid(row=7, column=0, columnspan=2, sticky="w", pady=4)
         ttk.Checkbutton(grp, text="Enable SI Leakage", variable=self.si_enable_var).grid(row=8, column=0, columnspan=1, sticky="w", pady=2)
-        ttk.Checkbutton(grp, text="SSB Optical Modulation", variable=self.ssb_enable_var, command=self._update_table).grid(row=8, column=1, columnspan=1, sticky="w", pady=2)
+        ttk.Checkbutton(grp, text="WSS-filtered SSB", variable=self.ssb_enable_var, command=self._update_table).grid(row=8, column=1, columnspan=1, sticky="w", pady=2)
         ttk.Label(grp, text="Coherence Mode").grid(row=9, column=0, sticky="w", pady=2)
         ttk.Combobox(grp, textvariable=self.coherence_var, values=["Free-running", "Self-coherent"], width=12).grid(row=9, column=1)
         ttk.Label(grp, text="RX Front-end").grid(row=10, column=0, sticky="w", pady=2)
@@ -3993,7 +4039,7 @@ class PhotonicIsacSimPanel:
                 optical_sideband_mode="SSB" if bool(self.ssb_enable_var.get()) else "DSB",
                 cspr_db=cspr_db,
                 awg_rf_power_dbm=awg_rf_power_dbm,
-                awg_ref_power_dbm=-10.0,
+                awg_ref_power_dbm=-6.0,
                 mzm_drive_gain_db=self._param_float("mzm_drive_gain_db", 8.0),
                 mzm_vpi_v=self._param_float("mzm_vpi_v", 7.0),
                 mzm_phi_bias_deg=self._param_float("mzm_phi_bias_deg", 45.0),
@@ -4008,7 +4054,7 @@ class PhotonicIsacSimPanel:
                 awg_rf_power_dbm,
                 self._param_float("mzm_drive_gain_db", 8.0),
                 cspr_db,
-                -10.0,
+                -6.0,
                 self._param_float("mzm_vpi_v", 7.0),
                 self._param_float("mzm_phi_bias_deg", 45.0),
             )
@@ -4070,7 +4116,7 @@ class PhotonicIsacSimPanel:
 
             # Link-budget SINR approximation
             #
-            data_pwr_ratio_db = -abs(cspr_db)
+            data_pwr_ratio_db = -abs(effective_cspr_db(optical_cfg))
             p_echo_lin = 10 ** ((echo_dbm + data_pwr_ratio_db) / 10.0)
             p_si_lin = 10 ** ((si_dbm + data_pwr_ratio_db) / 10.0)
 
@@ -4105,9 +4151,14 @@ class PhotonicIsacSimPanel:
             if "opt_pwr" in self.rows:
                 self.table.item(self.rows["opt_pwr"], values=(f"{opt_mw:.2f}", "mW"))
             if "mzm_rf" in self.rows:
+                post_cspr_db = effective_cspr_db(optical_cfg)
+                post_m = 10.0 ** (-post_cspr_db / 20.0)
                 self.table.item(
                     self.rows["mzm_rf"],
-                    values=(f"{mzm_metrics['rf_in_dbm']:.1f} dBm, m={mzm_metrics['m_eff']:.3f}", f"CSPR {mzm_metrics['effective_cspr_db']:.1f} dB"),
+                    values=(
+                        f"{mzm_metrics['rf_in_dbm']:.1f} dBm, m_DSB={mzm_metrics['m_eff']:.3f}",
+                        f"CSPR DSB/SSB {mzm_metrics['effective_cspr_db']:.1f}/{post_cspr_db:.1f} dB, m_SSB={post_m:.3f}",
+                    ),
                 )
             if "target_gain" in self.rows:
                 self.table.item(self.rows["target_gain"], values=(f"{target_ant_gain:.1f}", "dBi"))
@@ -4473,7 +4524,7 @@ class PhotonicIsacSimPanel:
         # artificially lower than spread DSB content.
         osa = self.data.get("osa_display", {})
         self.lines[0].set_data(osa.get("freq_thz", []), osa.get("signal_dbm", []))
-        sideband_mode = str(np.asarray(osa.get("sideband_mode", "DSB")).item()) if "sideband_mode" in osa else "DSB"
+        sideband_mode = str(np.asarray(osa.get("sideband_mode", "SSB")).item()) if "sideband_mode" in osa else "SSB"
         self.lines[0].set_label(f"MZM carrier + {sideband_mode}")
         self.l_lo.set_data(osa.get("freq_thz", []), osa.get("lo_dbm", []))
         self.l_lo.set_label("Optical tone")
@@ -13650,7 +13701,7 @@ class SystemModelValidationPanel:
         add(1, "r_max_m", "Distance max [m]", "2")
         add(2, "n_range", "Sweep points", "9")
         add(3, "rho", "rho pilot power", "0.20")
-        add(4, "cspr_db", "CSPR [dB]", "20")
+        add(4, "cspr_db", "Pre-WSS DSB CSPR [dB]", "13")
         add(5, "iso_db", "OMT ISO [dB]", "25")
         add(6, "ac2", "A_c^2 [mW]", "1.0")
         add(7, "sqrt_k", "sqrt(K) [amp*m^2]", "1e-4")
@@ -13767,7 +13818,8 @@ class SystemModelValidationPanel:
             opt_idx = int(np.nanargmax(sdinr)) if np.any(np.isfinite(sdinr)) else 0
 
         cspr_axis = 1.0 / np.maximum(m_axis ** 2, 1e-30)
-        cspr_now = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        cspr_now_db = self._float("cspr_db", 20.0) + 10.0 * np.log10(2.0)
+        cspr_now = 10.0 ** (cspr_now_db / 10.0)
         m_now = 1.0 / np.sqrt(max(cspr_now, 1e-30))
         return {
             "m": m_axis,
@@ -13784,7 +13836,7 @@ class SystemModelValidationPanel:
             "cspr_opt_db": float(10.0 * np.log10(cspr_axis[opt_idx])),
             "sdinr_opt_db": float(10.0 * np.log10(max(sdinr[opt_idx], 1e-30))),
             "m_now": float(m_now),
-            "cspr_now_db": float(self._float("cspr_db", 20.0)),
+            "cspr_now_db": float(cspr_now_db),
             "cot_phi": float(cot_phi),
             "mu4": float(mu4),
             "mu6": float(mu6),
@@ -13904,7 +13956,9 @@ class SystemModelValidationPanel:
 
     def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
         rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
-        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        # The GUI entry is the measured pre-WSS DSB CSPR.  The single
+        # retained sideband used by the system model is 3.0103 dB higher.
+        cspr = 2.0 * 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
         alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
         ac2 = max(self._float("ac2", 1.0), 1e-30)
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
@@ -13931,7 +13985,7 @@ class SystemModelValidationPanel:
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
-        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        cspr = 2.0 * 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
         alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
         ac2 = max(self._float("ac2", 1.0), 1e-30)
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
@@ -14222,7 +14276,7 @@ class SystemModelValidationPanel:
         add(5, "ref_range_m", "Metric ref distance [m]", "1.0")
         add(6, "si_on_iso_db", "SI-on isolation [dB]", "24")
         add(7, "si_off_iso_db", "SI-off isolation [dB]", "1000")
-        add(8, "sweep_tx_power_dbm", "Sweep TX power [dBm]", "-10")
+        add(8, "sweep_tx_power_dbm", "Effective THz P_t (incl. PA) [dBm]", "-10")
         add(9, "rho_ref", "rho at ref", "0.20")
         add(10, "rho", "rho for curve", "0.20")
         add(11, "sim_comm_ref_snr_db", "Comm SNR @ref [dB]", "17.49")
@@ -14706,7 +14760,8 @@ class SystemModelValidationPanel:
         if not for_save or bool(self.save_legend_var.get()):
             legend_size = 11 if for_save else 9
             legend = ax.legend(
-                loc="best",
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
                 fontsize=legend_size,
                 frameon=True,
                 handlelength=2.4,
@@ -15365,6 +15420,9 @@ class SystemModelValidationPanel:
                 cfg.target_dist_m = float(dist)
                 cfg.delay_ns = (2.0 * cfg.target_dist_m) / 3e8 * 1e9
                 if np.isfinite(sweep_tx_dbm):
+                    # Hypothetical post-UTC-PD THz-PA operating point.  This
+                    # overrides the 7-mA -> -10-dBm UTC-PD calibration and
+                    # scales the complete transmitted THz waveform once.
                     cfg.utcpd_target_dbm = float(sweep_tx_dbm)
                     cfg.tx_power_dbm = float(sweep_tx_dbm)
                 cfg.pilot_rho = sweep_rho

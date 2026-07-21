@@ -49,6 +49,14 @@ $\Delta\theta(t)$ and a slow drift of $f_c$ are present; neither is
 locked to any reference. This is the key impairment the receiver must
 tolerate.
 
+Throughout this section, $A_c$ is a normalized carrier coefficient and
+does not contain a second factor of the transmitted power $P_t$. For
+compactness, the factor $\sqrt{P_t}$ is absorbed into the received-field
+coefficients defined below. This convention is equivalent to the
+implementation: \texttt{isac\_gui.py} first normalizes the generated
+photomixed waveform to $P_t$ and subsequently applies only dimensionless
+SI and propagation coefficients. Hence, $P_t$ is applied exactly once.
+
 \subsubsection{Waveform}
 The free-running beat drift in~\eqref{eq:vthz} precludes time-domain
 matched filtering, whose correlation peak fades as the carrier drifts;
@@ -68,6 +76,34 @@ CP-OFDM \cite{Han2023}, while retaining the same CFR compatibility;
 the $2$~dB reduction translates directly into a $2$~dB higher average
 transmit power under the same peak-power limit, a significant gain on a
 power-scarce THz link.
+
+The quadrature-biased MZM initially produces a symmetric double-sideband
+optical signal. The measured CSPR is referenced before the
+wavelength-selective switch (WSS) and includes both sidebands,
+\begin{equation}
+\mathrm{CSPR}_{\mathrm{DSB}}
+=\frac{P_c}{P_++P_-}=\frac{1}{m_{\mathrm{DSB}}^2}.
+\end{equation}
+The WSS suppresses one sideband before photomixing. For the ideal
+symmetric case $P_+=P_-$, the quantities entering the single-sideband
+THz model are therefore
+\begin{equation}
+\mathrm{CSPR}_{\mathrm{SSB}}=2\,\mathrm{CSPR}_{\mathrm{DSB}},
+\qquad m=\frac{m_{\mathrm{DSB}}}{\sqrt{2}}.
+\label{eq:wss_cspr_conversion}
+\end{equation}
+Thus the measured pre-WSS value of $13$~dB gives
+$\mathrm{CSPR}_{\mathrm{SSB}}=16.01$~dB,
+$m_{\mathrm{DSB}}=0.2239$, and the modulation index in
+\eqref{eq:vthz} is $m=0.1583$. The $3.01$-dB reduction applies to the
+retained data-bearing sideband power and is included once through $m$.
+Hereafter, every occurrence of $m$ in the transmitted-THz, ZBD, SSBI,
+and SINR equations denotes this post-WSS index; the pre-WSS MZM Taylor
+expansion alone uses $m_{\mathrm{DSB}}$.
+It is not an additional $3$-dB reduction of the carrier-inclusive total
+THz power $P_t$, which is calibrated after the WSS from the UTC-PD
+operating point. Any WSS insertion loss is likewise included in that
+post-WSS calibration.
 
 \subsubsection{Power Allocation}
 The waveform carries a deterministic sensing pilot and the communication
@@ -96,8 +132,10 @@ V_{\mathrm{SI}}(t)&=\alpha\,V_{\mathrm{THz}}(t),\qquad
 V_{\mathrm{ec}}(t)=\beta\,V_{\mathrm{THz}}(t-\tau),\label{eq:vsi_vec}\\
 V_{\mathrm{rx}}(t)&=V_{\mathrm{SI}}(t)+V_{\mathrm{ec}}(t),\label{eq:vrx}
 \end{align}
-where $\alpha=10^{-\mathrm{ISO}/20}$ is the OMT isolation and
-$\beta=\sqrt{K}/R^2$ the echo amplitude, with
+where $\alpha=\sqrt{P_t}\alpha_0$, with
+$\alpha_0=10^{-\mathrm{ISO}/20}$ denoting the dimensionless OMT
+leakage coefficient, and $\beta=\sqrt{K}/R^2$ is the echo amplitude,
+with
 $K=P_tG_tG_r\lambda^2\sigma_{\mathrm{eff}}/(4\pi)^3$. In practice
 $\alpha\gg\beta$, so $V_{\mathrm{rx}}$ is SI-dominated. A THz low-noise
 amplifier (LNA) precedes the detector; the OMT isolation is designed so
@@ -111,7 +149,8 @@ received field at the remote receiver is
 V_{\mathrm{rx},c}(t)=\beta_c\,V_{\mathrm{THz}}(t-\tau_c),
 \label{eq:rc}
 \end{equation}
-where $\beta_c^2=G_c/R^2$ is the one-way path gain and $\tau_c$ the
+where $\beta_c^2=P_tG_c/R^2$ is the one-way received-field coefficient
+under the normalized-$A_c$ convention and $\tau_c$ the
 propagation delay. The remote communication receiver also serves as the
 reflecting target for the sensing link.
 
@@ -230,6 +269,18 @@ target error-vector magnitude for a given pre-forward-error-correction
 bit-error rate, defines the maximum communication range
 $R_{\max}^{\mathrm{comm}}(m,\rho)$.
 
+Lowering CSPR increases the desired term as $m^2$ but increases SSBI as
+$m^4$, whereas an excessively high CSPR makes the link noise limited.
+For the simplified SINR in~\eqref{eq:sinr_comm}, its stationary point
+satisfies $P_{\mathrm{rx}}m_{\mathrm{opt}}^4\xi=N_c$, i.e., the in-band
+SSBI and receiver-noise terms are equal. The maximizing CSPR is therefore
+not universal: it depends on the noise
+level, received power, waveform-dependent leakage factor $\xi$, and
+constellation moments. We use the measured pre-WSS DSB value of
+$13$~dB, corresponding to a post-WSS SSB value of $16.01$~dB, as the
+fixed operating point for the reported experiment and simulation,
+rather than claiming it as a system-independent optimum.
+
 \subsection{Sensing Branch}
 \label{sec:sens_branch}
 
@@ -256,6 +307,14 @@ fade with range and forms a range-independent ceiling at large $m$. The
 pilot correlation suppresses it only by an effective gain
 $G_p^{\mathrm{ssbi}}\le G_p$, since $|s(t)|^2$ is weakly correlated with
 $p(t)$.
+
+Equation~\eqref{eq:sinr_sens} uses the ideal coherent time--bandwidth
+gain $G_{p,\mathrm{ideal}}=BT_p$; it is $30.10$~dB for the nominal
+$15$-GHz, $1024$-symbol pilot. The measurement-calibrated validation
+plots instead substitute an effective profile-domain gain
+$G_{p,\mathrm{eff}}=16.6$~dB, which includes windowing, usable-bin,
+normalization, and implementation losses. The latter is a processing
+gain and is unrelated to CSPR.
 
 Under a distance-independent post-detection noise floor, the SI-assisted
 ZBD output SINR scales as $R^{-4}$, from the $\alpha\beta$ cross-beat
