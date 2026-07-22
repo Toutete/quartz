@@ -15,7 +15,7 @@ Parameter & Symbol & Value & Parameter & Symbol & Value \\
 THz carrier frequency & $f_c$ & $280$ GHz & Intermediate frequency & $f_{\mathrm{IF}}$ & $11$ GHz \\
 Symbol rate / bandwidth & $B$ & $15$ GBd / $15$ GHz & Waveform / modulation & -- & DFT-s-OFDM / 16-QAM \\
 Sensing power fraction & $\rho$ & $0.20$ & Pilot length & $N_p$ & $1024$ symbols \\
-Ideal time-bandwidth gain$^b$ & $G_{p,\mathrm{ideal}}=BT_p$ & $30.10$ dB & Laser linewidth & $\Delta\nu$ & $0.015$ MHz \\
+Pilot duration & $T_p=N_p/R_s$ & $68.27$ ns & Laser linewidth & $\Delta\nu$ & $0.015$ MHz \\
 CSPR reference plane & -- & Effective THz waveform & RRC roll-off & $\beta_{\mathrm{RRC}}$ & $0.20$ \\
 \addlinespace[2pt]
 \multicolumn{6}{@{}l}{\textit{MZM and AWG}} \\
@@ -28,11 +28,12 @@ AWG effective resolution & -- & $8$ bits & MZM input resistance & -- & $50\ \Ome
 \multicolumn{6}{@{}l}{\textit{THz link budget at the reference distance $R_0=1$ m}} \\
 UTC-PD photocurrent & $I_{\mathrm{ph}}$ & $7$ mA & UTC-PD responsivity & $\mathcal R_{\mathrm{UTC}}$ & $0.24$ A/W \\
 Transmitted THz power & $P_t$ & $-10$ dBm & Tx/Rx antenna gains & $G_t,G_r$ & $32/32$ dBi \\
-Effective target RCS$^c$ & $\sigma_{\mathrm{eff}}$ & $-4.28$ dBsm & OMT insertion loss & $L_{\mathrm{OMT}}$ & $2.2$ dB/pass \\
+Effective target RCS$^c$ & $\sigma_{\mathrm{eff}}$ & $-19.10$ dBsm & OMT insertion loss & $L_{\mathrm{OMT}}$ & $2.2$ dB/pass \\
 OMT isolation (SI on) & $\mathrm{ISO}$ & $24$ dB & Dimensionless SI coefficient & $\alpha_0$ & $0.06310$ \\
-Equivalent target area$^c$ & $\sigma_{\mathrm{eff}}$ & $0.3733$ m$^2$ & RCS input convention & -- & Direct dBsm input \\
+Structural / antenna-mode RCS$^c$ & $\sigma_{\mathrm{str}}/\sigma_{\mathrm{ant}}$ & $0.0100/0.002295$ m$^2$ & RCS model & -- & Coupled antenna \\
+Target reflection coefficient & $|\Gamma|$ & $0.10$ & Accepted comm. fraction & $1-|\Gamma|^2$ & $0.99$ \\
 Round-trip delay & $\tau_0$ & $6.667$ ns & One-way FSPL & -- & $81.38$ dB \\
-C2 RF echo power & -- & $-47.06$ dBm & SI power before LNA & -- & $-34.0$ dBm \\
+C2 RF echo power & -- & $-61.88$ dBm & SI power before LNA & -- & $-34.0$ dBm \\
 \addlinespace[2pt]
 \multicolumn{6}{@{}l}{\textit{Receiver and acquisition}} \\
 THz LNA gain / NF & -- & $13/8$ dB & Common equivalent system NF$^b$ & $F$ & $8.07$ dB \\
@@ -42,14 +43,14 @@ DSO bandwidth & -- & $40$ GHz & DSO vertical scale & -- & $100$ mV/div \\
 \addlinespace[2pt]
 \multicolumn{6}{@{}l}{\textit{ISAC-range validation}} \\
 Required comm. SINR & $\gamma_c$ & $15.75$ dB & Required sensing SINR & $\gamma_{\mathrm{th}}$ & $13.2$ dB \\
-Common thermal noise$^b$ & $N=kTBF$ & $-64.14$ dBm at $15$ GHz & Ideal processing gain$^b$ & $G_{p,\mathrm{ideal}}$ & $30.10$ dB \\
-Calibrated profile gain$^d$ & $G_{p,\mathrm{eff}}$ & $21.9$ dB & SI-off isolation & -- & $1000$ dB \\
+Normalized thermal noise$^{b,d}$ & $N/P_0,\ P_0=1$ mW & $-64.14$ dB at $15$ GHz & Ideal processing gain$^b$ & $G_{p,\mathrm{ideal}}$ & $30.10$ dB \\
+Effective processing gain$^d$ & $G_{p,\mathrm{eff}}=\eta_pBT_p$ & $21.9$ dB & Processing loss / efficiency$^d$ & $L_p/\eta_p$ & $8.20$ dB / $0.151$ \\
 Distance sweep / samples & -- & $0.25$--$2$ m / $9$ & EVM preview / paper seeds & -- & $1/4$ \\
 \bottomrule
 \multicolumn{6}{@{}l}{\footnotesize $^a$The system model absorbs implementation-specific optical filtering into the calibrated effective CSPR; $13$ dB gives $m=10^{-13/20}=0.2239$.} \\
 \multicolumn{6}{@{}l}{\footnotesize $^b$The common NF is obtained from the simulated LNA/IF-amplifier Friis cascade. The ISAC-range bound excludes ZBD-NEP/digitizer noise and uses $T_p=N_p/R_s$.} \\
-\multicolumn{6}{@{}l}{\footnotesize $^c$The GUI converts $\sigma_{\mathrm{eff}}[\mathrm{m}^2]=10^{\sigma_{\mathrm{eff}}[\mathrm{dBsm}]/10}$ and inserts it once in the monostatic radar equation.} \\
-\multicolumn{6}{@{}l}{\footnotesize $^d$The sensing-SINR validation curve uses the calibrated profile-domain gain; the theoretical ISAC-range bound uses $G_{p,\mathrm{ideal}}$.} \\
+\multicolumn{6}{@{}l}{\footnotesize $^c$The coupled-antenna model uses $\sigma_{\mathrm{eff}}\simeq\sigma_{\mathrm{str}}+\lambda^2G_{\mathrm{tar}}^2|\Gamma|^2\eta_{\mathrm{pol}}/(4\pi)$ and applies the same $|\Gamma|$ to communication acceptance. The sum is an incoherent-power approximation.} \\
+\multicolumn{6}{@{}l}{\footnotesize $^d$Sensing products are normalized by $P_0=1$ mW. $G_{p,\mathrm{ideal}}$ is an upper bound; all reported bounds use the $21.9$-dB effective baseline, with $20$--$24$ dB for sensitivity.} \\
 \end{tabular}
 \end{table*}
 

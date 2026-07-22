@@ -139,10 +139,25 @@ received field at the remote receiver is
 V_{\mathrm{rx},c}(t)=\beta_c\,V_{\mathrm{THz}}(t-\tau_c),
 \label{eq:rc}
 \end{equation}
-where $\beta_c^2=P_tG_c/R^2$ is the one-way received-field coefficient
-under the normalized-$A_c$ convention and $\tau_c$ the
+where $\beta_c^2=\eta_L P_tG_c/R^2$ is the one-way received-field coefficient
+under the normalized-$A_c$ convention, $\eta_L=1-|\Gamma|^2$ is the
+fraction of incident power accepted by the target communication antenna,
+and $\tau_c$ the
 propagation delay. The remote communication receiver also serves as the
 reflecting target for the sensing link.
+For this antenna target, the link-budget RCS is modeled as
+\begin{equation}
+\sigma_{\mathrm{eff}}\simeq\sigma_{\mathrm{str}}+
+\frac{\lambda^2G_{\mathrm{tar}}^2}{4\pi}|\Gamma|^2\eta_{\mathrm{pol}},
+\label{eq:gamma_rcs}
+\end{equation}
+where the sum is an incoherent-power approximation used when the relative
+phase of structural- and antenna-mode scattering is unavailable.  The same
+$\Gamma$ is used in $\eta_L$ and in the antenna-mode term, preventing the
+communication and sensing branches from independently assuming perfect
+absorption and maximum reradiation.  For a measured or generic target, a
+direct $\sigma_{\mathrm{eff}}$ can replace~\eqref{eq:gamma_rcs}; it is then a
+scenario parameter and is not inverted to infer load mismatch.
 
 \subsection{Square-Law Detection}
 \label{sec:squarelaw}
@@ -276,37 +291,49 @@ simulation, rather than claiming it as a system-independent optimum.
 In a coherent receiver driven by an independent local oscillator the SI
 would enter the SINR denominator as interference and, with
 $\alpha\gg\beta$, bury the echo. In the square-law ZBD the ranging term
-is the SI-echo cross-beat of~\eqref{eq:yt}, whose power scales as
-$\alpha\beta$, so the SI acts as a homodyne local oscillator in the
-numerator. After pilot correlation with processing gain $G_p=T_pB$,
-where $T_p$ is the pilot integration time and $B$ the signal bandwidth,
-\begin{align}
-\mathrm{SINR}_{\mathrm{sens}}(m,\rho,R)
-&=\frac{2\rho\,m^2\,\alpha A_c^2\sqrt{K}\,G_p/R^2}
-{N+P_{\mathrm{SSBI,sens}}(m)/G_p^{\mathrm{ssbi}}},\notag\\
-P_{\mathrm{SSBI,sens}}&=\mathcal R^2\alpha^4A_c^4m^4\xi,
+is instead the SI--echo cross-beat of~\eqref{eq:yt}, so the SI acts as a
+homodyne local oscillator in the numerator.  Let $P_{\mathrm{SI}}$ and
+$P_{\mathrm{ec}}(R)$ denote the SI and echo RF powers at the common ZBD
+reference plane. After pilot correlation with effective processing gain
+$G_{p,\mathrm{eff}}=\eta_pT_pB$,
+\begin{equation}
+\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}(m,\rho,R)
+=G_{p,\mathrm{eff}}\frac{2m^2\rho P_{\mathrm{SI}}P_{\mathrm{ec}}(R)}
+{P_0N},
 \label{eq:sinr_sens}
-\end{align}
-where $N$ is the sensing receiver noise power and the sensing SSBI floor
-is dominated by the SI self-beat, the
-$\alpha^4$ term, since the echo self-beat and SI-echo cross-beat are
-higher order in the small $\beta$. This floor derives from the fixed SI
-strength $\alpha$ rather than the range-dependent echo, so it does not
-fade with range and forms a range-independent ceiling at large $m$. The
-pilot correlation suppresses it only by an effective gain
-$G_p^{\mathrm{ssbi}}\le G_p$, since $|s(t)|^2$ is weakly correlated with
-$p(t)$.
+\end{equation}
+where $P_0=1$~mW is the power-normalization reference used by the
+numerical model and $N=kTBF$ is the equivalent input-referred noise
+power.  Equivalently, the code evaluates every power numerically in mW;
+the explicit $P_0$ prevents a dimensionally invalid power-squared over
+power expression. The leakage-generated SSBI is
+range-independent and of order $m^4$; at the reported operating point it
+is below the noise floor and is omitted from this sensing bound. Without
+the SI reference, the echo is detected only through its own self-beat,
+\begin{equation}
+\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/o\ SI}}(m,\rho,R)
+=G_{p,\mathrm{eff}}\frac{2m^2\rho P_{\mathrm{ec}}^2(R)}
+{P_0N}.
+\label{eq:sinr_sens_nosi}
+\end{equation}
+Their ratio is $P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ in the noise-limited
+regime.
 
-Equation~\eqref{eq:sinr_sens} uses the ideal coherent time--bandwidth
-gain $G_{p,\mathrm{ideal}}=BT_p$. For a fixed $N_p$-symbol pilot,
+The ideal coherent time--bandwidth gain $G_{p,\mathrm{ideal}}=BT_p$ is
+retained only as an upper bound. For a fixed $N_p$-symbol pilot,
 $T_p=N_p/R_s$ and hence $G_{p,\mathrm{ideal}}=N_pB/R_s$; when
 $B\simeq R_s$, the gain is approximately $N_p$ and equals $30.10$~dB
-for $N_p=1024$. The communication and sensing branches use the same
-input-referred thermal-noise model $N=kTBF$, with a common equivalent
+for $N_p=1024$. We use $G_{p,\mathrm{eff}}=21.9$~dB for both the
+sensing-SINR and ISAC-range results, corresponding to an aggregate
+processing loss of $8.20$~dB and a coherent efficiency
+$\eta_p=10^{-8.20/10}=0.151$. This effective factor absorbs finite
+synchronization and reference mismatch, windowing, phase-coherence loss,
+and implementation loss. Because it is not a universal constant, we use
+$20$--$24$~dB as a sensitivity interval around the $21.9$-dB baseline.
+The communication and sensing bounds use the same input-referred
+thermal-noise model $N=kTBF$, with a common equivalent
 receiver noise figure $F$ obtained from the simulated LNA/IF-amplifier
-Friis cascade and without ZBD-NEP or quantization noise. The measured
-SI-normalized CFR profile gain is retained only as an experimental DSP
-metric and is not substituted into the theoretical ISAC-range bound.
+Friis cascade and without ZBD-NEP or quantization noise.
 
 Under a distance-independent post-detection noise floor, the SI-assisted
 ZBD output SINR scales as $R^{-4}$, from the $\alpha\beta$ cross-beat
@@ -318,8 +345,9 @@ square-law self-detection in the output domain, not the conventional
 $R^{-4}$ radar signal-to-noise ratio defined at the RF input; the
  measured sensing SINR reported here is defined in the ZBD output domain.
 The gain grows with the SI strength $\alpha$, but only until the front
-end reaches $\mathrm{IP}_{1\mathrm{dB}}$ or the $\alpha^4$ SSBI floor
-binds, whichever occurs first. The maximum sensing range
+end reaches $\mathrm{IP}_{1\mathrm{dB}}$; if $m$ is increased beyond the
+reported operating region, the omitted leakage-generated SSBI must also
+be reinstated. The maximum sensing range
 $R_{\max}^{\mathrm{sens}}(m,\rho)$ solves
 $\mathrm{SINR}_{\mathrm{sens}}=\gamma_{th}$, with $\gamma_{th}$ set by a
 target detection operating point, for example $P_d=0.9$ at
@@ -327,6 +355,32 @@ $P_{fa}=10^{-6}$ for a single-look, non-fluctuating target.
 
 \subsection{ISAC Range}
 \label{sec:isac_range}
+
+For the deterministic range plot, define
+$P_{\mathrm{ec}}(R)=P_tK/R^4$,
+$P_{\mathrm{SI}}=P_t\alpha_0^2$, and
+$P_{\mathrm{rx},c}(R)=P_tG_c/R^2$, where $G_c$ already contains the
+one-way Friis coefficient, insertion losses, and the load-acceptance
+factor $1-|\Gamma|^2$.  The noise-limited range bounds implemented in
+the GUI are then
+\begin{align}
+R_{\max}^{\mathrm{comm}}
+&=\left[\frac{(1-\rho)m^2P_tG_c}{N\gamma_c}\right]^{1/2},\notag\\
+R_{\max}^{\mathrm{sens,w/\ SI}}
+&=\left[\frac{2\rho m^2G_{p,\mathrm{eff}}P_{\mathrm{SI}}P_tK}
+{P_0N\gamma_{\mathrm{th}}}\right]^{1/4},\notag\\
+R_{\max}^{\mathrm{sens,w/o\ SI}}
+&=\left[\frac{2\rho m^2G_{p,\mathrm{eff}}(P_tK)^2}
+{P_0N\gamma_{\mathrm{th}}}\right]^{1/8}.
+\label{eq:range_bounds}
+\end{align}
+Thus effective RCS appears only through $K\propto\sigma_{\mathrm{eff}}$:
+the with-SI and without-SI ranges scale respectively as
+$\sigma_{\mathrm{eff}}^{1/4}$ and $\sigma_{\mathrm{eff}}^{1/4}$, while
+their different $R^{-4}$ and $R^{-8}$ laws produce fourth- and
+eighth-root sensitivity to SINR gain.  The communication curve remains
+constant on an effective-RCS sweep because $|\Gamma|$ is held fixed and
+is not inferred back from the scenario-level RCS.
 
 The ISAC range is
 \begin{equation}

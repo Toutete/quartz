@@ -62,7 +62,7 @@ from read_range_data import metric_map, to_float, unpack
 
 C = 3e8
 PAPER_BOX_ASPECT = 0.8  # height / width, i.e. 5:4 landscape plot box
-SIM_CACHE_MODEL_VERSION = "evm-tradeoff-v3-20260722"
+SIM_CACHE_MODEL_VERSION = "evm-tradeoff-v4-gamma-coupled-20260722"
 
 
 def load_measured_table() -> dict[str, dict[str, np.ndarray]]:
@@ -266,6 +266,9 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
     def pf(key: str, default: float) -> float:
         return float(p.get(key, default))
 
+    has_rcs_mode = "target_rcs_mode" in p
+    rcs_mode_label = str(p.get("target_rcs_mode", "Direct effective RCS")).strip().lower()
+    rcs_mode = "direct_effective" if rcs_mode_label.startswith("direct") else "coupled_antenna"
     cfg = sim.SimConfig(
         fs_gsps=float(a.get("fs_var", 100.0)),
         linewidth_mhz=pf("linewidth_mhz", 0.015),
@@ -308,11 +311,12 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
         rx_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
         c1_cable_loss_db=pf("c1_cable_loss_db", 0.0),
         c2_cable_loss_db=pf("c2_cable_loss_db", 0.0),
-        target_rcs_sqm=pf("rcs_sqm", 1.0),
-        target_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
-        target_gamma_mag=pf("target_gamma_mag", 1.0),
+        target_rcs_sqm=pf("target_rcs_sqm", 0.01),
+        target_ant_gain_dbi=pf("target_ant_gain_dbi", pf("tx_ant_gain_dbi", 30.0)),
+        target_gamma_mag=pf("target_gamma_mag", 0.1) if has_rcs_mode else 0.0,
         target_pol_eff=pf("target_pol_eff", 1.0),
-        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -4.28),
+        target_rcs_mode=rcs_mode,
+        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -19.10) if rcs_mode == "direct_effective" else None,
         target_dist_m=max(pf("target_dist_m", 1.0), 0.1),
         syms_per_chirp=max(8, int(float(a.get("chirp_len_var", 1024)))),
         pilot_rho=float(np.clip(float(a.get("pilot_rho_var", 0.20)), 0.0, 0.95)),

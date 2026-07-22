@@ -2136,11 +2136,12 @@ class SimConfig:
     rx_ant_gain_dbi: float = 32.0
     target_rcs_sqm: float = 0.01
     target_ant_gain_dbi: float = 32.0
-    target_gamma_mag: float = 0.5
+    target_gamma_mag: float = 0.1
     target_pol_eff: float = 1.0
-    # Direct effective RCS override used by the main GUI. The legacy component
-    # fields above remain available for older scripts and saved configurations.
-    target_effective_rcs_dbsm: float | None = -4.28
+    target_rcs_mode: str = "coupled_antenna"
+    # Optional measured/scenario-level RCS override. In coupled-antenna mode
+    # this is None and sigma_eff is derived from structural + antenna modes.
+    target_effective_rcs_dbsm: float | None = None
     target_dist_m: float = 1.0  # Default 1m
     # Deterministic by default so repeated GUI runs are directly comparable.
     # Set to None explicitly when a Monte-Carlo noise realization is required.
@@ -2595,7 +2596,8 @@ def calc_isac_link_budget(
     effective_rcs_dbsm: float | None = None,
 ) -> dict[str, float]:
     # One-way RX (C1): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant -> OMT -> LNA
-    #   P_rx_received = P_tx - L_OMT + G_tx - FSPL + G_rx - L_OMT
+    #   P_rx,load = (1-|Gamma|^2) P_incident
+    #             = P_tx - L_OMT + G_tx - FSPL + G_rx - L_OMT - L_mismatch
     # Monostatic sensing RX (C2): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant
     #   (antenna-mode + structural RCS) -- FSPL -- TX ant -> OMT -> LNA
     #   P_radar_echo = P_tx - L_OMT + G_tx - L_radar + G_tx - L_OMT
@@ -2608,10 +2610,16 @@ def calc_isac_link_budget(
     g_target = 10.0 ** (float(target_ant_gain_dbi) / 10.0)
     gamma_mag = float(np.clip(abs(float(target_gamma_mag)), 0.0, 1.0))
     pol_eff = float(np.clip(float(target_pol_eff), 0.0, 1.0))
-    # Structural RCS is already an area in m^2; antenna gain and load
-    # reflection must not multiply it again.  Those factors belong only to
-    # the antenna-mode reradiation term.
-    sigma_struct_eff = sigma_struct * pol_eff
+    # Gamma is referenced to the antenna's conjugate match. The fraction
+    # accepted by the communication receiver is therefore 1-|Gamma|^2. This
+    # same Gamma drives antenna-mode reradiation below. Structural scattering
+    # is retained separately and does not vanish at a matched load.
+    comm_accepted_fraction = max(1.0 - gamma_mag ** 2, 0.0)
+    comm_mismatch_loss_db = -10.0 * np.log10(max(comm_accepted_fraction, 1e-30))
+    # Structural RCS is already an area in m^2 and remains when the antenna is
+    # conjugately matched. Antenna mismatch and antenna polarization factors
+    # therefore apply only to the antenna-mode reradiation term.
+    sigma_struct_eff = sigma_struct
     sigma_ant = (lam ** 2 * g_target ** 2 * gamma_mag ** 2 * pol_eff) / (4.0 * np.pi)
     sigma_derived = max(sigma_struct_eff + sigma_ant, 1e-12)
     if effective_rcs_dbsm is None or not np.isfinite(float(effective_rcs_dbsm)):
@@ -2626,7 +2634,8 @@ def calc_isac_link_budget(
     fspl_one_way_db = 20.0 * np.log10(4.0 * np.pi * d * rf_hz / 3e8)
     rcs_gain_db = 10.0 * np.log10(4.0 * np.pi * sigma / (lam ** 2) + 1e-30)
     radar_loss_db = 2.0 * fspl_one_way_db - rcs_gain_db
-    c1_total_loss_db = fspl_one_way_db - tx_gain_dbi - rx_gain_dbi + 2.0 * omt_il_db
+    c1_free_space_loss_db = fspl_one_way_db - tx_gain_dbi - rx_gain_dbi + 2.0 * omt_il_db
+    c1_total_loss_db = c1_free_space_loss_db + comm_mismatch_loss_db
     c2_total_loss_db = radar_loss_db - tx_gain_dbi - rx_gain_dbi + 2.0 * omt_il_db
     c1_rf_dbm = float(tx_dbm - c1_total_loss_db)
     c2_rf_dbm = float(tx_dbm - c2_total_loss_db)
@@ -2640,12 +2649,17 @@ def calc_isac_link_budget(
         "omt_il_db": omt_il_db,
         "radar_path_loss_db": c2_total_loss_db,
         "c1_total_loss_db": c1_total_loss_db,
+        "c1_free_space_loss_db": c1_free_space_loss_db,
+        "target_gamma_mag": gamma_mag,
+        "comm_accepted_fraction": comm_accepted_fraction,
+        "comm_mismatch_loss_db": comm_mismatch_loss_db,
         "structural_rcs_sqm": sigma_struct,
         "reradiated_structural_rcs_sqm": sigma_struct_eff,
         "antenna_mode_rcs_sqm": sigma_ant,
         "effective_rcs_sqm": sigma,
         "effective_rcs_dbsm": float(effective_rcs_dbsm),
         "rcs_is_direct": rcs_is_direct,
+        "rcs_incoherent_sum_assumed": 1.0 - rcs_is_direct,
         "c1_rf_dbm": c1_rf_dbm,
         "c2_rf_dbm": c2_rf_dbm,
         "c1_if_chain_db": c1_if_chain_db,
@@ -3678,6 +3692,10 @@ def run_isac_sim(cfg: SimConfig):
         "antenna_mode_rcs_sqm": link["antenna_mode_rcs_sqm"],
         "effective_rcs_sqm": link["effective_rcs_sqm"],
         "effective_rcs_dbsm": link["effective_rcs_dbsm"],
+        "target_rcs_mode": str(cfg.target_rcs_mode),
+        "target_gamma_mag": link["target_gamma_mag"],
+        "comm_accepted_fraction": link["comm_accepted_fraction"],
+        "comm_mismatch_loss_db": link["comm_mismatch_loss_db"],
         "rf_noise_bw_hz": rf_noise_bw_hz,
         "if_noise_bw_hz": if_noise_bw_hz,
         "optical_center_freq_thz": cfg.optical_center_freq_thz,
@@ -3766,6 +3784,12 @@ class PhotonicIsacSimPanel:
             self.ssb_enable_var.set(False)
             if "omt_iso_db" in self.params:
                 self.params["omt_iso_db"].set("24")
+            # Migrate the project baseline to the physically coupled target:
+            # a well-matched antenna (20-dB return loss) plus structural RCS.
+            self.params["target_rcs_mode"].set("Coupled antenna")
+            self.params["target_gamma_mag"].set("0.1")
+            self.params["target_rcs_sqm"].set("0.01")
+            self.params["target_pol_eff"].set("1.0")
             self.status_var.set(f"Default preset: {preset_path.name}")
         except Exception as exc:
             self.status_var.set(f"Default preset error: {exc}")
@@ -3824,9 +3848,17 @@ class PhotonicIsacSimPanel:
         }
 
     def _apply_sim_preset(self, preset: dict) -> None:
-        for key, value in dict(preset.get("params", {})).items():
+        preset_params = dict(preset.get("params", {}))
+        for key, value in preset_params.items():
             if key in self.params:
                 self.params[key].set(str(value))
+        if "target_rcs_mode" not in preset_params:
+            # Legacy presets used a direct effective-RCS override and assumed
+            # full communication absorption. Preserve that old behavior
+            # explicitly instead of interpreting a legacy |Gamma|=1 as zero
+            # communication power under the new coupled model.
+            self.params["target_rcs_mode"].set("Direct effective RCS")
+            self.params["target_gamma_mag"].set("0.0")
         controls = dict(preset.get("controls", {}))
         bool_map = {
             "carrier_wander_enable": self.carrier_wander_enable_var,
@@ -3948,10 +3980,14 @@ class PhotonicIsacSimPanel:
             "tx":        self.table.insert("", "end", text="UTC-PD Output (TX)", values=("0.00", "dBm")),
             "opt_pwr":   self.table.insert("", "end", text="UTC-PD Optical In", values=("0.00", "mW")),
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
+            "rcs_model": self.table.insert("", "end", text="Target RCS Model", values=("coupled", "")),
+            "target_gamma": self.table.insert("", "end", text="Target |Gamma|", values=("0.10", "")),
             "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "dBsm")),
             "delay":     self.table.insert("", "end", text="Sensing Echo Delay", values=("0.00", "ns")),
             "omt_il":    self.table.insert("", "end", text="OMT Insertion Loss (x2)", values=("0.00", "dB")),
             "comm_loss": self.table.insert("", "end", text="C1 FSPL (one-way)", values=("0.00", "dB")),
+            "comm_mismatch": self.table.insert("", "end", text="C1 Load Mismatch Loss", values=("0.00", "dB")),
+            "comm_accepted": self.table.insert("", "end", text="C1 Accepted Power Fraction", values=("0.00", "")),
             "comm_rx":   self.table.insert("", "end", text="C1 P_rx_received",  values=("0.00", "dBm")),
             "radar_fspl2": self.table.insert("", "end", text="C2 Round-trip FSPL", values=("0.00", "dB")),
             "rcs_gain":  self.table.insert("", "end", text="C2 RCS Gain",       values=("0.00", "dB")),
@@ -4067,10 +4103,24 @@ class PhotonicIsacSimPanel:
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "24")
         add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "1.9")
-        add_p(28, "effective_rcs_dbsm", "Effective RCS [dBsm]", "-4.28")
+        self.effective_rcs_entry = add_p(28, "effective_rcs_dbsm", "Effective RCS override [dBsm]", "-19.10")
         add_p(29, "mzm_phi_bias_deg", "MZM Bias phi [deg]", "45.0")
         add_p(35, "mzm_eo_bw_ghz", "MZM EO BW [GHz]", "30.0")
         add_p(36, "awg_dac_bits", "AWG DAC ENOB [bits]", "8.0")
+        ttk.Label(grp, text="Target RCS model").grid(row=37, column=0, sticky="w", pady=2)
+        self.params["target_rcs_mode"] = tk.StringVar(value="Coupled antenna")
+        self.params["target_rcs_mode"].trace_add("write", self._update_table)
+        ttk.Combobox(
+            grp,
+            textvariable=self.params["target_rcs_mode"],
+            values=["Coupled antenna", "Direct effective RCS"],
+            state="readonly",
+            width=18,
+        ).grid(row=37, column=1, sticky="w")
+        add_p(38, "target_rcs_sqm", "Structural RCS [m^2]", "0.01")
+        add_p(39, "target_ant_gain_dbi", "Target antenna gain [dBi]", "32")
+        add_p(40, "target_gamma_mag", "Target |Gamma|", "0.1")
+        add_p(41, "target_pol_eff", "Target polarization efficiency", "1.0")
 
         ttk.Label(grp, text="Target Dist [m]").grid(row=32, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
@@ -4142,20 +4192,32 @@ class PhotonicIsacSimPanel:
             ) * 1e3
             tx_gain = self._param_float("tx_ant_gain_dbi", 32.0)
             rx_gain = tx_gain
-            effective_rcs_dbsm = self._param_float("effective_rcs_dbsm", -4.28)
+            rcs_mode = self.params["target_rcs_mode"].get().strip()
+            effective_rcs_dbsm = (
+                self._param_float("effective_rcs_dbsm", -19.10)
+                if rcs_mode.lower().startswith("direct")
+                else None
+            )
+            if hasattr(self, "effective_rcs_entry"):
+                self.effective_rcs_entry.configure(
+                    state="normal" if effective_rcs_dbsm is not None else "disabled"
+                )
             link = calc_isac_link_budget(
                 distance_m=d,
                 rf_ghz=rf_ghz,
                 tx_dbm=tx_dbm,
                 tx_gain_dbi=tx_gain,
                 rx_gain_dbi=rx_gain,
-                rcs_sqm=0.0,
+                rcs_sqm=self._param_float("target_rcs_sqm", 0.01),
                 lna_gain_db=self._param_float("lna_gain_db", 13.0),
                 c1_drive_gain_db=self._param_float("c1_drive_gain_db", 27.0),
                 c2_drive_gain_db=self._param_float("c2_drive_gain_db", 20.0),
                 c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
                 c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
                 omt_il_db=self._param_float("omt_il_db", 2.0),
+                target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", tx_gain),
+                target_gamma_mag=self._param_float("target_gamma_mag", 0.1),
+                target_pol_eff=self._param_float("target_pol_eff", 1.0),
                 effective_rcs_dbsm=effective_rcs_dbsm,
             )
             delay_ns = link["delay_ns"]
@@ -4233,6 +4295,10 @@ class PhotonicIsacSimPanel:
                 )
             if "rcs_eff" in self.rows:
                 self.table.item(self.rows["rcs_eff"], values=(f"{link['effective_rcs_dbsm']:.2f}", "dBsm"))
+            if "rcs_model" in self.rows:
+                self.table.item(self.rows["rcs_model"], values=(rcs_mode, ""))
+            if "target_gamma" in self.rows:
+                self.table.item(self.rows["target_gamma"], values=(f"{link['target_gamma_mag']:.3f}", ""))
             self.table.item(self.rows["delay"], values=(f"{delay_ns:.2f}", "ns"))
             if "omt_il" in self.rows:
                 self.table.item(self.rows["omt_il"], values=(f"{2.0 * link['omt_il_db']:.2f}", "dB"))
@@ -4240,6 +4306,10 @@ class PhotonicIsacSimPanel:
             self.table.item(self.rows["echo"], values=(f"{echo_dbm:.1f}", "dBm"))
             if "comm_loss" in self.rows:
                 self.table.item(self.rows["comm_loss"], values=(f"{loss_com_db:.1f}", "dB"))
+            if "comm_mismatch" in self.rows:
+                self.table.item(self.rows["comm_mismatch"], values=(f"{link['comm_mismatch_loss_db']:.2f}", "dB"))
+            if "comm_accepted" in self.rows:
+                self.table.item(self.rows["comm_accepted"], values=(f"{link['comm_accepted_fraction']:.4f}", ""))
             if "comm_rx" in self.rows:
                 self.table.item(self.rows["comm_rx"], values=(f"{comm_dbm:.1f}", "dBm"))
             if "radar_fspl2" in self.rows:
@@ -4266,6 +4336,13 @@ class PhotonicIsacSimPanel:
                 return float(fallback)
         awg_rf_dbm = _awg_float("power_dbm_var", -6.0) if awg else -6.0
         rf_ghz = _awg_float("rf_var", 280.0) if awg else 280.0
+        rcs_mode_label = self.params["target_rcs_mode"].get().strip()
+        rcs_mode = "direct_effective" if rcs_mode_label.lower().startswith("direct") else "coupled_antenna"
+        effective_rcs_override = (
+            self._param_float("effective_rcs_dbsm", -19.10)
+            if rcs_mode == "direct_effective"
+            else None
+        )
         cfg = SimConfig(
             fs_gsps=_awg_float("fs_var", 120.0) if awg else 120.0,
             linewidth_mhz=self._param_float("linewidth_mhz", 0.015),
@@ -4308,11 +4385,12 @@ class PhotonicIsacSimPanel:
             rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
-            target_rcs_sqm=0.0,
-            target_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
-            target_gamma_mag=0.0,
-            target_pol_eff=1.0,
-            target_effective_rcs_dbsm=self._param_float("effective_rcs_dbsm", -4.28),
+            target_rcs_sqm=max(self._param_float("target_rcs_sqm", 0.01), 0.0),
+            target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", self._param_float("tx_ant_gain_dbi", 32.0)),
+            target_gamma_mag=float(np.clip(self._param_float("target_gamma_mag", 0.1), 0.0, 1.0)),
+            target_pol_eff=float(np.clip(self._param_float("target_pol_eff", 1.0), 0.0, 1.0)),
+            target_rcs_mode=rcs_mode,
+            target_effective_rcs_dbsm=effective_rcs_override,
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
@@ -4349,6 +4427,7 @@ class PhotonicIsacSimPanel:
         self.ax_const = self.fig.add_subplot(gs[1,2])
         self.lines = []
         self._spectrum_band_artists = []
+        self._spectrum_power_texts = {}
         titles = ["1) Optical Tones", "2) UTC-PD Output (TX Antenna)", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
         colors = ["purple", "red", "#2563eb", "#2563eb"]
 
@@ -4357,8 +4436,18 @@ class PhotonicIsacSimPanel:
             line, = ax.plot([], [], lw=1.1 if i >= 2 else 1.5, color=colors[i], label=line_label)
             if i == 2:
                 self.l_c2_band, = ax.plot([], [], lw=1.0, color="#dc2626", alpha=0.90, label="In-band raw")
+                self._spectrum_power_texts["C2"] = ax.text(
+                    0.02, 0.04, "", transform=ax.transAxes, ha="left", va="bottom",
+                    fontsize=7.5, color="#111827",
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#94a3b8", "alpha": 0.88},
+                )
             if i == 3:
                 self.l_c1_band, = ax.plot([], [], lw=1.0, color="#dc2626", alpha=0.90, label="In-band raw")
+                self._spectrum_power_texts["C1"] = ax.text(
+                    0.02, 0.04, "", transform=ax.transAxes, ha="left", va="bottom",
+                    fontsize=7.5, color="#111827",
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#94a3b8", "alpha": 0.88},
+                )
             ax.legend(loc="upper right", fontsize=8)
             self.lines.append(line)
             ax.set_title(titles[i])
@@ -4469,10 +4558,42 @@ class PhotonicIsacSimPanel:
 
             c1m = self.data.get("c1_band_metrics", {})
             c2m = self.data.get("c2_band_metrics", {})
+            c2rawm = self.data.get("c2_raw_band_metrics", {})
             if "c1_band" in self.rows:
                 self.table.item(self.rows["c1_band"], values=(f"{float(c1m.get('band_power_dbm', np.nan)):.2f}", "dBm"))
             if "c2_band" in self.rows:
+                c2_is_phase_avg = c2m.get("metric_mode") == "phase_averaged_target"
+                self.table.item(
+                    self.rows["c2_band"],
+                    text=(
+                        "C2 Target Band Power (phase avg.)"
+                        if c2_is_phase_avg
+                        else "C2 Coherent Band Power (noise-sub.)"
+                    ),
+                )
                 self.table.item(self.rows["c2_band"], values=(f"{float(c2m.get('band_power_dbm', np.nan)):.2f}", "dBm"))
+
+            def _metric_dbm(metrics: dict, key: str) -> str:
+                value = float(metrics.get(key, float("nan")))
+                return f"{value:.2f}" if np.isfinite(value) else "N/A"
+
+            c1_text = (
+                f"Raw band: {_metric_dbm(c1m, 'raw_band_power_dbm')} dBm\n"
+                f"Signal (noise-sub.): {_metric_dbm(c1m, 'band_power_dbm')} dBm"
+            )
+            c2_metric_label = (
+                "Target (phase-avg.)"
+                if c2m.get("metric_mode") == "phase_averaged_target"
+                else "Coherent (noise-sub.)"
+            )
+            c2_text = (
+                f"Raw band: {_metric_dbm(c2rawm, 'raw_band_power_dbm')} dBm\n"
+                f"{c2_metric_label}: {_metric_dbm(c2m, 'band_power_dbm')} dBm"
+            )
+            if "C1" in self._spectrum_power_texts:
+                self._spectrum_power_texts["C1"].set_text(c1_text)
+            if "C2" in self._spectrum_power_texts:
+                self._spectrum_power_texts["C2"].set_text(c2_text)
             if "c1_noise" in self.rows:
                 self.table.item(self.rows["c1_noise"], values=(f"{float(c1m.get('noise_power_dbm', c1m.get('noise_dbm', np.nan))):.2f}", "dBm"))
             if "c2_noise" in self.rows:
@@ -13745,70 +13866,6 @@ class SystemModelValidationPanel:
         self._build_ui()
         self.status_var.set("Ready. Sync parameters, then run the required sweep.")
 
-    def _build_ui(self) -> None:
-        outer = ttk.PanedWindow(self.parent, orient=tk.HORIZONTAL)
-        outer.pack(fill=tk.BOTH, expand=True)
-        left = ttk.Frame(outer)
-        right = ttk.Frame(outer)
-        outer.add(left, weight=1)
-        outer.add(right, weight=5)
-
-        ctrl = ttk.LabelFrame(left, text="Paper Model Parameters", padding=8)
-        ctrl.pack(fill=tk.BOTH, expand=True)
-
-        def add(row: int, key: str, label: str, value: str, read_only: bool = False) -> None:
-            ttk.Label(ctrl, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            var = tk.StringVar(value=value)
-            self.params[key] = var
-            ttk.Entry(ctrl, textvariable=var, width=12).grid(row=row, column=1, sticky="w", pady=2)
-
-        add(0, "r_min_m", "Distance min [m]", "0.25")
-        add(1, "r_max_m", "Range max [m]", "2")
-        add(2, "n_range", "Sweep points", "9")
-        add(3, "rho", "rho pilot power", "0.20")
-        add(4, "cspr_db", "Effective CSPR [dB]", "13")
-        add(5, "iso_db", "OMT ISO [dB]", "25")
-        add(6, "ac2", "A_c^2 [mW]", "1.0")
-        add(7, "sqrt_k", "sqrt(K) [amp*m^2]", "1e-4")
-        add(8, "bandwidth_ghz", "B signal [GHz]", "2.0")
-        add(9, "pilot_time_ns", "T_p pilot [ns]", "102.4")
-        add(10, "gc_db", "G_c [dB]", "0")
-        add(11, "noise_density_dbmhz", "Spectrum noise density [dBm/Hz]", "-130")
-        add(12, "modulation_order", "Comm M-QAM", "32")
-        add(13, "ber_target", "BER target", "1e-3")
-        add(14, "pfa", "Sensing Pfa", "1e-6")
-        add(15, "pd", "Sensing Pd", "0.90")
-        add(16, "rho_points", "rho sweep points", "101")
-        add(17, "mc_trials", "MC trials", "2000")
-        add(18, "m_min", "m sweep min", "0.02")
-        add(19, "m_max", "m sweep max", "1.0")
-        add(20, "m_points", "m sweep points", "300")
-        add(21, "phi_bias_deg", "MZM phi_b [deg]", "45")
-        add(22, "gamma1_dbm", "gamma1 [dBm]", "0")
-        add(23, "gamma2_dbm", "gamma2 [dBm]", "-20")
-        add(24, "gamma3_dbm", "gamma3 [dBm]", "-30")
-        add(25, "papr_db", "Waveform PAPR [dB]", "8")
-        add(26, "backoff_db", "Power backoff [dB]", "3")
-        add(27, "m_peak_limit", "m peak limit", "1.0")
-
-        btns = ttk.Frame(ctrl)
-        btns.grid(row=28, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(btns, text="Run", style="Primary.TButton", command=self._run).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Load Save Data", command=self._load_measurement).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Clear Meas.", command=self._clear_measurements).pack(side=tk.LEFT, padx=(6, 0))
-
-        ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=260).grid(
-            row=29, column=0, columnspan=2, sticky="ew", pady=(8, 0)
-        )
-        ctrl.columnconfigure(1, weight=1)
-
-        self.fig = Figure(figsize=(10, 7), dpi=100)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        self.axes = self.fig.subplots(2, 2)
-        self.fig.tight_layout()
-
     def _float(self, key: str, default: float) -> float:
         try:
             return float(self.params[key].get())
@@ -13821,7 +13878,7 @@ class SystemModelValidationPanel:
         except Exception:
             return int(default)
 
-    def _processing_gain_lin(self) -> float:
+    def _ideal_processing_gain_lin(self) -> float:
         bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
         if "pilot_symbols" in self.params and "symbol_rate_gbaud" in self.params:
             pilot_symbols = max(self._float("pilot_symbols", 1024.0), 1.0)
@@ -13830,6 +13887,13 @@ class SystemModelValidationPanel:
         else:
             pilot_time_s = max(self._float("pilot_time_ns", 1024.0) * 1e-9, 1e-15)
         return max(bandwidth_hz * pilot_time_s, 1.0)
+
+    def _processing_gain_lin(self) -> float:
+        """Effective sensing gain; BT_p is retained only as an upper bound."""
+        effective_db = self._finite_param("radar_proc_gain_db")
+        if np.isfinite(effective_db):
+            return max(10.0 ** (effective_db / 10.0), 1.0)
+        return self._ideal_processing_gain_lin()
 
     def _noise_power_mw(self) -> float:
         if "system_nf_db" in self.params:
@@ -13855,84 +13919,6 @@ class SystemModelValidationPanel:
         if "si_on_iso_db" in self.params:
             return self._float("si_on_iso_db", 24.0)
         return self._float("iso_db", 25.0)
-
-    def _qam_moment_factors(self) -> tuple[float, float]:
-        try:
-            m_order = max(2, int(round(self._float("modulation_order", 32.0))))
-            if m_order <= 4:
-                mod = "QPSK"
-            else:
-                mod = f"{m_order}QAM"
-            bps = max(1, int(np.ceil(np.log2(m_order))))
-            bits = np.array(
-                [[int(b) for b in format(i, f"0{bps}b")] for i in range(1 << bps)],
-                dtype=np.uint8,
-            )
-            syms = np.asarray(_bits_to_qam_symbols(bits.reshape(-1), mod), dtype=np.complex128).reshape(-1)
-            if len(syms) == 0:
-                return 1.0, 1.0
-            p2 = max(float(np.mean(np.abs(syms) ** 2)), 1e-30)
-            mu4 = float(np.mean(np.abs(syms) ** 4) / (p2 ** 2))
-            mu6 = float(np.mean(np.abs(syms) ** 6) / (p2 ** 3))
-            return max(mu4, 1.0), max(mu6, 1.0)
-        except Exception:
-            return 1.0, 1.0
-
-    def _sdinr_model(self) -> dict[str, np.ndarray | float]:
-        m_min = max(self._float("m_min", 0.02), 1e-5)
-        m_max = max(self._float("m_max", 1.0), m_min * 1.01)
-        n_pts = max(32, min(self._int("m_points", 300), 5000))
-        m_axis = np.geomspace(m_min, m_max, n_pts)
-        phi_b = np.deg2rad(float(np.clip(self._float("phi_bias_deg", 45.0), 1e-3, 89.999)))
-        cot_phi = 1.0 / max(np.tan(phi_b), 1e-12)
-        gamma1_mw = max(10.0 ** (self._float("gamma1_dbm", 0.0) / 10.0), 1e-30)
-        gamma2_mw = max(10.0 ** (self._float("gamma2_dbm", -20.0) / 10.0), 0.0)
-        gamma3_mw = max(10.0 ** (self._float("gamma3_dbm", -30.0) / 10.0), 0.0)
-        noise_mw = self._noise_power_mw()
-        mu4, mu6 = self._qam_moment_factors()
-        papr_lin = max(10.0 ** (self._float("papr_db", 8.0) / 10.0), 1.0)
-        backoff_lin = max(10.0 ** (self._float("backoff_db", 3.0) / 10.0), 1.0)
-        m_peak_limit = max(self._float("m_peak_limit", 1.0), 1e-6)
-        m_allowed = m_peak_limit / np.sqrt(papr_lin * backoff_lin)
-
-        sig_mw = gamma1_mw * (m_axis ** 2)
-        ssbi_mw = gamma2_mw * mu4 * (m_axis ** 4)
-        imd3_mw = gamma3_mw * mu6 * (m_axis ** 6) * (cot_phi ** 4)
-        den_mw = np.maximum(noise_mw + ssbi_mw + imd3_mw, 1e-30)
-        sdinr = sig_mw / den_mw
-        feasible = m_axis <= m_allowed
-        if np.any(feasible & np.isfinite(sdinr)):
-            feasible_idx = np.flatnonzero(feasible)
-            opt_idx = int(feasible_idx[int(np.nanargmax(sdinr[feasible]))])
-        else:
-            opt_idx = int(np.nanargmax(sdinr)) if np.any(np.isfinite(sdinr)) else 0
-
-        cspr_axis = 1.0 / np.maximum(m_axis ** 2, 1e-30)
-        cspr_now_db = self._float("cspr_db", 20.0)
-        cspr_now = 10.0 ** (cspr_now_db / 10.0)
-        m_now = 1.0 / np.sqrt(max(cspr_now, 1e-30))
-        return {
-            "m": m_axis,
-            "cspr_db": 10.0 * np.log10(cspr_axis),
-            "sdinr": sdinr,
-            "sdinr_db": self._db(sdinr),
-            "signal_mw": sig_mw,
-            "noise_mw": noise_mw,
-            "ssbi_mw": ssbi_mw,
-            "imd3_mw": imd3_mw,
-            "feasible": feasible,
-            "m_allowed": float(m_allowed),
-            "m_opt": float(m_axis[opt_idx]),
-            "cspr_opt_db": float(10.0 * np.log10(cspr_axis[opt_idx])),
-            "sdinr_opt_db": float(10.0 * np.log10(max(sdinr[opt_idx], 1e-30))),
-            "m_now": float(m_now),
-            "cspr_now_db": float(cspr_now_db),
-            "cot_phi": float(cot_phi),
-            "mu4": float(mu4),
-            "mu6": float(mu6),
-            "papr_db": float(10.0 * np.log10(papr_lin)),
-            "backoff_db": float(10.0 * np.log10(backoff_lin)),
-        }
 
     def _comm_threshold_db(self) -> float:
         try:
@@ -13969,85 +13955,6 @@ class SystemModelValidationPanel:
         gamma = hi
         return float(10.0 * np.log10(max(gamma, 1e-30)))
 
-    def _sync_from_sim(self) -> None:
-        try:
-            cfg = None
-            if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
-                cfg = self.photonic_source._cfg_from_ui()
-                waveform_kind = classify_isac_waveform(cfg.waveform)
-                bw_hz = estimate_waveform_bandwidth_hz(cfg, waveform_kind)
-                if bw_hz > 0:
-                    self.params["bandwidth_ghz"].set(f"{bw_hz / 1e9:.6g}")
-                pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(float(cfg.baud_gbaud) * 1e9, 1.0)
-                self.params["pilot_time_ns"].set(f"{pilot_time_s * 1e9:.6g}")
-                self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
-                self.params["cspr_db"].set(f"{float(cfg.cspr_db):.6g}")
-                self.params["iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
-                rf_lines = calc_utcpd_rf_line_powers(cfg)
-                self.params["ac2"].set(f"{float(rf_lines.get('carrier_w', 1e-6)) * 1e3:.6g}")
-                ref_r = max(float(cfg.target_dist_m), 1e-6)
-                link = calc_isac_link_budget(
-                    distance_m=ref_r,
-                    rf_ghz=cfg.rf_carrier_ghz,
-                    tx_dbm=cfg.utcpd_target_dbm,
-                    tx_gain_dbi=cfg.tx_ant_gain_dbi,
-                    rx_gain_dbi=cfg.rx_ant_gain_dbi,
-                    rcs_sqm=cfg.target_rcs_sqm,
-                    lna_gain_db=cfg.lna_gain_db,
-                    c1_drive_gain_db=cfg.c1_drive_gain_db,
-                    c2_drive_gain_db=cfg.c2_drive_gain_db,
-                    c1_cable_loss_db=cfg.c1_cable_loss_db,
-                    c2_cable_loss_db=cfg.c2_cable_loss_db,
-                    omt_il_db=cfg.omt_il_db,
-                    target_ant_gain_dbi=cfg.target_ant_gain_dbi,
-                    target_gamma_mag=cfg.target_gamma_mag,
-                    target_pol_eff=cfg.target_pol_eff,
-                    effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
-                )
-                beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
-                self.params["sqrt_k"].set(f"{beta_ref * ref_r ** 2:.6g}")
-                ac2_mw = max(float(rf_lines.get("carrier_w", 1e-6)) * 1e3, 1e-30)
-                c1_total_mw = dbm_to_w(float(link["c1_rf_dbm"])) * 1e3
-                gc = max(c1_total_mw * ref_r ** 2 / ac2_mw, 1e-30)
-                self.params["gc_db"].set(f"{10.0 * np.log10(gc):.6g}")
-                if getattr(self.photonic_source, "data", None):
-                    c1m = self.photonic_source.data.get("c1_band_metrics", {})
-                    nf = float(c1m.get("noise_density_dbm_hz", c1m.get("noise_floor_dbm_hz", float("nan"))))
-                    if np.isfinite(nf):
-                        self.params["noise_density_dbmhz"].set(f"{nf:.6g}")
-            pl = self.runtime.get("tx_payload")
-            if isinstance(pl, dict) and pl:
-                bw = float(pl.get("B", pl.get("symbol_rate", pl.get("symbol_rate_actual", 2e9))))
-                if np.isfinite(bw) and bw > 0:
-                    self.params["bandwidth_ghz"].set(f"{bw / 1e9:.6g}")
-                n_chirps = int(pl.get("n_chirps", 1))
-                n_sym = int(pl.get("n_sym_per_chirp", 1024))
-                sym_rate = float(pl.get("symbol_rate_actual", pl.get("symbol_rate", 1e9)))
-                if sym_rate > 0:
-                    self.params["pilot_time_ns"].set(f"{(n_chirps * n_sym / sym_rate) * 1e9:.6g}")
-                rho = float(pl.get("amplitude_ratio_rho", float("nan")))
-                if np.isfinite(rho):
-                    self.params["rho"].set(f"{rho:.6g}")
-                if "awg_sig" in pl:
-                    papr = DsoPanel._papr_db(np.asarray(pl["awg_sig"]))
-                    if np.isfinite(papr):
-                        self.params["papr_db"].set(f"{papr:.6g}")
-                mod = str(pl.get("modulation", "")).upper()
-                if "32" in mod:
-                    self.params["modulation_order"].set("32")
-                elif "16" in mod:
-                    self.params["modulation_order"].set("16")
-                elif "64" in mod:
-                    self.params["modulation_order"].set("64")
-            # N_c and N_sensing are not independent knobs here: both are the
-            # integrated ZBD/DSO output noise density over B.
-            self.status_var.set(
-                "Simulation parameters synchronized. "
-                "Press Range Sweep or Symbol Rate Sweep to update curves."
-            )
-        except Exception as exc:
-            messagebox.showerror("Sync Sim", str(exc), parent=self.parent)
-
     def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
         rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
         cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
@@ -14060,7 +13967,14 @@ class SystemModelValidationPanel:
         n_comm = self._noise_power_mw()
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_comm)
-        snr_sens = (2.0 * rho_v * alpha * ac2 * sqrt_k * gp) / (cspr * n_sens * (r ** 2))
+        # All powers are represented numerically in mW, i.e. normalized by
+        # P0=1 mW.  The square-law cross-beat model is therefore
+        # gamma=Gp*2*m^2*rho*P_SI*P_echo/(P0*N), with P0 numerically equal to
+        # one.  P_echo follows R^-4, so the output sensing SINR also follows
+        # R^-4.  Do not use the field product alpha*beta directly here.
+        p_si_mw = ac2 * alpha ** 2
+        p_echo_mw = ac2 * (sqrt_k / (r ** 2)) ** 2
+        snr_sens = gp * 2.0 * rho_v * p_si_mw * p_echo_mw / (cspr * n_sens)
         return {
             "rho": rho_v,
             "snr_comm": snr_comm,
@@ -14070,10 +13984,6 @@ class SystemModelValidationPanel:
             "gp": gp,
             "n_mw": n_comm,
         }
-
-    @staticmethod
-    def _db(x: np.ndarray | float) -> np.ndarray | float:
-        return 10.0 * np.log10(np.maximum(x, 1e-30))
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
@@ -14098,140 +14008,36 @@ class SystemModelValidationPanel:
         g_sens = 10.0 ** (sens_threshold_db / 10.0)
         g_comm = 10.0 ** (comm_threshold_db / 10.0)
         r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_comm * g_comm))
-        r_sens = np.sqrt((2.0 * rho * alpha * ac2 * sqrt_k * gp) / (cspr * n_sens * g_sens))
+        p_si_mw = ac2 * alpha ** 2
+        echo_coefficient_mw_m4 = ac2 * sqrt_k ** 2
+        sensing_coefficient = (
+            2.0 * rho * gp * p_si_mw * echo_coefficient_mw_m4
+            / (cspr * n_sens)
+        )
+        r_sens = np.maximum(sensing_coefficient / g_sens, 0.0) ** 0.25
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
 
-    def _monte_carlo_snr_db(self, snr_lin: np.ndarray) -> np.ndarray:
-        trials = max(32, min(self._int("mc_trials", 2000), 200000))
-        snr = np.asarray(snr_lin, dtype=np.float64)
-        out = np.zeros_like(snr)
-        rng = np.random.default_rng(12345)
-        for idx, val in np.ndenumerate(snr):
-            noise = (rng.normal(size=trials) + 1j * rng.normal(size=trials)) / np.sqrt(2.0)
-            sig = np.sqrt(max(float(val), 0.0))
-            y = sig + noise
-            est_sig = np.abs(np.mean(y)) ** 2
-            est_noise = max(float(np.mean(np.abs(y - np.mean(y)) ** 2)), 1e-30)
-            out[idx] = 10.0 * np.log10(max(est_sig / est_noise, 1e-30))
-        return out
-
-    def _run(self) -> None:
-        try:
-            r_min = max(self._float("r_min_m", 0.2), 1e-6)
-            r_max = max(self._float("r_max_m", 20.0), r_min * 1.01)
-            n_range = max(16, min(self._int("n_range", 240), 5000))
-            ranges = np.geomspace(r_min, r_max, n_range)
-            model = self._model(ranges)
-            rho = float(model["rho"])
-            snr_comm = np.asarray(model["snr_comm"], dtype=np.float64)
-            snr_sens = np.asarray(model["snr_sens"], dtype=np.float64)
-            comm_thr_db = self._comm_threshold_db()
-            sens_thr_db = self._sens_threshold_db()
-            gp_db = 10.0 * np.log10(max(float(model.get("gp", 1.0)), 1e-30))
-            n_dbm = 10.0 * np.log10(max(float(model.get("n_mw", 1e-30)), 1e-30))
-            nf_dbmhz = self._float("noise_density_dbmhz", -130.0)
-
-            sdinr_model = self._sdinr_model()
-
-            ax_snr, ax_sdinr, ax_rho, ax_meas = self.axes.reshape(-1)
-            for ax in self.axes.reshape(-1):
-                ax.cla()
-                ax.grid(True, alpha=0.35)
-
-            ax_snr.semilogx(ranges, self._db(snr_comm), label="SNR_comm calc", color="#2563eb")
-            ax_snr.semilogx(ranges, self._db(snr_sens), label="SNR_sens calc", color="#dc2626")
-            ax_snr.axhline(comm_thr_db, color="#2563eb", linestyle=":", linewidth=0.9, label=f"BER threshold {comm_thr_db:.1f} dB")
-            ax_snr.axhline(sens_thr_db, color="#dc2626", linestyle=":", linewidth=0.9, label=f"Pfa thr {sens_thr_db:.1f} dB")
-            ax_snr.set_title("SNR vs Range")
-            ax_snr.set_xlabel("Range (m)")
-            ax_snr.set_ylabel("SNR [dB]")
-            ax_snr.legend(fontsize=8)
-
-            sample_idx = np.unique(np.linspace(0, len(ranges) - 1, min(28, len(ranges))).astype(int))
-            mc_comm_db = self._monte_carlo_snr_db(snr_comm[sample_idx])
-            mc_sens_db = self._monte_carlo_snr_db(snr_sens[sample_idx])
-            ax_snr.scatter(ranges[sample_idx], mc_comm_db, s=14, marker="o", color="#60a5fa", label="comm MC")
-            ax_snr.scatter(ranges[sample_idx], mc_sens_db, s=14, marker="x", color="#f87171", label="sens MC")
-
-            m_axis = np.asarray(sdinr_model["m"], dtype=np.float64)
-            sdinr_db = np.asarray(sdinr_model["sdinr_db"], dtype=np.float64)
-            m_opt = float(sdinr_model["m_opt"])
-            m_now = float(sdinr_model["m_now"])
-            m_allowed = float(sdinr_model["m_allowed"])
-            cspr_opt_db = float(sdinr_model["cspr_opt_db"])
-            cspr_now_db = float(sdinr_model["cspr_now_db"])
-            sdinr_opt_db = float(sdinr_model["sdinr_opt_db"])
-            papr_db = float(sdinr_model["papr_db"])
-            backoff_db = float(sdinr_model["backoff_db"])
-            ax_sdinr.semilogx(m_axis, sdinr_db, color="#7c3aed", linewidth=1.4, label="SDINR")
-            ax_sdinr.axvline(m_opt, color="#111827", linestyle="--", linewidth=1.0, label=f"m_opt={m_opt:.3g}")
-            if m_axis[0] < m_allowed < m_axis[-1]:
-                ax_sdinr.axvline(m_allowed, color="#dc2626", linestyle="-.", linewidth=1.0, label="PAPR/OBO limit")
-                ax_sdinr.axvspan(m_allowed, m_axis[-1], color="#dc2626", alpha=0.08)
-            if m_axis[0] <= m_now <= m_axis[-1]:
-                ax_sdinr.axvline(m_now, color="#f59e0b", linestyle=":", linewidth=1.2, label=f"current CSPR={cspr_now_db:.1f} dB")
-            ax_sdinr.set_title("SDINR vs Modulation Index")
-            ax_sdinr.set_xlabel("m  (CSPR = 1/m^2)")
-            ax_sdinr.set_ylabel("SDINR [dB]")
-            ax_sdinr.legend(fontsize=8)
-            ax_sdinr.text(
-                0.03, 0.04,
-                f"opt CSPR={cspr_opt_db:.2f} dB\n"
-                f"opt SDINR={sdinr_opt_db:.2f} dB\n"
-                f"PAPR/OBO={papr_db:.1f}/{backoff_db:.1f} dB",
-                transform=ax_sdinr.transAxes,
-                ha="left",
-                va="bottom",
-                fontsize=8,
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.82, edgecolor="#cbd5e1"),
-            )
-
-            n_rho = max(16, min(self._int("rho_points", 101), 2000))
-            rho_axis = np.linspace(1e-3, 0.999, n_rho)
-            r_comm, r_sens, r_joint = self._rmax(rho_axis)
-            ax_rho.plot(rho_axis, r_comm, color="#2563eb", label=r"$R_{\max}^{\mathrm{comm}}$")
-            ax_rho.plot(rho_axis, r_sens, color="#dc2626", label=r"$R_{\max}^{\mathrm{sens}}$")
-            ax_rho.plot(rho_axis, r_joint, color="#111827", linewidth=1.4, label=r"$R_{\max}$ (ISAC)")
-            ax_rho.axvline(rho, color="#64748b", linestyle=":", linewidth=0.9)
-            ax_rho.set_title("ISAC Range")
-            ax_rho.set_xlabel("rho pilot power ratio")
-            ax_rho.set_ylabel("ISAC Range (m)")
-            ax_rho.set_ylim(0.0, 10)
-            ax_rho.legend(fontsize=8)
-
-            ax_meas.semilogx(ranges, self._db(snr_comm), color="#2563eb", alpha=0.35, label="comm calc")
-            ax_meas.semilogx(ranges, self._db(snr_sens), color="#dc2626", alpha=0.35, label="sens calc")
-            for p in self.meas_points:
-                rr = float(p.get("range_m", float("nan")))
-                sc = float(p.get("snr_comm_db", float("nan")))
-                ss = float(p.get("snr_sens_db", float("nan")))
-                name = str(p.get("name", "meas"))
-                if np.isfinite(rr) and np.isfinite(sc):
-                    ax_meas.scatter([rr], [sc], color="#1d4ed8", marker="o", s=36)
-                    ax_meas.annotate(name, (rr, sc), fontsize=7, xytext=(4, 4), textcoords="offset points")
-                if np.isfinite(rr) and np.isfinite(ss):
-                    ax_meas.scatter([rr], [ss], color="#b91c1c", marker="D", s=34)
-            ax_meas.set_title("Loaded Save Data Overlay")
-            ax_meas.set_xlabel("Range (m)")
-            ax_meas.set_ylabel("SNR [dB]")
-            ax_meas.legend(fontsize=8)
-
-            self.fig.tight_layout()
-            self.canvas.draw_idle()
-            rc, rs, rj = self._rmax(np.asarray([rho]))
-            self.status_var.set(
-                f"rho={rho:.3f}  R_max^comm={rc[0]:.3g} m  "
-                f"R_max^sens={rs[0]:.3g} m  R_max(ISAC)={rj[0]:.3g} m  "
-                f"Gp=T*B={gp_db:.1f} dB  "
-                f"N={n_dbm:.1f} dBm ({nf_dbmhz:.1f} dBm/Hz x B)  "
-                f"m_opt={m_opt:.3g} CSPR_opt={cspr_opt_db:.1f} dB  "
-                f"m_limit={m_allowed:.3g}  "
-                f"thr(comm/sens)={comm_thr_db:.1f}/{sens_thr_db:.1f} dB  "
-                f"meas={len(self.meas_points)}"
-            )
-        except Exception as exc:
-            self.status_var.set(f"Error: {exc}")
-            messagebox.showerror("System Model Simulation", str(exc), parent=self.parent)
+    def _rmax_sensing_without_si(self, rho: np.ndarray) -> np.ndarray:
+        """Noise-limited echo-self-beat range from the Sec. II equation."""
+        rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
+        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        ac2 = self._theory_carrier_power_mw()
+        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
+        gp = self._processing_gain_lin()
+        n_sens = self._noise_power_mw()
+        threshold_db = (
+            self._float("sens_req_snr_db", 13.2)
+            if "sens_req_snr_db" in self.params
+            else self._sens_threshold_db()
+        )
+        gamma_threshold = 10.0 ** (threshold_db / 10.0)
+        # P_echo(R)=echo_coefficient/R^4. Squaring it produces R^-8.
+        echo_coefficient_mw_m4 = ac2 * sqrt_k ** 2
+        coefficient = (
+            2.0 * rho * gp * echo_coefficient_mw_m4 ** 2
+            / (cspr * n_sens)
+        )
+        return np.maximum(coefficient / gamma_threshold, 0.0) ** 0.125
 
     @staticmethod
     def _as_float(value, default: float = float("nan")) -> float:
@@ -14278,70 +14084,6 @@ class SystemModelValidationPanel:
         finite = arr[np.isfinite(arr)]
         return float(finite[0]) if len(finite) else float("nan")
 
-    def _load_measurement(self) -> None:
-        path_str = filedialog.askopenfilename(
-            parent=self.parent,
-            title="Load Saved Capture/Range Data",
-            initialdir=str(APP_DIR / "data"),
-            filetypes=[("NumPy save data", "*.npz"), ("All files", "*.*")],
-        )
-        if not path_str:
-            return
-        try:
-            path = Path(path_str)
-            with np.load(path, allow_pickle=True) as loaded:
-                metrics = self._metric_dict_from_npz(loaded)
-                range_m = float("nan")
-                for key in ("range_summary_peak_m", "range_summary_display_m", "range_summary_matched_filter_peak_m"):
-                    range_m = self._range_summary_float_for_channel(loaded, key, "C2")
-                    if np.isfinite(range_m):
-                        break
-                if not np.isfinite(range_m):
-                    for key in ("range_peak_m", "si_cfr_peak_m"):
-                        if key in metrics and np.isfinite(metrics[key]):
-                            range_m = metrics[key]
-                            break
-                snr_comm = metrics.get("evm_snr", float("nan"))
-                if not np.isfinite(snr_comm) and np.isfinite(metrics.get("evm_db", float("nan"))):
-                    snr_comm = -float(metrics.get("evm_db"))
-                if not np.isfinite(snr_comm):
-                    snr_comm = metrics.get("snr_com_db", metrics.get("snr_com_db_c1", float("nan")))
-                snr_sens = metrics.get(
-                    "snr_rad_post_db_c2",
-                    metrics.get(
-                        "snr_rad_post_db",
-                        metrics.get("snr_rad_db", metrics.get("snr_com_db_c2", float("nan"))),
-                    ),
-                )
-                if not np.isfinite(snr_sens):
-                    for key in ("range_summary_pslr_db", "range_summary_diff_cfr_coherence"):
-                        if key in loaded.files:
-                            arr = np.asarray(loaded[key], dtype=np.float64).reshape(-1)
-                            finite = arr[np.isfinite(arr)]
-                            if len(finite):
-                                snr_sens = float(finite[0])
-                                break
-                rho = metrics.get("amplitude_ratio_rho", float("nan"))
-                if not np.isfinite(rho) and "dsp__pilot_rho" in loaded.files:
-                    rho = self._as_float(loaded["dsp__pilot_rho"])
-                point = {
-                    "name": path.stem[:18],
-                    "range_m": range_m,
-                    "snr_comm_db": snr_comm,
-                    "snr_sens_db": snr_sens,
-                    "rho": rho,
-                }
-                self.meas_points.append(point)
-            self._run()
-        except Exception as exc:
-            messagebox.showerror("Load Save Data", str(exc), parent=self.parent)
-
-    def _clear_measurements(self) -> None:
-        self.meas_points.clear()
-        self._run()
-
-    # Final paper-figure implementation.  These definitions intentionally
-    # override the earlier exploratory SDINR/rho methods above.
     def _build_ui(self) -> None:
         outer = ttk.PanedWindow(self.parent, orient=tk.HORIZONTAL)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -14350,7 +14092,36 @@ class SystemModelValidationPanel:
         outer.add(left, weight=1)
         outer.add(right, weight=5)
 
-        ctrl = ttk.LabelFrame(left, text="ISAC Range Validation", padding=8)
+        # The parameter list is taller than a typical laptop display.  Keep
+        # the plot pane fixed and make the controls independently scrollable
+        # so the action buttons remain reachable at every screen resolution.
+        control_canvas = tk.Canvas(left, width=330, highlightthickness=0, borderwidth=0)
+        control_scrollbar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=control_canvas.yview)
+        control_canvas.configure(yscrollcommand=control_scrollbar.set)
+        control_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        control_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        control_host = ttk.Frame(control_canvas)
+        control_window = control_canvas.create_window((0, 0), window=control_host, anchor="nw")
+
+        def resize_control_scrollregion(_event=None) -> None:
+            control_canvas.configure(scrollregion=control_canvas.bbox("all"))
+
+        def resize_control_width(event) -> None:
+            control_canvas.itemconfigure(control_window, width=max(int(event.width), 1))
+
+        def scroll_controls(event) -> None:
+            widget = event.widget
+            while widget is not None and widget is not control_host and widget is not control_canvas:
+                widget = getattr(widget, "master", None)
+            if widget is control_host or widget is control_canvas:
+                delta = -1 if event.delta > 0 else 1
+                control_canvas.yview_scroll(delta, "units")
+
+        control_host.bind("<Configure>", resize_control_scrollregion)
+        control_canvas.bind("<Configure>", resize_control_width)
+        control_canvas.bind_all("<MouseWheel>", scroll_controls, add="+")
+
+        ctrl = ttk.LabelFrame(control_host, text="ISAC Range Validation", padding=8)
         ctrl.pack(fill=tk.BOTH, expand=True)
 
         def add(row: int, key: str, label: str, value: str, read_only: bool = False) -> None:
@@ -14367,7 +14138,9 @@ class SystemModelValidationPanel:
                 "system_nf_db", "bandwidth_ghz",
                 "pilot_symbols", "symbol_rate_gbaud",
                 "theoretical_snr_anchor_db",
+                "radar_proc_gain_db",
                 "isac_range_ylim_min", "isac_range_ylim_max",
+                "rcs_min_dbsm", "rcs_max_dbsm", "rcs_points",
             }:
                 entry.bind("<Return>", lambda _event: self._refresh_plot())
                 entry.bind("<FocusOut>", lambda _event: self._refresh_plot())
@@ -14381,7 +14154,7 @@ class SystemModelValidationPanel:
         add(3, "ref_range_m", "Reference range [m]", "1.0")
         add(4, "si_on_iso_db", "SI-on isolation [dB]", "24")
         add(5, "si_off_iso_db", "SI-off isolation [dB]", "1000")
-        add(6, "sweep_tx_power_dbm", "Effective THz P_t [dBm]", "-10")
+        add(6, "sweep_tx_power_dbm", "Effective THz P_t [dBm]", "0")
         add(7, "rho", "Power-allocation ratio, rho", "0.20")
         add(8, "system_nf_db", "Common system NF [dB]", "8.0", read_only=True)
         add(9, "bandwidth_ghz", "Symbol rate / bandwidth [GBd/GHz]", "15.0", read_only=True)
@@ -14395,41 +14168,40 @@ class SystemModelValidationPanel:
         add(17, "radar_ylim_max", "Sensing SINR y max [dB]", "50")
         add(18, "manual_evm_points", "Measured EVM [GBd: dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
         add(19, "manual_c2_si_on_points", "Measured C2 SI-on [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
-        add(20, "radar_proc_gain_db", "Sensing G_p,eff [dB]", "21.9", read_only=True)
-        add(21, "isac_range_ylim_min", "ISAC log y min [m]", "0.1")
-        add(22, "isac_range_ylim_max", "ISAC range y max [m]", "5")
+        add(20, "ideal_processing_gain_db", "Ideal processing gain BT_p [dB]", "30.10", read_only=True)
+        add(21, "radar_proc_gain_db", "Effective processing gain G_p,eff [dB]", "21.9")
+        add(22, "isac_range_ylim_min", "ISAC log y min [m]", "0.1")
+        add(23, "isac_range_ylim_max", "ISAC range y max [m]", "5")
+        add(24, "rcs_min_dbsm", "Effective RCS min [dBsm]", "-30")
+        add(25, "rcs_max_dbsm", "Effective RCS max [dBsm]", "0")
+        add(26, "rcs_points", "Effective RCS sweep points", "201")
+        add(27, "target_gamma_mag", "Target |Gamma|", "0.1", read_only=True)
+        add(28, "target_rcs_sqm", "Structural RCS [m^2]", "0.01", read_only=True)
+        add(29, "target_ant_gain_dbi", "Target antenna gain [dBi]", "32", read_only=True)
+        add(30, "target_rcs_mode", "Target RCS model", "coupled_antenna", read_only=True)
         hidden("rho_ref", "0.20")
         hidden("symbol_rate_gbaud", "15.0")
         hidden("sim_comm_ref_snr_db", "17.49")
         hidden("c2_power_ref_dbm", "-42.52")
-        hidden("c2_meas_power_min_dbm", "")
+        hidden("c2_target_power_ref_dbm", "-42.52")
         hidden("c2_no_si_power_ref_dbm", "")
-        hidden("si_off_power_penalty_db", "")
-        hidden("n_range", "9")
         hidden("comm_ref_snr_db", "17.49")
-        hidden("sens_ref_snr_db", "21.6")
-        hidden("sim_sens_ref_snr_db", "21.6")
         hidden("noise_temperature_k", "290.0")
         hidden("c2_noise_power_dbm", "-46.47")
-        hidden("raw_noise_dbm", "")
-        hidden("target_peak_dbm_ref", "")
-        hidden("alpha_ref_db", "0")
-        hidden("processing_gain_db", "0")
         hidden("ac2", "1.0")
         hidden("sqrt_k", "1e-4")
         hidden("gc_db", "0")
         hidden("cspr_db", "13")
         hidden("theory_tx_ref_dbm", "-10")
-        hidden("effective_rcs_dbsm", "-4.28")
-        hidden("rho_points", "201")
+        hidden("effective_rcs_dbsm", "-19.10")
 
         btns = ttk.Frame(ctrl)
-        btns.grid(row=23, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        btns.grid(row=31, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(btns, text="Symbol Rate Sweep", command=self._run_symbol_rate_sweep).pack(side=tk.LEFT)
         ttk.Button(btns, text="Range Sweep", style="Primary.TButton", command=self._run).pack(side=tk.LEFT, padx=(6, 0))
 
         action_btns = ttk.Frame(ctrl)
-        action_btns.grid(row=24, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        action_btns.grid(row=32, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(action_btns, text="Redraw", command=self._refresh_plot).pack(side=tk.LEFT)
         ttk.Button(action_btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(action_btns, text="Save Figures", command=self._save_all_figures).pack(side=tk.LEFT, padx=(6, 0))
@@ -14441,22 +14213,22 @@ class SystemModelValidationPanel:
             text="Log range axis for SINR figure",
             variable=self.sinr_log_range_var,
             command=self._refresh_plot,
-        ).grid(row=25, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ).grid(row=33, column=0, columnspan=2, sticky="w", pady=(5, 0))
         self.isac_log_range_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             ctrl,
             text="Log ISAC range y axis",
             variable=self.isac_log_range_var,
             command=self._refresh_plot,
-        ).grid(row=26, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=34, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(
             ctrl,
             text="Include legend in saved PNG",
             variable=self.save_legend_var,
-        ).grid(row=27, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=35, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=280).grid(
-            row=28, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+            row=36, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
         ctrl.columnconfigure(1, weight=1)
 
@@ -15105,13 +14877,13 @@ class SystemModelValidationPanel:
         red = "#ff0000"
         green = "#008000"
         linewidth = 1.9 if for_save else 1.5
-        ax.plot(ranges, c2_on, color=red, linestyle="--", linewidth=linewidth, label="Sim. (with SI)")
+        ax.plot(ranges, c2_on, color=red, linestyle="--", linewidth=linewidth, label="Sim. raw (with SI)")
         if no_si_valid:
             ax.plot(ranges, c2_off, color=green, linestyle="--", linewidth=linewidth * 0.9,
-                    label="Sim. (without SI)")
+                    label="Sim. raw (without SI)")
         for state, color, marker, label in (
-            ("on", red, "s", "Meas. (with SI)"),
-            ("off", green, "^", "Meas. (without SI)"),
+            ("on", red, "s", "Meas. raw (with SI)"),
+            ("off", green, "^", "Meas. raw (without SI)"),
         ):
             points = cache.get(f"c2_{state}_points", [])
             if points:
@@ -15128,7 +14900,7 @@ class SystemModelValidationPanel:
                 )
         ax.set_xlim(float(cache["x_min"]), float(cache["x_max"]))
         ax.set_xlabel("Range (m)")
-        ax.set_ylabel("C2 band power (dBm)")
+        ax.set_ylabel("C2 raw IF-band power (dBm)")
         ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
         if for_save:
             ax.set_box_aspect(0.8)
@@ -15150,7 +14922,7 @@ class SystemModelValidationPanel:
             ("communication_sensing_sinr_vs_range.png", lambda fig: self._draw_evm_radar_figure(fig, cache, for_save=True)),
             ("evm_vs_symbol_rate.png", lambda fig: self._draw_symbol_rate_axis(fig.add_subplot(111), self.symbol_rate_sweep, for_save=True)),
             ("c2_band_power_vs_range.png", lambda fig: self._draw_c2_power_axis(fig.add_subplot(111), cache, for_save=True)),
-            ("isac_range_vs_rho.png", lambda fig: self._draw_rho_tradeoff_axis(fig.add_subplot(111), for_save=True)),
+            ("isac_range_vs_effective_rcs.png", self._draw_rcs_comparison_figure),
         ]
         try:
             saved_names: list[str] = []
@@ -15171,7 +14943,55 @@ class SystemModelValidationPanel:
         except Exception as exc:
             messagebox.showerror("Save Figures", str(exc), parent=self.parent)
 
-    def _draw_rho_tradeoff_axis(self, ax, for_save: bool = False) -> None:
+    def _rmax_vs_effective_rcs(
+        self, rcs_dbsm: np.ndarray, rho: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return effective-processing-gain range limits versus effective RCS.
+
+        With SI, the desired ZBD cross-beat is proportional to P_SI*P_ec and
+        decays as R^-4.  Without SI, echo self-beat is proportional to P_ec^2
+        and decays as R^-8.  At the SI-assisted limiting range their SINR ratio
+        is P_SI/P_ec, which gives
+
+            R_no_SI = R_with_SI * (P_ec/P_SI)^(1/8).
+
+        Effective RCS is used directly as a scenario variable.  It already
+        includes mismatch, structural scattering, aspect, and polarization;
+        the sweep therefore does not infer or vary Gamma.  Gamma remains fixed
+        in the communication link, making R_comm independent of this RCS axis.
+
+        All quantities come from the deterministic Sec. II link budget; no
+        measured point or distance-sweep result is used here.
+        """
+        rcs = np.asarray(rcs_dbsm, dtype=np.float64)
+        rho_v = float(np.clip(rho, 1e-9, 1.0 - 1e-9))
+        r_comm_ref, r_sens_ref, _unused_joint = self._rmax(
+            np.asarray([rho_v], dtype=np.float64)
+        )
+        # _rmax already applies rho and Gp,eff exactly once at the current
+        # effective-RCS reference.  Only the scenario-axis RCS scaling remains.
+        r_sens_on_at_ref_rcs = float(r_sens_ref[0])
+        rcs_ref_dbsm = self._float("effective_rcs_dbsm", -19.10)
+        range_scale = 10.0 ** ((rcs - rcs_ref_dbsm) / 40.0)
+        r_comm = np.full_like(rcs, float(r_comm_ref[0]), dtype=np.float64)
+        r_sens_on = r_sens_on_at_ref_rcs * range_scale
+
+        r_sens_off_ref = float(
+            self._rmax_sensing_without_si(np.asarray([rho_v], dtype=np.float64))[0]
+        )
+        # P_echo is linear in sigma_eff and the self-beat uses P_echo^2;
+        # the eighth-root range therefore also scales as sigma_eff^(1/4).
+        r_sens_off = r_sens_off_ref * range_scale
+        r_isac = np.minimum(r_comm, r_sens_on)
+        return r_comm, r_sens_on, r_sens_off, r_isac
+
+    def _draw_rcs_range_axis(
+        self,
+        ax,
+        rho: float | None = None,
+        for_save: bool = False,
+        show_legend: bool = True,
+    ) -> None:
         from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
 
         if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
@@ -15181,19 +15001,24 @@ class SystemModelValidationPanel:
         black = "#111111"
         green = "#008000"
         linewidth = 2.0 if for_save else 1.3
-        n_rho = max(16, min(self._int("rho_points", 201), 2000))
-        rho_axis = np.linspace(1e-3, 0.999, n_rho)
-        r_comm, r_sens_on, r_sens_off, r_joint_on, _r_joint_off = self._rmax_from_ref(rho_axis)
+        rho_v = float(np.clip(self._float("rho", 0.20) if rho is None else rho, 1e-9, 1.0 - 1e-9))
+        rcs_min = self._float("rcs_min_dbsm", -30.0)
+        rcs_max = self._float("rcs_max_dbsm", 0.0)
+        if rcs_max <= rcs_min:
+            rcs_max = rcs_min + 1.0
+        n_rcs = max(16, min(self._int("rcs_points", 201), 2000))
+        rcs_axis = np.linspace(rcs_min, rcs_max, n_rcs)
+        r_comm, r_sens_on, r_sens_off, r_joint_on = self._rmax_vs_effective_rcs(rcs_axis, rho_v)
 
         ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
-        ax.plot(rho_axis, r_comm, color=blue, linewidth=linewidth,
+        ax.plot(rcs_axis, r_comm, color=blue, linewidth=linewidth,
                 label=r"$R_{\max}^{\mathrm{comm}}$")
-        ax.plot(rho_axis, r_sens_on, color=red, linewidth=linewidth,
+        ax.plot(rcs_axis, r_sens_on, color=red, linewidth=linewidth,
                 label=r"$R_{\max}^{\mathrm{sens}}$ (with SI)")
         if np.any(np.isfinite(r_sens_off)):
-            ax.plot(rho_axis, r_sens_off, color=green, linestyle="--", linewidth=linewidth * 0.9,
+            ax.plot(rcs_axis, r_sens_off, color=green, linestyle="--", linewidth=linewidth * 0.9,
                     label=r"$R_{\max}^{\mathrm{sens}}$ (without SI)")
-        ax.plot(rho_axis, r_joint_on, color=black, linewidth=linewidth,
+        ax.plot(rcs_axis, r_joint_on, color=black, linewidth=linewidth,
                 label=r"$R_{\max}$ (ISAC, with SI)")
         range_values = np.concatenate([
             np.asarray(r_comm, dtype=np.float64).reshape(-1),
@@ -15209,65 +15034,15 @@ class SystemModelValidationPanel:
             y_upper = 3.0
             if len(range_values):
                 y_upper = max(3.0, 0.5 * np.ceil(2.0 * 1.08 * float(np.max(range_values))))
-        finite_joint = np.isfinite(r_joint_on)
-        if np.any(finite_joint):
-            finite_indices = np.flatnonzero(finite_joint)
-            joint_idx = int(finite_indices[int(np.nanargmax(r_joint_on[finite_joint]))])
-            joint_max = float(r_joint_on[joint_idx])
-            rho_opt = float(rho_axis[joint_idx])
-            ax.axhline(
-                joint_max,
-                color=black,
-                linestyle="--",
-                linewidth=1.0 if for_save else 0.9,
-                alpha=0.75,
-                label="_nolegend_",
-            )
-            ax.axvline(
-                rho_opt,
-                color=black,
-                linestyle="--",
-                linewidth=1.0 if for_save else 0.9,
-                alpha=0.75,
-                label="_nolegend_",
-            )
-            ax.plot(
-                [rho_opt],
-                [joint_max],
-                marker="o",
-                markersize=4.8 if for_save else 4.0,
-                markerfacecolor="white",
-                markeredgecolor=black,
-                markeredgewidth=1.0,
-                linestyle="None",
-                zorder=6,
-                label="_nolegend_",
-            )
-            ax.text(
-                0.98,
-                joint_max,
-                f"{joint_max:.1f} m",
-                transform=ax.get_yaxis_transform(),
-                ha="right",
-                va="bottom",
-                fontsize=11 if for_save else 9,
-                fontname="Times New Roman",
-                color=black,
-            )
-            ax.text(
-                rho_opt,
-                0.025,
-                rf"$\rho={rho_opt:.2f}$",
-                transform=ax.get_xaxis_transform(),
-                ha="left",
-                va="bottom",
-                fontsize=11 if for_save else 9,
-                fontname="Times New Roman",
-                color=black,
-            )
         ax.set_xscale("linear")
-        ax.set_xlim(0.0, 1.0)
-        ax.set_xlabel(r"Power-allocation ratio, $\rho$")
+        ax.set_xlim(rcs_min, rcs_max)
+        ax.set_xlabel(r"Effective RCS, $\sigma_{\mathrm{eff}}$ (dBsm)")
+        tx_dbm = self._float("sweep_tx_power_dbm", 0.0)
+        ax.set_title(
+            rf"$\rho={rho_v:g}$, $P_{{\mathrm{{t}}}}={tx_dbm:g}$ dBm, "
+            rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():g}$ dB",
+            fontsize=12 if for_save else 10,
+        )
 
         log_range_var = getattr(self, "isac_log_range_var", None)
         use_log_range = bool(log_range_var.get()) if log_range_var is not None else True
@@ -15294,9 +15069,7 @@ class SystemModelValidationPanel:
             ax.set_yscale("linear")
             ax.set_ylim(0.0, y_upper)
             ax.set_ylabel("ISAC range (m)")
-        # if not for_save:
-        #     ax.set_title("rho Trade-off")
-        if not for_save or bool(self.save_legend_var.get()):
+        if show_legend and (not for_save or bool(self.save_legend_var.get())):
             legend_size = 11 if for_save else 9
             legend = ax.legend(
                 loc="upper right",
@@ -15309,25 +15082,34 @@ class SystemModelValidationPanel:
             self._style_paper_legend(legend, legend_size)
         self._style_ieee_axis(ax)
 
-    def _save_rho_tradeoff_png(self) -> None:
+    def _draw_rcs_comparison_figure(self, fig) -> None:
+        fig.set_size_inches(5.0, 4.0, forward=True)
+        ax = fig.add_subplot(111)
+        self._draw_rcs_range_axis(
+            ax,
+            rho=self._float("rho", 0.20),
+            for_save=True,
+            show_legend=True,
+        )
+
+    def _save_rcs_range_png(self) -> None:
         path_str = filedialog.asksaveasfilename(
             parent=self.parent,
             # title="Save rho Trade-off Figure",
             defaultextension=".png",
             filetypes=[("PNG figure", "*.png")],
-            initialfile="isac_range_vs_rho.png",
+            initialfile="isac_range_vs_effective_rcs.png",
         )
         if not path_str:
             return
         try:
             fig = Figure(figsize=(5.0, 4.0), dpi=600)
-            ax = fig.add_subplot(111)
-            self._draw_rho_tradeoff_axis(ax, for_save=True)
+            self._draw_rcs_comparison_figure(fig)
             fig.tight_layout(pad=0.35)
             fig.savefig(path_str, dpi=600, bbox_inches="tight", facecolor="white")
-            self.status_var.set(f"Saved rho PNG: {Path(path_str).name}")
+            self.status_var.set(f"Saved effective-RCS PNG: {Path(path_str).name}")
         except Exception as exc:
-            messagebox.showerror("Save rho PNG", str(exc), parent=self.parent)
+            messagebox.showerror("Save effective-RCS PNG", str(exc), parent=self.parent)
 
     def _default_comm_measurements(self) -> list[dict[str, float | str]]:
         # User-provided measured communication EVM points for 15-GBaud 32QAM.
@@ -15412,7 +15194,7 @@ class SystemModelValidationPanel:
 
     def _default_radar_measurements(self) -> list[dict[str, float | str]]:
         """Load built-in C2 post-processing sensing SINR markers from saved range data."""
-        base = APP_DIR / "data" / "EVM_range"
+        base = APP_DIR / "data" / "captures" / "range_1100mm"
         specs = [
             ("C2 sensing 1100 mm", base / "Data_range_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph7.npz", 1100.0, False, True),
         ]
@@ -15469,7 +15251,8 @@ class SystemModelValidationPanel:
         return float(r_m), float(val)
 
     def _parse_manual_points(self, key: str, value_key: str, name_prefix: str, si_state: str | None = None) -> list[dict[str, float | str]]:
-        raw = self.params.get(key, tk.StringVar(value="")).get()
+        var = self.params.get(key)
+        raw = var.get() if var is not None else ""
         tokens = [tok.strip() for tok in raw.replace("\n", ";").replace(",", ";").split(";")]
         points: list[dict[str, float | str]] = []
         for idx, token in enumerate(tokens, start=1):
@@ -15516,29 +15299,16 @@ class SystemModelValidationPanel:
                 for manual_rr in manual_c2_ranges.get(state, [])
             )
             if has_c2 and same_c2_range_override:
-                continue
-            active.append(p)
+                # A manual raw-band-power value overrides only that observable.
+                # Preserve independent fields such as measured sensing SINR;
+                # dropping the whole record made the sensing marker disappear.
+                retained = dict(p)
+                retained["c2_inband_power_dbm"] = float("nan")
+                active.append(retained)
+            else:
+                active.append(p)
         active.extend(manual)
         return active
-
-    def _fixed_raw_noise_dbm(self) -> float:
-        n_dbm = self._finite_param("raw_noise_dbm")
-        if np.isfinite(n_dbm):
-            return float(n_dbm)
-        bw_hz = max(self._float("bandwidth_ghz", 15.0) * 1e9, 1.0)
-        # Conservative fallback: displayed spectrum floor integrated over the
-        # signal bandwidth.  If raw H-domain calibration is available, enter it
-        # in "Fixed raw H noise [dBm]" and this fallback is bypassed.
-        return float(-130.0 + 10.0 * np.log10(bw_hz))
-
-    def _sensing_ref_from_fixed_noise(self, fallback_db: float) -> float:
-        peak_dbm = self._finite_param("target_peak_dbm_ref")
-        if not np.isfinite(peak_dbm):
-            return float(fallback_db)
-        n_raw_dbm = self._fixed_raw_noise_dbm()
-        alpha_db = self._float("alpha_ref_db", 0.0)
-        gp_db = self._float("processing_gain_db", 0.0)
-        return float(peak_dbm - n_raw_dbm + alpha_db + gp_db)
 
     def _fit_measured_comm_snr(self, ranges: np.ndarray) -> np.ndarray:
         pts = [
@@ -15559,15 +15329,12 @@ class SystemModelValidationPanel:
     def _c2_power_points(self, si_state: str | None = None) -> list[tuple[float, float]]:
         pts: list[tuple[float, float]] = []
         state_filter = str(si_state).strip().lower() if si_state is not None else ""
-        min_power_dbm = self._finite_param("c2_meas_power_min_dbm")
         for p in self._active_measurements():
             point_state = str(p.get("c2_si_state", "on")).strip().lower()
             if state_filter and point_state != state_filter:
                 continue
             rr = float(p.get("range_m", float("nan")))
             pp = float(p.get("c2_inband_power_dbm", float("nan")))
-            if point_state == "on" and np.isfinite(min_power_dbm) and np.isfinite(pp) and pp < min_power_dbm:
-                continue
             if np.isfinite(rr) and rr > 0.0 and np.isfinite(pp):
                 pts.append((rr, pp))
         return pts
@@ -15576,11 +15343,6 @@ class SystemModelValidationPanel:
         pts = self._c2_power_points(si_state)
         if len(pts) < 2:
             return float("nan"), float("nan")
-        r_vals = np.asarray([p[0] for p in pts], dtype=np.float64)
-        if float(np.nanmax(r_vals) / max(np.nanmin(r_vals), 1e-12)) < 1.5:
-            return float("nan"), float("nan")
-        x = np.log10(r_vals)
-        y = np.asarray([p[1] for p in pts], dtype=np.float64)
         if len(np.unique(np.round(x, 9))) < 2:
             return float("nan"), float("nan")
         slope, intercept = np.polyfit(x, y, 1)
@@ -15603,14 +15365,39 @@ class SystemModelValidationPanel:
             return float(entered)
         return -46.47
 
+    def _c2_target_power_ref_dbm(self) -> float:
+        """Phase-averaged target-only C2 power used for sensing SINR."""
+        entered = self._finite_param("c2_target_power_ref_dbm")
+        if np.isfinite(entered):
+            return float(entered)
+        return -42.52
+
     def _radar_proc_gain_db(self) -> float:
         entered = self._finite_param("radar_proc_gain_db")
         if np.isfinite(entered):
             return float(entered)
-        legacy = self._finite_param("processing_gain_db")
-        return float(legacy) if np.isfinite(legacy) else 0.0
+        return float(10.0 * np.log10(max(self._ideal_processing_gain_lin(), 1.0)))
+
+    def _c2_target_power_curve_dbm(self, ranges: np.ndarray, si_state: str) -> np.ndarray:
+        """Target-only detector-output power used for sensing SINR."""
+        r = np.maximum(np.asarray(ranges, dtype=np.float64), 1e-12)
+        ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
+        rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-9, 1.0 - 1e-9))
+        rho_v = float(np.clip(self._float("rho", 0.20), 1e-9, 1.0 - 1e-9))
+        rho_term = 10.0 * np.log10(rho_v / rho_ref)
+        if str(si_state).strip().lower() == "off":
+            p_ref = self._finite_param("c2_no_si_power_ref_dbm")
+            if not np.isfinite(p_ref):
+                return np.full_like(r, np.nan, dtype=np.float64)
+            return p_ref + rho_term - 80.0 * np.log10(r / ref_r)
+        return (
+            self._c2_target_power_ref_dbm()
+            + rho_term
+            - 40.0 * np.log10(r / ref_r)
+        )
 
     def _c2_power_curve_dbm(self, ranges: np.ndarray, si_state: str) -> np.ndarray:
+        """Return raw IF-band power, including the range-independent background."""
         r = np.maximum(np.asarray(ranges, dtype=np.float64), 1e-12)
         ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
         rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-9, 1.0 - 1e-9))
@@ -15633,9 +15420,14 @@ class SystemModelValidationPanel:
             # No-SI ZBD output is echo self-beat: echo RF power follows
             # 1/R^4, and the detector output electrical power follows 1/R^8.
             return p_ref + rho_term - 80.0 * np.log10(r / max(ref_r, 1e-12))
-        # SI-assisted ZBD homodyne output is proportional to SI amplitude times
-        # echo amplitude; the detected IF electrical power follows about 1/R^4.
-        return self._c2_power_ref_dbm() + rho_term - 40.0 * np.log10(r / ref_r)
+        # The measurement points are raw spectrum integrals.  Preserve the
+        # range-independent SI/noise background and apply R^-4 only to the
+        # target-dependent homodyne component.
+        raw_ref_mw = 10.0 ** (self._c2_power_ref_dbm() / 10.0)
+        target_ref_mw = 10.0 ** (self._c2_target_power_ref_dbm() / 10.0)
+        background_mw = max(raw_ref_mw - target_ref_mw, 0.0)
+        target_mw = target_ref_mw * (rho_v / rho_ref) * (r / ref_r) ** (-4.0)
+        return 10.0 * np.log10(np.maximum(background_mw + target_mw, 1e-30))
 
     def _no_si_anchor_status(self) -> str:
         p_no_si = self._finite_param("c2_no_si_power_ref_dbm")
@@ -15646,34 +15438,33 @@ class SystemModelValidationPanel:
             return f"invalid ({p_no_si:.1f} >= SI {p_si:.1f} dBm)"
         return f"{p_no_si:.1f} dBm"
 
-    def _radar_snr_from_c2_power_db(self, power_dbm: np.ndarray | float) -> np.ndarray | float:
-        return np.asarray(power_dbm, dtype=np.float64) - self._c2_noise_power_dbm() + self._radar_proc_gain_db()
+    def _sensing_sinr_from_target_power_dbm(
+        self, target_power_dbm: np.ndarray | float
+    ) -> np.ndarray | float:
+        """Convert target-only power, never raw total band power, to SINR."""
+        return (
+            np.asarray(target_power_dbm, dtype=np.float64)
+            - self._c2_noise_power_dbm()
+            + self._radar_proc_gain_db()
+        )
 
     def _c2_power_radar_snr_points(self, si_state: str | None = None) -> list[tuple[float, float]]:
-        """Return measured sensing SINR, falling back to calibrated C2 power only when absent."""
+        """Return independently measured sensing-SINR markers."""
         pts: list[tuple[float, float]] = []
         state_filter = str(si_state).strip().lower() if si_state is not None else ""
-        min_power_dbm = self._finite_param("c2_meas_power_min_dbm")
         for point in self._active_measurements():
             point_state = str(point.get("c2_si_state", "on")).strip().lower()
             if state_filter and point_state != state_filter:
                 continue
             rr = float(point.get("range_m", float("nan")))
             pp = float(point.get("c2_inband_power_dbm", float("nan")))
-            if point_state == "on" and np.isfinite(min_power_dbm) and np.isfinite(pp) and pp < min_power_dbm:
-                continue
             snr = float(point.get("snr_sens_db", float("nan")))
-            allow_power_conversion = bool(point.get("derive_radar_snr_from_power", False)) or str(
-                point.get("source", "")
-            ).strip().lower() == "manual"
-            if not np.isfinite(snr) and np.isfinite(pp) and allow_power_conversion:
-                snr = float(pp - self._c2_noise_power_dbm() + self._radar_proc_gain_db())
             if np.isfinite(rr) and rr > 0.0 and np.isfinite(snr):
                 pts.append((rr, snr))
         return pts
 
     def _derived_radar_ref_snr_db(self) -> float:
-        return float(self._c2_power_ref_dbm() - self._c2_noise_power_dbm() + self._radar_proc_gain_db())
+        return float(self._c2_target_power_ref_dbm() - self._c2_noise_power_dbm() + self._radar_proc_gain_db())
 
     def _snr_curve_from_ref(self, ranges: np.ndarray, ref_snr_db: float, rho: float, kind: str) -> np.ndarray:
         r = np.maximum(np.asarray(ranges, dtype=np.float64), 1e-12)
@@ -15688,72 +15479,6 @@ class SystemModelValidationPanel:
             range_term = -40.0 * np.log10(r / ref_r)
         return float(ref_snr_db) + rho_term + range_term
 
-    def _rmax_from_ref(
-        self, rho_axis: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
-        rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-9, 1.0 - 1e-9))
-        rho = np.clip(np.asarray(rho_axis, dtype=np.float64), 1e-9, 1.0 - 1e-9)
-        comm_ref = self._float("sim_comm_ref_snr_db", self._float("comm_ref_snr_db", 17.49))
-        sens_on_ref = self._derived_radar_ref_snr_db()
-        sens_off_ref = float("nan")
-        sweep = getattr(self, "sim_sweep", None)
-        if sweep is not None:
-            sweep_r = np.asarray(sweep.get("range_m", []), dtype=np.float64)
-            if len(sweep_r):
-                ref_idx = int(np.nanargmin(np.abs(sweep_r - ref_r)))
-                sweep_rho = np.asarray(sweep.get("sweep_rho", []), dtype=np.float64).reshape(-1)
-                if len(sweep_rho) and np.isfinite(sweep_rho[0]):
-                    rho_ref = float(np.clip(sweep_rho[0], 1e-9, 1.0 - 1e-9))
-                on_vals = np.asarray(sweep.get("on_radar_snr_db", []), dtype=np.float64)
-                off_vals = np.asarray(sweep.get("off_radar_snr_db", []), dtype=np.float64)
-                if ref_idx < len(on_vals) and np.isfinite(on_vals[ref_idx]):
-                    sens_on_ref = float(on_vals[ref_idx])
-                if ref_idx < len(off_vals) and np.isfinite(off_vals[ref_idx]):
-                    sens_off_ref = float(off_vals[ref_idx])
-        if not np.isfinite(sens_off_ref):
-            off_power = np.asarray(
-                self._c2_power_curve_dbm(np.asarray([ref_r]), "off"),
-                dtype=np.float64,
-            )
-            if len(off_power) and np.isfinite(off_power[0]):
-                sens_off_ref = float(self._radar_snr_from_c2_power_db(off_power[0]))
-        comm_thr = self._float("comm_req_snr_db", 15.75)
-        sens_thr = self._float("sens_req_snr_db", 13.2)
-        comm_at_ref = comm_ref + 10.0 * np.log10((1.0 - rho) / max(1.0 - rho_ref, 1e-12))
-        r_comm = ref_r * (10.0 ** ((comm_at_ref - comm_thr) / 20.0))
-        if np.isfinite(sens_off_ref):
-            # Phase-averaged ZBD target SINR:
-            # gamma_on = A_hom*(rho/rho0)*(R0/R)^4
-            #          + B_self*(rho/rho0)^2*(R0/R)^8.
-            gamma_on_ref = 10.0 ** (sens_on_ref / 10.0)
-            gamma_off_ref = 10.0 ** (sens_off_ref / 10.0)
-            gamma_hom_ref = max(gamma_on_ref - gamma_off_ref, 0.0)
-            rho_ratio = rho / rho_ref
-            gamma_hom = gamma_hom_ref * rho_ratio
-            gamma_self = gamma_off_ref * (rho_ratio ** 2)
-            gamma_thr = max(10.0 ** (sens_thr / 10.0), 1e-30)
-            disc = np.maximum(gamma_hom ** 2 + 4.0 * gamma_thr * gamma_self, 0.0)
-            x_on = (gamma_hom + np.sqrt(disc)) / (2.0 * gamma_thr)
-            r_sens_on = ref_r * np.maximum(x_on, 0.0) ** 0.25
-            r_sens_off = ref_r * np.maximum(gamma_self / gamma_thr, 0.0) ** 0.125
-        else:
-            sens_on_at_ref = sens_on_ref + 10.0 * np.log10(rho / rho_ref)
-            r_sens_on = ref_r * (10.0 ** ((sens_on_at_ref - sens_thr) / 40.0))
-            r_sens_off = np.full_like(rho, np.nan, dtype=np.float64)
-        # The ISAC-range figure is a theoretical link-budget result. Use the
-        # paper model with common kTBF noise and ideal BT_p processing gain for
-        # the communication and SI-assisted sensing limits. The no-SI branch
-        # remains the separately simulated square-law echo-self-beat case.
-        r_comm_theory, r_sens_on_theory, r_isac_on_theory = self._rmax(rho)
-        return (
-            r_comm_theory,
-            r_sens_on_theory,
-            r_sens_off,
-            r_isac_on_theory,
-            np.minimum(r_comm_theory, r_sens_off),
-        )
-
     def _sync_theory_params_from_cfg(self, cfg: SimConfig) -> None:
         """Synchronize the deterministic Sec. II link-budget parameters."""
         waveform_kind = classify_isac_waveform(cfg.waveform)
@@ -15761,13 +15486,20 @@ class SystemModelValidationPanel:
         self.params["bandwidth_ghz"].set(f"{bandwidth_hz / 1e9:.6g}")
         self.params["symbol_rate_gbaud"].set(f"{float(cfg.baud_gbaud):.6g}")
         self.params["pilot_symbols"].set(f"{int(max(cfg.syms_per_chirp, 1))}")
+        ideal_gp_db = 10.0 * np.log10(max(self._ideal_processing_gain_lin(), 1.0))
+        if "ideal_processing_gain_db" in self.params:
+            self.params["ideal_processing_gain_db"].set(f"{ideal_gp_db:.6g}")
         self.params["system_nf_db"].set(f"{calc_common_receiver_nf_db(cfg):.6g}")
         self.params["cspr_db"].set(f"{float(cfg.cspr_db):.6g}")
         self.params["theory_tx_ref_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
         rcs_dbsm = cfg.target_effective_rcs_dbsm
         if rcs_dbsm is None or not np.isfinite(float(rcs_dbsm)):
-            rcs_dbsm = 10.0 * np.log10(max(float(cfg.target_rcs_sqm), 1e-12))
+            rcs_dbsm = float("nan")
         self.params["effective_rcs_dbsm"].set(f"{float(rcs_dbsm):.6g}")
+        self.params["target_gamma_mag"].set(f"{float(cfg.target_gamma_mag):.6g}")
+        self.params["target_rcs_sqm"].set(f"{float(cfg.target_rcs_sqm):.6g}")
+        self.params["target_ant_gain_dbi"].set(f"{float(cfg.target_ant_gain_dbi):.6g}")
+        self.params["target_rcs_mode"].set(str(getattr(cfg, "target_rcs_mode", "coupled_antenna")))
 
         rf_lines = calc_utcpd_rf_line_powers(cfg)
         ac2_mw = max(float(rf_lines.get("carrier_w", 1e-30)) * 1e3, 1e-30)
@@ -15792,6 +15524,7 @@ class SystemModelValidationPanel:
             target_pol_eff=cfg.target_pol_eff,
             effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
         )
+        self.params["effective_rcs_dbsm"].set(f"{float(link['effective_rcs_dbsm']):.6g}")
         beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
         self.params["sqrt_k"].set(f"{beta_ref * ref_r ** 2:.9g}")
         c1_total_mw = dbm_to_w(float(link["c1_rf_dbm"])) * 1e3
@@ -15804,6 +15537,15 @@ class SystemModelValidationPanel:
                 return
             cfg = self.photonic_source._cfg_from_ui()
             self._sync_theory_params_from_cfg(cfg)
+            # A cached physical sweep or symbol-rate simulation was generated
+            # with the previous Gamma/RCS state and must not be presented as if
+            # it reflected the newly synchronized antenna load.
+            self.sim_sweep = None
+            self._evm_radar_plot_cache = None
+            if isinstance(getattr(self, "symbol_rate_sweep", None), dict):
+                self.symbol_rate_sweep["sim_rate_gbaud"] = np.asarray([], dtype=np.float64)
+                self.symbol_rate_sweep["sim_evm_db"] = np.asarray([], dtype=np.float64)
+                self.symbol_rate_sweep["bound_evm_db"] = np.asarray([], dtype=np.float64)
             self.params["sweep_tx_power_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
             self.params["si_on_iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
             self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
@@ -15819,19 +15561,15 @@ class SystemModelValidationPanel:
                     radar_db = float(data.get(key, float("nan")))
                     if np.isfinite(radar_db):
                         break
-                if np.isfinite(radar_db):
-                    self.params["sim_sens_ref_snr_db"].set(f"{radar_db:.6g}")
-                pg_db = float(data.get("radar_processing_gain_db_c2", data.get("processing_gain_db", float("nan"))))
-                if np.isfinite(pg_db):
-                    self.params["processing_gain_db"].set(f"{pg_db:.6g}")
                 c2m = data.get("c2_band_metrics", {})
-                p_dbm = float(c2m.get("band_power_dbm", float("nan")))
-                if np.isfinite(p_dbm):
-                    self.params["c2_power_ref_dbm"].set(f"{p_dbm:.6g}")
+                c2rawm = data.get("c2_raw_band_metrics", {})
+                target_dbm = float(c2m.get("band_power_dbm", float("nan")))
+                raw_dbm = float(c2rawm.get("raw_band_power_dbm", float("nan")))
+                if np.isfinite(target_dbm):
+                    self.params["c2_target_power_ref_dbm"].set(f"{target_dbm:.6g}")
+                if np.isfinite(raw_dbm):
+                    self.params["c2_power_ref_dbm"].set(f"{raw_dbm:.6g}")
                     self.params["c2_no_si_power_ref_dbm"].set("")
-                n_dbm = float(c2m.get("noise_power_dbm", float("nan")))
-                if np.isfinite(n_dbm):
-                    self.params["raw_noise_dbm"].set(f"{n_dbm:.6g}")
             self.status_var.set(
                 "Simulation parameters synchronized. "
                 "Press Range Sweep or Symbol Rate Sweep to update curves."
@@ -15871,15 +15609,14 @@ class SystemModelValidationPanel:
                     radar_db = float(sim.get(key, float("nan")))
                     if np.isfinite(radar_db):
                         break
-                if np.isfinite(radar_db):
-                    self.params["sim_sens_ref_snr_db"].set(f"{radar_db:.6g}")
-                pg_db = float(sim.get("radar_processing_gain_db_c2", sim.get("processing_gain_db", float("nan"))))
-                if np.isfinite(pg_db):
-                    self.params["processing_gain_db"].set(f"{pg_db:.6g}")
                 c2m = sim.get("c2_band_metrics", {})
-                p_dbm = float(c2m.get("band_power_dbm", float("nan")))
-                if np.isfinite(p_dbm):
-                    self.params["c2_power_ref_dbm"].set(f"{p_dbm:.6g}")
+                c2rawm = sim.get("c2_raw_band_metrics", {})
+                target_dbm = float(c2m.get("band_power_dbm", float("nan")))
+                raw_dbm = float(c2rawm.get("raw_band_power_dbm", float("nan")))
+                if np.isfinite(target_dbm):
+                    self.params["c2_target_power_ref_dbm"].set(f"{target_dbm:.6g}")
+                if np.isfinite(raw_dbm):
+                    self.params["c2_power_ref_dbm"].set(f"{raw_dbm:.6g}")
                     self.params["c2_no_si_power_ref_dbm"].set("")
                 self.params["bandwidth_ghz"].set(f"{float(sim.get('occupied_bw_hz', 15e9)) / 1e9:.6g}")
             self.status_var.set(f"Loaded params: {Path(path_str).name}")
@@ -15972,7 +15709,11 @@ class SystemModelValidationPanel:
     def _sweep_metric_row(self, data: dict, fixed_noise_dbm: float | None = None, fixed_pg_db: float | None = None) -> dict[str, float]:
         evm_db = float(data.get("evm_db", float("nan")))
         c2m = data.get("c2_band_metrics", {})
-        c2_power_dbm = float(c2m.get("band_power_dbm", float("nan")))
+        c2rawm = data.get("c2_raw_band_metrics", {})
+        c2_target_power_dbm = float(c2m.get("band_power_dbm", float("nan")))
+        c2_power_dbm = float(c2rawm.get("raw_band_power_dbm", float("nan")))
+        if not np.isfinite(c2_power_dbm):
+            c2_power_dbm = float(c2m.get("raw_band_power_dbm", c2_target_power_dbm))
         c2_noise_dbm = float(c2m.get("noise_power_dbm", c2m.get("noise_dbm", float("nan"))))
         pre_snr_db = float(data.get("radar_pre_snr_db_c2", float("nan")))
         post_snr_db = float(data.get("snr_rad_post_db_c2", data.get("radar_snr_db", float("nan"))))
@@ -15983,11 +15724,16 @@ class SystemModelValidationPanel:
             pg_db = float(data.get("radar_processing_gain_db_c2"))
         use_noise = c2_noise_dbm if fixed_noise_dbm is None else fixed_noise_dbm
         use_pg = pg_db if fixed_pg_db is None else fixed_pg_db
-        radar_snr_db = c2_power_dbm - use_noise + use_pg if all(np.isfinite(v) for v in (c2_power_dbm, use_noise, use_pg)) else post_snr_db
+        radar_snr_db = (
+            c2_target_power_dbm - use_noise + use_pg
+            if all(np.isfinite(v) for v in (c2_target_power_dbm, use_noise, use_pg))
+            else post_snr_db
+        )
         return {
             "evm_db": evm_db,
             "comm_snr_db": -evm_db if np.isfinite(evm_db) else float("nan"),
             "c2_power_dbm": c2_power_dbm,
+            "c2_target_power_dbm": c2_target_power_dbm,
             "c2_noise_dbm": c2_noise_dbm,
             "pre_snr_db": pre_snr_db,
             "post_snr_db": post_snr_db,
@@ -16053,38 +15799,45 @@ class SystemModelValidationPanel:
 
         out: dict[str, np.ndarray] = {"range_m": sim_r, "requested_range_m": r}
         for state in ("on", "off"):
-            rows = [self._sweep_metric_row({"evm_db": row["evm_db"], "c2_band_metrics": {"band_power_dbm": row["c2_power_dbm"], "noise_power_dbm": row["c2_noise_dbm"]}, "radar_pre_snr_db_c2": row["pre_snr_db"], "snr_rad_post_db_c2": row["post_snr_db"]}, ref_noise, ref_pg) for row in raw[state]]
-            for key in ("evm_db", "comm_snr_db", "c2_power_dbm", "c2_noise_dbm", "pre_snr_db", "post_snr_db", "pg_db", "radar_snr_db"):
+            rows = raw[state]
+            for key in (
+                "evm_db", "comm_snr_db", "c2_power_dbm", "c2_target_power_dbm",
+                "c2_noise_dbm", "pre_snr_db", "post_snr_db", "pg_db",
+            ):
                 out[f"{state}_{key}"] = np.asarray([row[key] for row in rows], dtype=np.float64)
         law_r = np.maximum(sim_r, 1e-12)
         law_ref_r = max(float(sim_r[ref_idx]), 1e-12)
-        if np.isfinite(out["off_c2_power_dbm"][ref_idx]):
-            off_p_ref = 10.0 ** (float(out["off_c2_power_dbm"][ref_idx]) / 10.0)
-            off_p = off_p_ref * (law_r / law_ref_r) ** (-8.0)
-            out["off_c2_power_raw_dbm"] = out["off_c2_power_dbm"].copy()
-            out["off_c2_power_dbm"] = 10.0 * np.log10(np.maximum(off_p, 1e-30))
-        if np.isfinite(out["on_c2_power_dbm"][ref_idx]):
-            on_p_ref = 10.0 ** (float(out["on_c2_power_dbm"][ref_idx]) / 10.0)
-            off_p_ref = 10.0 ** (float(out["off_c2_power_dbm"][ref_idx]) / 10.0) if np.isfinite(out["off_c2_power_dbm"][ref_idx]) else 0.0
-            hom_p_ref = max(on_p_ref - off_p_ref, 0.0)
-            off_p = 10.0 ** (out["off_c2_power_dbm"] / 10.0) if np.any(np.isfinite(out["off_c2_power_dbm"])) else np.zeros_like(law_r)
-            hom_p = hom_p_ref * (law_r / law_ref_r) ** (-4.0)
-            out["on_c2_power_raw_dbm"] = out["on_c2_power_dbm"].copy()
-            out["on_c2_power_dbm"] = 10.0 * np.log10(np.maximum(off_p + hom_p, 1e-30))
 
-        if np.isfinite(out["off_radar_snr_db"][ref_idx]):
-            off_s_ref = 10.0 ** (float(out["off_radar_snr_db"][ref_idx]) / 10.0)
-            off_s = off_s_ref * (law_r / law_ref_r) ** (-8.0)
-            out["off_radar_snr_raw_db"] = out["off_radar_snr_db"].copy()
-            out["off_radar_snr_db"] = 10.0 * np.log10(np.maximum(off_s, 1e-30))
-        if np.isfinite(out["on_radar_snr_db"][ref_idx]):
-            on_s_ref = 10.0 ** (float(out["on_radar_snr_db"][ref_idx]) / 10.0)
-            off_s_ref = 10.0 ** (float(out["off_radar_snr_db"][ref_idx]) / 10.0) if np.isfinite(out["off_radar_snr_db"][ref_idx]) else 0.0
-            hom_s_ref = max(on_s_ref - off_s_ref, 0.0)
-            off_s = 10.0 ** (out["off_radar_snr_db"] / 10.0) if np.any(np.isfinite(out["off_radar_snr_db"])) else np.zeros_like(law_r)
-            hom_s = hom_s_ref * (law_r / law_ref_r) ** (-4.0)
-            out["on_radar_snr_raw_db"] = out["on_radar_snr_db"].copy()
-            out["on_radar_snr_db"] = 10.0 * np.log10(np.maximum(off_s + hom_s, 1e-30))
+        # The C2-power plot is a like-for-like comparison of raw IF-spectrum
+        # integrals. Do not impose a target range law on this total: the
+        # range-independent SI-only and noise terms can make it nearly flat.
+        # Apply R^-8/R^-4 only to the separated target-only power used by the
+        # sensing-SINR calculation.
+        if np.isfinite(out["off_c2_target_power_dbm"][ref_idx]):
+            off_p_ref = 10.0 ** (float(out["off_c2_target_power_dbm"][ref_idx]) / 10.0)
+            off_p = off_p_ref * (law_r / law_ref_r) ** (-8.0)
+            out["off_c2_target_power_raw_dbm"] = out["off_c2_target_power_dbm"].copy()
+            out["off_c2_target_power_dbm"] = 10.0 * np.log10(np.maximum(off_p, 1e-30))
+        if np.isfinite(out["on_c2_target_power_dbm"][ref_idx]):
+            on_p_ref = 10.0 ** (float(out["on_c2_target_power_dbm"][ref_idx]) / 10.0)
+            off_p_ref = (
+                10.0 ** (float(out["off_c2_target_power_dbm"][ref_idx]) / 10.0)
+                if np.isfinite(out["off_c2_target_power_dbm"][ref_idx])
+                else 0.0
+            )
+            hom_p_ref = max(on_p_ref - off_p_ref, 0.0)
+            off_p = (
+                10.0 ** (out["off_c2_target_power_dbm"] / 10.0)
+                if np.any(np.isfinite(out["off_c2_target_power_dbm"]))
+                else np.zeros_like(law_r)
+            )
+            hom_p = hom_p_ref * (law_r / law_ref_r) ** (-4.0)
+            out["on_c2_target_power_raw_dbm"] = out["on_c2_target_power_dbm"].copy()
+            out["on_c2_target_power_dbm"] = 10.0 * np.log10(np.maximum(off_p + hom_p, 1e-30))
+
+        for state in ("on", "off"):
+            target_power = np.asarray(out[f"{state}_c2_target_power_dbm"], dtype=np.float64)
+            out[f"{state}_radar_snr_db"] = target_power - ref_noise + ref_pg
         out["ref_noise_dbm"] = np.asarray([ref_noise], dtype=np.float64)
         out["ref_pg_db"] = np.asarray([ref_pg], dtype=np.float64)
         out["iso_on_db"] = np.asarray([iso_on], dtype=np.float64)
@@ -16095,6 +15848,9 @@ class SystemModelValidationPanel:
         ref_on_power = float(out["on_c2_power_dbm"][ref_idx])
         if np.isfinite(ref_on_power):
             self.params["c2_power_ref_dbm"].set(f"{ref_on_power:.6g}")
+        ref_target_power = float(out["on_c2_target_power_dbm"][ref_idx])
+        if np.isfinite(ref_target_power):
+            self.params["c2_target_power_ref_dbm"].set(f"{ref_target_power:.6g}")
         if np.isfinite(ref_noise) and not np.isfinite(self._finite_param("c2_noise_power_dbm")):
             self.params["c2_noise_power_dbm"].set(f"{ref_noise:.6g}")
         if np.isfinite(ref_pg) and not np.isfinite(self._finite_param("radar_proc_gain_db")):
@@ -16115,7 +15871,7 @@ class SystemModelValidationPanel:
             r_max = max(self._float("r_max_m", 4.0), max(r_min + 0.1, 0.1))
             plot_x_min = r_min
             plot_x_max = r_max
-            n_range = max(3, min(self._int("sweep_points", self._int("n_range", 21)), 101))
+            n_range = max(3, min(self._int("sweep_points", 9), 101))
             ranges = np.linspace(r_min, r_max, n_range)
             ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
             if r_min <= ref_r <= r_max and not np.any(np.isclose(ranges, ref_r, rtol=0.0, atol=1e-12)):
@@ -16133,8 +15889,17 @@ class SystemModelValidationPanel:
                 sim_eff_sinr = sim_comm_snr
                 sim_c2_on_power = sweep["on_c2_power_dbm"]
                 sim_c2_off_power = sweep["off_c2_power_dbm"]
-                sim_sens_on_snr = sweep["on_radar_snr_db"]
-                sim_sens_off_snr = sweep["off_radar_snr_db"]
+                ref_noise_arr = np.asarray(sweep.get("ref_noise_dbm", []), dtype=np.float64)
+                ref_noise = float(ref_noise_arr[0]) if len(ref_noise_arr) else self._c2_noise_power_dbm()
+                effective_pg = self._radar_proc_gain_db()
+                if "on_c2_target_power_dbm" in sweep and "off_c2_target_power_dbm" in sweep:
+                    # Recompute from the cached target-only powers so editing
+                    # G_p,eff followed by Redraw has an immediate effect.
+                    sim_sens_on_snr = np.asarray(sweep["on_c2_target_power_dbm"], dtype=np.float64) - ref_noise + effective_pg
+                    sim_sens_off_snr = np.asarray(sweep["off_c2_target_power_dbm"], dtype=np.float64) - ref_noise + effective_pg
+                else:
+                    sim_sens_on_snr = sweep["on_radar_snr_db"]
+                    sim_sens_off_snr = sweep["off_radar_snr_db"]
                 no_si_valid = bool(np.any(np.isfinite(sim_sens_off_snr)))
                 ref_r = max(self._float("ref_range_m", 1.0), 1e-6)
                 ref_idx = int(np.argmin(np.abs(ranges - ref_r)))
@@ -16153,8 +15918,10 @@ class SystemModelValidationPanel:
                 sim_eff_sinr = sim_comm_snr
                 sim_c2_on_power = self._c2_power_curve_dbm(curve_ranges, "on")
                 sim_c2_off_power = self._c2_power_curve_dbm(curve_ranges, "off")
-                sim_sens_on_snr = self._radar_snr_from_c2_power_db(sim_c2_on_power)
-                sim_sens_off_snr = self._radar_snr_from_c2_power_db(sim_c2_off_power)
+                target_on = self._c2_target_power_curve_dbm(curve_ranges, "on")
+                target_off = self._c2_target_power_curve_dbm(curve_ranges, "off")
+                sim_sens_on_snr = self._sensing_sinr_from_target_power_dbm(target_on)
+                sim_sens_off_snr = self._sensing_sinr_from_target_power_dbm(target_off)
                 no_si_valid = bool(np.any(np.isfinite(sim_sens_off_snr)))
                 sens_ref = self._derived_radar_ref_snr_db()
 
@@ -16302,7 +16069,7 @@ class SystemModelValidationPanel:
             self._draw_symbol_rate_axis(ax_snr, self.symbol_rate_sweep, for_save=False)
             self._draw_c2_power_axis(ax_c2pow, self._evm_radar_plot_cache, for_save=False)
 
-            self._draw_rho_tradeoff_axis(ax_rho, for_save=False)
+            self._draw_rcs_range_axis(ax_rho, rho=self._float("rho", 0.20), for_save=False)
 
             for ax_i in (ax_evm, ax_rad, ax_snr, ax_c2pow, ax_rho):
                 self._style_ieee_axis(ax_i)
@@ -16312,7 +16079,10 @@ class SystemModelValidationPanel:
 
             self.fig.tight_layout()
             self.canvas.draw_idle()
-            rc, rs_on, rs_off, rj_on, rj_off = self._rmax_from_ref(np.asarray([rho]))
+            rc, rs_on, rs_off, rj_on = self._rmax_vs_effective_rcs(
+                np.asarray([self._float("effective_rcs_dbsm", -19.10)]),
+                rho,
+            )
             n_evm_meas = sum(
                 1 for p in active_points
                 if np.isfinite(float(p.get("range_m", float("nan"))))
@@ -16330,13 +16100,12 @@ class SystemModelValidationPanel:
             self.status_var.set(
                 f"rho={rho:.3f}  R_max^comm={rc[0]:.3g} m  "
                 f"R_max^sens(on/off)={rs_on[0]:.3g}/{rs_off[0]:.3g} m  "
-                f"R_max(ISAC,on/off)={rj_on[0]:.3g}/{rj_off[0]:.3g} m  "
+                f"R_max(ISAC)={rj_on[0]:.3g} m  "
                 f"comm_ref={self._float('sim_comm_ref_snr_db', 17.49):.2f} dB  "
                 f"sens_ref(meas/sim)={sens_ref:.2f} dB  "
                 f"ISAC theory: NF={self._float('system_nf_db', 8.0):.2f} dB, "
-                f"N=kTBF={theory_noise_dbm:.2f} dBm, Gp=BTp={theory_gp_db:.2f} dB, "
-                f"RCS={self._float('effective_rcs_dbsm', -4.28):.2f} dBsm  "
-                f"iso on/off={self._float('si_on_iso_db', 24.0):.0f}/{self._float('si_off_iso_db', 1000.0):.0f} dB  "
+                f"N=kTBF={theory_noise_dbm:.2f} dBm, Gp,eff={theory_gp_db:.2f} dB, "
+                f"SI isolation={self._float('si_on_iso_db', 24.0):.0f} dB  "
                 f"TX={self._finite_param('sweep_tx_power_dbm'):.1f} dBm  "
                 f"meas EVM/sensing/C2on/off={n_evm_meas}/{n_radar_meas}/{len(self._c2_power_points('on'))}/{len(self._c2_power_points('off'))}  "
                 f"C2 SI-on slope={c2_slope_txt}"

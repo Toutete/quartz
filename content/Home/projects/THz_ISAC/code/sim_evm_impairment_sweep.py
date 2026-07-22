@@ -49,6 +49,9 @@ def build_base_cfg(data: dict) -> sim.SimConfig:
     def pf(key, default):
         return float(p.get(key, default))
 
+    has_rcs_mode = "target_rcs_mode" in p
+    rcs_mode_label = str(p.get("target_rcs_mode", "Direct effective RCS")).strip().lower()
+    rcs_mode = "direct_effective" if rcs_mode_label.startswith("direct") else "coupled_antenna"
     cfg = sim.SimConfig(
         fs_gsps=float(a.get("fs_var", 100.0)),
         linewidth_mhz=pf("linewidth_mhz", 0.015),
@@ -90,11 +93,12 @@ def build_base_cfg(data: dict) -> sim.SimConfig:
         rx_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
         c1_cable_loss_db=pf("c1_cable_loss_db", 0.0),
         c2_cable_loss_db=pf("c2_cable_loss_db", 0.0),
-        target_rcs_sqm=pf("rcs_sqm", 1.0),
-        target_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
-        target_gamma_mag=pf("target_gamma_mag", 1.0),
+        target_rcs_sqm=pf("target_rcs_sqm", 0.01),
+        target_ant_gain_dbi=pf("target_ant_gain_dbi", pf("tx_ant_gain_dbi", 30.0)),
+        target_gamma_mag=pf("target_gamma_mag", 0.1) if has_rcs_mode else 0.0,
         target_pol_eff=pf("target_pol_eff", 1.0),
-        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -4.28),
+        target_rcs_mode=rcs_mode,
+        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -19.10) if rcs_mode == "direct_effective" else None,
         target_dist_m=max(pf("target_dist_m", 1.0), 0.1),
         awg_dac_bits=pf("awg_dac_bits", 8.0),
         syms_per_chirp=max(8, int(float(a.get("chirp_len_var", 1024)))),
