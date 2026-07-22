@@ -3,12 +3,12 @@
 Default data source is the hardcoded measured EVM table (photocurrent 7 mA,
 16QAM / 32QAM, fsym=2..20 GBaud) transcribed from the lab spreadsheet.
 By default, this produces the paper-facing single-panel figure used to argue
-that low-symbol-rate operation is AWGN-limited while high-symbol-rate operation
-shows an SINR degradation:
+which compares measurement, analytical SNR/SINR, and the full time-domain
+simulation over the same symbol-rate sweep:
 
   1. measured 32QAM EVM,
-  2. an AWGN theoretical reference line fitted only to the 2-4 GBaud regime,
-  3. an SINR trace from the electronic-noise-free/MZM-only nonlinear bound.
+  2. theoretical AWGN SNR and SSBI-inclusive SINR,
+  3. the full isac_gui physics simulation.
 
 --mode photocurrent produces a separate paper figure: measured EVM vs UTC-PD
 photocurrent (4.5-7 mA, fixed symbol rate) with a log10(Iph)-linear fit per
@@ -29,7 +29,7 @@ back-to-back "direct cable" sweep). The physics-sim curve is only computed
 for labels isac_gui recognizes as a modulation (e.g. "16QAM", "32QAM").
 
 The simulated curve is expensive (full time-domain isac_gui.run_isac_sim per
-symbol rate, averaged over several random seeds) so it is cached to
+symbol rate, with one preview seed by default and optional multi-seed averaging) so it is cached to
 data/sim_evm_series_<modulation>.json (--mode paper/legacy) or
 data/sim_evm_photocurrent_<label>.json (--mode photocurrent), keyed by a hash
 of the source parameter JSON; pass --force-resim to bypass the cache.
@@ -42,12 +42,14 @@ python plot_evm_tradeoff_gui.py --mode legacy --out data/fig3_evm_tradeoff.png
 python plot_evm_tradeoff_gui.py --source npz --out data/fig3_from_npz.png
 python plot_evm_tradeoff_gui.py --no-show  # save without opening the GUI
 python plot_evm_tradeoff_gui.py --no-sim   # skip the physics simulation curve
+python plot_evm_tradeoff_gui.py --sim-seeds 4 --force-resim  # final paper average
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import hashlib
 import json
 import math
@@ -60,6 +62,7 @@ from read_range_data import metric_map, to_float, unpack
 
 C = 3e8
 PAPER_BOX_ASPECT = 0.8  # height / width, i.e. 5:4 landscape plot box
+SIM_CACHE_MODEL_VERSION = "evm-tradeoff-v3-20260722"
 
 
 def load_measured_table() -> dict[str, dict[str, np.ndarray]]:
@@ -205,7 +208,7 @@ def resolution_mm(baud_gbaud: np.ndarray) -> np.ndarray:
 # Physics-based simulation curve (isac_gui.run_isac_sim), cached to disk.
 # ---------------------------------------------------------------------------
 
-DEFAULT_SIM_PARAMS_JSON = Path(__file__).resolve().parent / "data" / "isac_sim_params_20260715_145824.json"
+DEFAULT_SIM_PARAMS_JSON = Path(__file__).resolve().parent / "data" / "isac_sim_params_20260720.json"
 SIM_BAUD_LIST = [2.0, 4.0, 8.0, 10.0, 12.0, 15.0, 20.0]
 SIM_MODULATIONS = {"16QAM", "32QAM"}
 PREFEC_REQUIRED_SNR_DB = 15.75
@@ -226,12 +229,13 @@ PAPER_PHOTOCURRENT_DATA = {
     },
 }
 
-# All electronic noise/quantization sources suppressed, leaving only the
-# MZM's 3rd-order Taylor-model optical nonlinearity: an "as-good-as-this-
-# waveform-and-modulator-allow" bound, not a literal AWGN-only line.
+# Additive receiver noise and AWG quantization are suppressed, leaving the
+# deterministic MZM Taylor + ZBD square-law distortion.  Its low-rate floor is
+# removed before it is used as the rate-dependent SSBI-associated SIR term.
 _ELECTRONIC_NOISE_FREE_OVERRIDES = dict(
-    linewidth_mhz=1e-6, carrier_wander_enable=False, carrier_wander_mhz=0.0,
-    zbd_nep_pw_sqrt_hz=1e-6, lna_nf_db=0.01, if_amp_nf_db=0.01, awg_dac_bits=16.0,
+    additive_noise_enable=False,
+    linewidth_mhz=0.0, carrier_wander_enable=False, carrier_wander_mhz=0.0,
+    awg_dac_bits=16.0,
 )
 
 
@@ -240,7 +244,13 @@ def _sim_cache_path(modulation: str) -> Path:
 
 
 def _params_fingerprint(params_json: Path) -> str:
-    return hashlib.sha256(params_json.read_bytes()).hexdigest()[:16]
+    digest = hashlib.sha256()
+    digest.update(params_json.read_bytes())
+    # Figure-layout and unrelated GUI edits must not invalidate an expensive
+    # time-domain sweep. Bump this explicit version only when the EVM physics or
+    # curve-construction model changes.
+    digest.update(SIM_CACHE_MODEL_VERSION.encode("ascii"))
+    return digest.hexdigest()[:16]
 
 
 def build_sim_cfg(data: dict, modulation: str | None = None):
@@ -265,7 +275,7 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
         modulation=modulation or str(a.get("modulation_var", "16QAM")),
         coherence_mode=str(c.get("coherence_mode", "Free-running")),
         rx_mode=str(c.get("rx_mode", "Mixer")),
-        optical_sideband_mode="SSB" if bool(c.get("ssb_enable", True)) else "DSB",
+        optical_sideband_mode="SSB" if bool(c.get("ssb_enable", False)) else "DSB",
         si_enable=bool(c.get("si_enable", True)),
         carrier_wander_enable=bool(c.get("carrier_wander_enable", False)),
         carrier_wander_mhz=10.0 if bool(c.get("carrier_wander_enable", False)) else 0.0,
@@ -292,7 +302,7 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
         dso_vscale_mv=pf("dso_vscale_mv", 100.0),
         dso_bandwidth_ghz=pf("dso_bw_ghz", 40.0),
         omt_iso_db=pf("omt_iso_db", 25.0),
-        omt_il_db=pf("omt_il_db", 1.5),
+        omt_il_db=pf("omt_il_db", 2.2),
         ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
         tx_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
         rx_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
@@ -302,6 +312,7 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
         target_ant_gain_dbi=pf("tx_ant_gain_dbi", 30.0),
         target_gamma_mag=pf("target_gamma_mag", 1.0),
         target_pol_eff=pf("target_pol_eff", 1.0),
+        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -4.28),
         target_dist_m=max(pf("target_dist_m", 1.0), 0.1),
         syms_per_chirp=max(8, int(float(a.get("chirp_len_var", 1024)))),
         pilot_rho=float(np.clip(float(a.get("pilot_rho_var", 0.20)), 0.0, 0.95)),
@@ -315,19 +326,36 @@ def _mean_evm_db(evm_db_list: list[float]) -> float:
     return float(10.0 * np.log10(np.mean(lin))) if lin else float("nan")
 
 
-def _run_sim_series(base_cfg, baud_list: list[float], seeds: list[int], overrides: dict | None = None) -> np.ndarray:
+def _run_sim_series(
+    base_cfg,
+    baud_list: list[float],
+    seeds: list[int],
+    overrides: dict | None = None,
+    run_name: str = "full",
+) -> np.ndarray:
     import isac_gui as sim
 
     evm_db = []
+    total_runs = max(len(baud_list) * len(seeds), 1)
+    run_idx = 0
     for baud in baud_list:
         trial = []
         for seed in seeds:
+            run_idx += 1
+            print(
+                f"[simulation:{run_name}] {run_idx}/{total_runs}  "
+                f"rate={float(baud):g} GBd  seed={int(seed)}",
+                flush=True,
+            )
             cfg = copy.deepcopy(base_cfg)
             cfg.baud_gbaud = float(baud)
             cfg.sim_seed = int(seed)
             for key, value in (overrides or {}).items():
                 setattr(cfg, key, value)
-            trial.append(float(sim.run_isac_sim(cfg)["evm_db"]))
+            result = sim.run_isac_sim(cfg)
+            trial.append(float(result["evm_db"]))
+            del result, cfg
+            gc.collect()
         evm_db.append(_mean_evm_db(trial))
     return np.asarray(evm_db, dtype=float)
 
@@ -366,8 +394,14 @@ def compute_sim_series(
 
     data = json.loads(params_json.read_text(encoding="utf-8"))
     base_cfg = build_sim_cfg(data, modulation=modulation)
-    evm_db = _run_sim_series(base_cfg, baud_list, seed_list)
-    bound_evm_db = _run_sim_series(base_cfg, baud_list, seed_list, overrides=_ELECTRONIC_NOISE_FREE_OVERRIDES)
+    evm_db = _run_sim_series(base_cfg, baud_list, seed_list, run_name="full")
+    bound_evm_db = _run_sim_series(
+        base_cfg,
+        baud_list,
+        seed_list,
+        overrides=_ELECTRONIC_NOISE_FREE_OVERRIDES,
+        run_name="noise-off",
+    )
 
     if use_cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -514,7 +548,33 @@ def _ssbi_bound_from_sim(args: argparse.Namespace, modulation: str, sr_gbaud: np
     except Exception as exc:
         print(f"WARNING: SSBI/MZM-only sim failed for {modulation}: {exc}")
         return None
+    except KeyboardInterrupt:
+        print("WARNING: simulation interrupted; continuing without the simulated curve.")
+        return None
     return sim_series["symbol_rate_gbaud"], sim_series["bound_evm_db"]
+
+
+def _comparison_curves_from_sim(
+    args: argparse.Namespace,
+    modulation: str,
+    sr_gbaud: np.ndarray,
+) -> dict[str, np.ndarray] | None:
+    if args.no_sim:
+        return None
+    try:
+        return compute_sim_series(
+            args.sim_params,
+            modulation.strip().upper(),
+            baud_list=[float(v) for v in sr_gbaud],
+            seeds=args.sim_seeds,
+            force=args.force_resim,
+        )
+    except Exception as exc:
+        print(f"WARNING: physics simulation failed for {modulation}: {exc}")
+        return None
+    except KeyboardInterrupt:
+        print("WARNING: simulation interrupted; continuing without the simulated curve.")
+        return None
 
 
 def _interpolate_evm_at(sr_gbaud: np.ndarray, evm_db: np.ndarray, anchor_gbaud: float) -> float:
@@ -576,24 +636,31 @@ def make_paper_ssbi_figure(series: dict[str, dict[str, np.ndarray]], args: argpa
 
     awgn_low_x, awgn_low_y, awgn_offset_db = _awgn_reference_from_low_rates(sr, evm)
     snr_anchor_gbaud = float(args.snr_anchor_gbaud)
-    default_anchor_snr_db = -_interpolate_evm_at(sr, evm, snr_anchor_gbaud)
+    default_anchor_snr_db = -(
+        awgn_offset_db + 10.0 * np.log10(snr_anchor_gbaud / 2.0)
+    )
     snr_anchor_db = float(args.snr_anchor_db) if args.snr_anchor_db is not None else default_anchor_snr_db
     snr_smooth = np.geomspace(max(1.0, float(np.min(sr)) * 0.9), min(float(args.xmax_gbaud), float(np.max(sr)) * 1.02), 240)
     snr_smooth_y = _snr_evm_curve(snr_smooth, snr_anchor_gbaud, snr_anchor_db)
 
-    ssbi_bound = _ssbi_bound_from_sim(args, label, sr)
+    sim_comparison = _comparison_curves_from_sim(args, label, sr)
+    ssbi_bound = (
+        (sim_comparison["symbol_rate_gbaud"], sim_comparison["bound_evm_db"])
+        if sim_comparison is not None
+        else None
+    )
 
     figure_dpi = 120 if args.show else args.dpi
     fig, ax = plt.subplots(figsize=(4.8, 3.85), dpi=figure_dpi)
     meas_line, = ax.plot(
         sr, evm, "o-", color="black", lw=1.45, ms=5.8, mew=0.9,
-        label="_nolegend_", picker=6,
+        markerfacecolor="white", label="Measurement", picker=6,
     )
     meas_line._cursor_label = "Measured EVM"  # type: ignore[attr-defined]
 
     awgn_line, = ax.plot(
         snr_smooth, snr_smooth_y, "--", color="#0000bd", lw=1.45,
-        label="-SNR", picker=5,
+        label="SNR", picker=5,
     )
     awgn_line._cursor_label = "Theoretical SNR"  # type: ignore[attr-defined]
 
@@ -610,11 +677,25 @@ def make_paper_ssbi_figure(series: dict[str, dict[str, np.ndarray]], args: argpa
         sinr_evm_db = _evm_power_to_db(_evm_db_to_power(snr_evm_at_sir_x) + ssbi_excess_power)
         sinr_line, = ax.plot(
             sir_x, sinr_evm_db, "--", color="#ff0000",  lw=1.45,
-            label="-SINR", picker=5,
+            label="SINR", picker=5,
         )
         sinr_line._cursor_label = "SINR"  # type: ignore[attr-defined]
     else:
         sinr_evm_db = None
+
+    if sim_comparison is not None:
+        sim_line, = ax.plot(
+            sim_comparison["symbol_rate_gbaud"],
+            sim_comparison["evm_db"],
+            "-.",
+            color="#008000",
+            lw=1.55,
+            label="Simulation",
+            picker=5,
+        )
+        sim_line._cursor_label = "Full physics simulation"  # type: ignore[attr-defined]
+    else:
+        sim_line = None
 
     threshold_db = -float(args.required_snr_db)
     thr_line = ax.axhline(
@@ -625,8 +706,7 @@ def make_paper_ssbi_figure(series: dict[str, dict[str, np.ndarray]], args: argpa
 
     ax.set_xscale("log")
     ax.set_xlim(2, 20)
-    ax.set_ylim(-30, -10)
-    ax.set_yticks([-30, -25, -20, -15, -10])
+    ax.set_ylim(float(args.ymin_db), float(args.ymax_db))
     ax.set_box_aspect(PAPER_BOX_ASPECT)
     ax.set_xlabel("Symbol rate (GBaud)")
     ax.set_ylabel("EVM (dB)")
@@ -638,7 +718,12 @@ def make_paper_ssbi_figure(series: dict[str, dict[str, np.ndarray]], args: argpa
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
     ax.grid(True, which="major", alpha=0.32)
     ax.grid(True, which="minor", alpha=0.12)
-    ax.legend(handles=[awgn_line, sinr_line] if ssbi_bound is not None else [awgn_line], loc="lower right", frameon=False)
+    legend_handles = [meas_line, awgn_line]
+    if ssbi_bound is not None:
+        legend_handles.append(sinr_line)
+    if sim_line is not None:
+        legend_handles.append(sim_line)
+    ax.legend(handles=legend_handles, loc="lower right", frameon=False)
     for spine in ax.spines.values():
         spine.set_visible(True)
 
@@ -735,6 +820,10 @@ def make_paper_ssbi_figure(series: dict[str, dict[str, np.ndarray]], args: argpa
             "SINR trace uses 1/SINR = 1/SNR + 1/SIR; "
             f"EVM^2 growth from {ssbi_bound[0][0]:g} to {ssbi_bound[0][-1]:g} GBaud: {float(ratio):.2f}x"
         )
+    if sim_comparison is not None:
+        sim_at_meas = np.interp(sr, sim_comparison["symbol_rate_gbaud"], sim_comparison["evm_db"])
+        rmse_db = float(np.sqrt(np.mean((sim_at_meas - evm) ** 2)))
+        print(f"Full-simulation vs measurement EVM RMSE: {rmse_db:.3f} dB")
     if args.show:
         plt.show()
     else:
@@ -1160,8 +1249,8 @@ def main() -> None:
                         help="Low-rate reference where SSBI excess is set to zero in paper mode")
     parser.add_argument("--sim-params", type=Path, dest="sim_params", default=DEFAULT_SIM_PARAMS_JSON,
                         help="isac_gui 'Save Params' JSON used to build the physics simulation curve")
-    parser.add_argument("--sim-seeds", type=int, dest="sim_seeds", default=4,
-                        help="Random seeds averaged per symbol rate for the physics simulation curve")
+    parser.add_argument("--sim-seeds", type=int, dest="sim_seeds", default=1,
+                        help="Random seeds averaged per symbol rate (default: 1 for a responsive preview; use 4 for the final paper curve)")
     parser.add_argument("--no-sim", dest="no_sim", action="store_true",
                         help="Skip the physics-based isac_gui simulation curve (measured data only)")
     parser.add_argument("--force-resim", dest="force_resim", action="store_true",

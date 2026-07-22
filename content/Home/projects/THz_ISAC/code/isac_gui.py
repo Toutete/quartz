@@ -164,7 +164,7 @@ class IsacTxSimPanel:
                 sig_grp.columnconfigure(3, weight=1)
                 sig_grp.columnconfigure(5, weight=1)
 
-                self.modulation_var = tk.StringVar(value="16QAM")
+                self.modulation_var = tk.StringVar(value="32QAM")
                 ttk.Label(sig_grp, text="Modulation").grid(row=0, column=0, sticky="w")
                 ttk.Combobox(
                     sig_grp,
@@ -2093,8 +2093,8 @@ class SimConfig:
 
     coherence_mode: str = "Free-running"
     rx_mode: str = "Mixer"
-    # The MZM creates DSB, then the WSS passes one sideband to the UTC-PD.
-    optical_sideband_mode: str = "SSB"
+    # DSB is the baseline model. Enable WSS-filtered SSB explicitly when needed.
+    optical_sideband_mode: str = "DSB"
     si_enable: bool = True
     carrier_wander_enable: bool = False
     carrier_wander_mhz: float = 0.0
@@ -2104,8 +2104,7 @@ class SimConfig:
     # Optical front-end / MZM settings. UTC-PD photocurrent sets absolute
     # optical power; AWG RF power moves the signal-to-carrier ratio.
     awg_rf_power_dbm: float = -10.0
-    # Measured pre-WSS DSB CSPR calibration point from
-    # isac_sim_params_20260720.json; both sidebands are in the denominator.
+    # Effective CSPR calibration point used by the system model.
     awg_ref_power_dbm: float = -6.0
     mzm_drive_gain_db: float = 8.0
     mzm_vpi_v: float = 3.0
@@ -2132,15 +2131,23 @@ class SimConfig:
     dso_bandwidth_ghz: float = 40.0
     omt_iso_db: float = 24.0
     omt_il_db: float = 2.0
-    ant_gain_dbi: float = 33.0
-    tx_ant_gain_dbi: float = 33.0
-    rx_ant_gain_dbi: float = 33.0
+    ant_gain_dbi: float = 32.0
+    tx_ant_gain_dbi: float = 32.0
+    rx_ant_gain_dbi: float = 32.0
     target_rcs_sqm: float = 0.01
-    target_ant_gain_dbi: float = 33.0
+    target_ant_gain_dbi: float = 32.0
     target_gamma_mag: float = 0.5
     target_pol_eff: float = 1.0
+    # Direct effective RCS override used by the main GUI. The legacy component
+    # fields above remain available for older scripts and saved configurations.
+    target_effective_rcs_dbsm: float | None = -4.28
     target_dist_m: float = 1.0  # Default 1m
-    sim_seed: int | None = None
+    # Deterministic by default so repeated GUI runs are directly comparable.
+    # Set to None explicitly when a Monte-Carlo noise realization is required.
+    sim_seed: int | None = 0
+    # Diagnostic ablation switch. Normal GUI operation always leaves this on;
+    # the EVM trade-off analysis turns it off to isolate MZM/ZBD distortion.
+    additive_noise_enable: bool = True
     syms_per_chirp: int = 1024
     pilot_rho: float = 0.20
     rrc_beta: float = 0.20
@@ -2204,24 +2211,7 @@ def w_to_dbm(p_w: float) -> float:
     return 10.0 * np.log10(max(float(p_w), 1e-30) * 1e3)
 
 def effective_cspr_db(cfg: SimConfig) -> float:
-    """CSPR at the UTC-PD input after optional WSS sideband selection."""
-    metrics = calc_mzm_drive_metrics(
-        cfg.awg_rf_power_dbm,
-        cfg.mzm_drive_gain_db,
-        cfg.cspr_db,
-        cfg.awg_ref_power_dbm,
-        cfg.mzm_vpi_v,
-        cfg.mzm_phi_bias_deg,
-        cfg.mzm_input_ohm,
-    )
-    cspr_db = float(metrics["effective_cspr_db"])
-    if optical_sideband_mode(cfg) == "SSB":
-        cspr_db += 10.0 * np.log10(2.0)
-    return cspr_db
-
-
-def pre_wss_cspr_db(cfg: SimConfig) -> float:
-    """Total-sideband DSB CSPR measured before the WSS."""
+    """Effective CSPR used by the transmitted-THz system model."""
     metrics = calc_mzm_drive_metrics(
         cfg.awg_rf_power_dbm,
         cfg.mzm_drive_gain_db,
@@ -2234,7 +2224,7 @@ def pre_wss_cspr_db(cfg: SimConfig) -> float:
     return float(metrics["effective_cspr_db"])
 
 def optical_sideband_mode(cfg: SimConfig) -> str:
-    mode = str(getattr(cfg, "optical_sideband_mode", "SSB") or "SSB").strip().upper()
+    mode = str(getattr(cfg, "optical_sideband_mode", "DSB") or "DSB").strip().upper()
     return "SSB" if mode == "SSB" else "DSB"
 
 def calc_mzm_drive_metrics(
@@ -2253,8 +2243,7 @@ def calc_mzm_drive_metrics(
     tan_phi = np.tan(phi_b)
 
     # Keep the voltage/Vpi result as a diagnostic, but anchor the simulation
-    # to the pre-WSS, total-sideband DSB CSPR measured at awg_ref_dbm. This
-    # absorbs unmodelled RF
+    # to the effective measured CSPR at awg_ref_dbm. This absorbs unmodelled RF
     # chain gain, frequency response, and CSPR measurement conventions while
     # retaining the physical m proportional to sqrt(P_AWG) power dependence.
     u_from_voltage = np.pi * v_rms / (2.0 * max(float(vpi_v), 1e-12))
@@ -2294,10 +2283,8 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
     cspr_lin = max(10.0 ** (cspr_eff_db / 10.0), 1e-12)
     mode = optical_sideband_mode(cfg)
     n_sidebands = 1.0 if mode == "SSB" else 2.0
-    dsb_reconstruction_factor = 2.0 if mode == "SSB" else 1.0
-    # cfg.cspr_db is the pre-WSS DSB CSPR, whose denominator contains both
-    # symmetric sidebands.  Selecting one sideband raises the post-WSS CSPR
-    # by 3.0103 dB and reduces the effective modulation index by sqrt(2).
+    # The system model uses one effective CSPR regardless of how the
+    # experimental optical filtering realizes the transmitted waveform.
     p_mzm_carrier_w = p_total_w / max(2.0 + 1.0 / cspr_lin, 1e-30)
     p_tone1_w = p_mzm_carrier_w
     p_signal_total_w = p_mzm_carrier_w / cspr_lin
@@ -2308,19 +2295,18 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
         "mzm_carrier_w": p_mzm_carrier_w,
         "sideband_each_w": p_sideband_each_w,
         "signal_total_w": p_signal_total_w,
-        "dsb_total_w": p_signal_total_w * dsb_reconstruction_factor,
+        "dsb_total_w": p_signal_total_w,
         "mzm_branch_w": p_mzm_carrier_w + p_signal_total_w,
         "tone_ratio": 1.0,
         "effective_cspr_db": float(cspr_eff_db),
-        "pre_wss_cspr_db": float(pre_wss_cspr_db(cfg)),
-        "post_wss_modulation_index": float(10.0 ** (-cspr_eff_db / 20.0)),
+        "modulation_index": float(10.0 ** (-cspr_eff_db / 20.0)),
         "sideband_mode": mode,
         "total_dbm": w_to_dbm(p_total_w),
         "tone1_dbm": w_to_dbm(p_tone1_w),
         "mzm_carrier_dbm": w_to_dbm(p_mzm_carrier_w),
         "sideband_each_dbm": w_to_dbm(p_sideband_each_w),
         "signal_total_dbm": w_to_dbm(p_signal_total_w),
-        "dsb_total_dbm": w_to_dbm(p_signal_total_w * dsb_reconstruction_factor),
+        "dsb_total_dbm": w_to_dbm(p_signal_total_w),
     }
 
 def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
@@ -2329,7 +2315,6 @@ def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
     cspr_lin = max(10.0 ** (effective_cspr_db(cfg) / 10.0), 1e-12)
     mode = optical_sideband_mode(cfg)
     n_sidebands = 1.0 if mode == "SSB" else 2.0
-    dsb_reconstruction_factor = 2.0 if mode == "SSB" else 1.0
     carrier_w = total_rf_w / max(1.0 + 1.0 / cspr_lin, 1e-30)
     signal_total_w = carrier_w / cspr_lin
     sideband_each_w = signal_total_w / n_sidebands
@@ -2338,15 +2323,14 @@ def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
         "carrier_w": carrier_w,
         "sideband_each_w": sideband_each_w,
         "signal_total_w": signal_total_w,
-        "dsb_total_w": signal_total_w * dsb_reconstruction_factor,
+        "dsb_total_w": signal_total_w,
         "sideband_mode": mode,
         "total_dbm": w_to_dbm(total_rf_w),
         "carrier_dbm": w_to_dbm(carrier_w),
         "sideband_each_dbm": w_to_dbm(sideband_each_w),
         "signal_total_dbm": w_to_dbm(signal_total_w),
-        "dsb_total_dbm": w_to_dbm(signal_total_w * dsb_reconstruction_factor),
+        "dsb_total_dbm": w_to_dbm(signal_total_w),
         "effective_cspr_db": float(effective_cspr_db(cfg)),
-        "pre_wss_cspr_db": float(pre_wss_cspr_db(cfg)),
     }
 
 def add_display_line_mw(
@@ -2608,6 +2592,7 @@ def calc_isac_link_budget(
     target_ant_gain_dbi: float = 0.0,
     target_gamma_mag: float = 0.0,
     target_pol_eff: float = 1.0,
+    effective_rcs_dbsm: float | None = None,
 ) -> dict[str, float]:
     # One-way RX (C1): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant -> OMT -> LNA
     #   P_rx_received = P_tx - L_OMT + G_tx - FSPL + G_rx - L_OMT
@@ -2628,7 +2613,15 @@ def calc_isac_link_budget(
     # the antenna-mode reradiation term.
     sigma_struct_eff = sigma_struct * pol_eff
     sigma_ant = (lam ** 2 * g_target ** 2 * gamma_mag ** 2 * pol_eff) / (4.0 * np.pi)
-    sigma = max(sigma_struct_eff + sigma_ant, 1e-12)
+    sigma_derived = max(sigma_struct_eff + sigma_ant, 1e-12)
+    if effective_rcs_dbsm is None or not np.isfinite(float(effective_rcs_dbsm)):
+        sigma = sigma_derived
+        effective_rcs_dbsm = 10.0 * np.log10(sigma)
+        rcs_is_direct = 0.0
+    else:
+        effective_rcs_dbsm = float(effective_rcs_dbsm)
+        sigma = max(10.0 ** (effective_rcs_dbsm / 10.0), 1e-12)
+        rcs_is_direct = 1.0
     omt_il_db = float(omt_il_db)
     fspl_one_way_db = 20.0 * np.log10(4.0 * np.pi * d * rf_hz / 3e8)
     rcs_gain_db = 10.0 * np.log10(4.0 * np.pi * sigma / (lam ** 2) + 1e-30)
@@ -2651,6 +2644,8 @@ def calc_isac_link_budget(
         "reradiated_structural_rcs_sqm": sigma_struct_eff,
         "antenna_mode_rcs_sqm": sigma_ant,
         "effective_rcs_sqm": sigma,
+        "effective_rcs_dbsm": float(effective_rcs_dbsm),
+        "rcs_is_direct": rcs_is_direct,
         "c1_rf_dbm": c1_rf_dbm,
         "c2_rf_dbm": c2_rf_dbm,
         "c1_if_chain_db": c1_if_chain_db,
@@ -2658,6 +2653,19 @@ def calc_isac_link_budget(
         "c1_if_dbm": c1_rf_dbm + lna_gain_db + c1_if_chain_db,
         "c2_if_dbm": c2_rf_dbm + lna_gain_db + c2_if_chain_db,
     }
+
+def calc_common_receiver_nf_db(cfg: SimConfig) -> float:
+    """Common C1/C2 equivalent NF used by the theoretical ISAC bound.
+
+    The requested thermal-noise-only model uses the shared LNA followed by
+    the IF amplifier. The ZBD NEP and digitizer noise remain explicit in the
+    waveform simulation and are not folded into this signal-dependent NF.
+    """
+    f_lna = 10.0 ** (float(cfg.lna_nf_db) / 10.0)
+    g_lna = max(10.0 ** (float(cfg.lna_gain_db) / 10.0), 1e-30)
+    f_if = 10.0 ** (float(cfg.if_amp_nf_db) / 10.0)
+    f_total = max(f_lna + (f_if - 1.0) / g_lna, 1.0)
+    return float(10.0 * np.log10(f_total))
 
 def calc_uxr0404a_noise_vrms(vscale_mv: float, bandwidth_hz: float) -> float:
     """Approximate UXR0404A input-referred noise for the selected V/div scale."""
@@ -2819,6 +2827,7 @@ def run_isac_sim(cfg: SimConfig):
         target_ant_gain_dbi=cfg.target_ant_gain_dbi,
         target_gamma_mag=cfg.target_gamma_mag,
         target_pol_eff=cfg.target_pol_eff,
+        effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
     )
     radar_path_loss_db = float(link["radar_path_loss_db"])
     one_way_path_loss_db = float(link["fspl_one_way_db"])
@@ -2991,8 +3000,8 @@ def run_isac_sim(cfg: SimConfig):
     if optical_sideband_mode(cfg) == "SSB":
         # Physical order: real-drive MZM produces DSB (including Taylor IMD),
         # then the WSS rejects the negative-frequency optical sideband. The
-        # analytic AC component models the retained upper sideband. Its power
-        # is one half of the measured pre-WSS total sideband power.
+        # analytic AC component models the retained upper sideband; its
+        # carrier ratio is set by the effective CSPR used by the system model.
         e_ac = e_shape - np.mean(e_shape)
         e_ssb = hilbert(np.asarray(e_ac, dtype=np.float64))
         e_ssb /= np.sqrt(np.mean(np.abs(e_ssb) ** 2)) + 1e-15
@@ -3044,10 +3053,16 @@ def run_isac_sim(cfg: SimConfig):
     if_chain_bw_hz = min(30e9, dso_analog_bw_hz, 0.5 * fs)
     rf_noise_bw_hz = dso_analog_bw_hz
     if_noise_bw_hz = if_chain_bw_hz
+    additive_noise_enable = bool(getattr(cfg, "additive_noise_enable", True))
     n_in_dbm = -174.0 + 10 * np.log10(rf_noise_bw_hz) + cfg.lna_nf_db
-    n_out_w = 10 ** ((n_in_dbm + cfg.lna_gain_db - 30.0) / 10.0)
+    n_out_w = 10 ** ((n_in_dbm + cfg.lna_gain_db - 30.0) / 10.0) if additive_noise_enable else 0.0
     n_out_vrms2 = n_out_w * 50.0
-    awgn_lna = np.sqrt(n_out_vrms2 / 2.0) * (np.random.randn(total_samples) + 1j * np.random.randn(total_samples))
+    awgn_lna = (
+        np.sqrt(n_out_vrms2 / 2.0)
+        * (np.random.randn(total_samples) + 1j * np.random.randn(total_samples))
+        if additive_noise_enable
+        else np.zeros(total_samples, dtype=np.complex128)
+    )
     v_rx_in = v_lna_sig + awgn_lna
 
     # 6. Receiver detection.
@@ -3055,8 +3070,13 @@ def run_isac_sim(cfg: SimConfig):
         p_inst_w = (np.abs(v_rx_in) ** 2) / 50.0
         v_det = cfg.zbd_responsivity_vpw * p_inst_w
         nep_w_sqrt_hz = cfg.zbd_nep_pw_sqrt_hz * 1e-12
-        v_nep_rms = cfg.zbd_responsivity_vpw * nep_w_sqrt_hz * np.sqrt(if_noise_bw_hz)
-        v_det += np.random.normal(0.0, v_nep_rms, total_samples)
+        v_nep_rms = (
+            cfg.zbd_responsivity_vpw * nep_w_sqrt_hz * np.sqrt(if_noise_bw_hz)
+            if additive_noise_enable
+            else 0.0
+        )
+        if additive_noise_enable:
+            v_det += np.random.normal(0.0, v_nep_rms, total_samples)
         v_rec = v_det - np.mean(v_det)
     else:
         v_mix_in = v_rx_in - v_si * lna_gain_lin
@@ -3072,13 +3092,21 @@ def run_isac_sim(cfg: SimConfig):
 
     #
     c2_if_gain_lin = 10**((cfg.c2_drive_gain_db - cfg.c2_cable_loss_db) / 20.0)
-    dso_noise_vrms = calc_uxr0404a_noise_vrms(cfg.dso_vscale_mv, dso_analog_bw_hz)
+    dso_noise_vrms = (
+        calc_uxr0404a_noise_vrms(cfg.dso_vscale_mv, dso_analog_bw_hz)
+        if additive_noise_enable
+        else 0.0
+    )
     v_rec_amp = v_rec_filt * c2_if_gain_lin
-    n_if_w_c2 = 10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c2_drive_gain_db - 30.0) / 10.0)
+    n_if_w_c2 = (
+        10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c2_drive_gain_db - 30.0) / 10.0)
+        if additive_noise_enable
+        else 0.0
+    )
     v_dso_in = (
         v_rec_amp
-        + np.sqrt(n_if_w_c2 * 50.0 / 2.0) * np.random.randn(N_f)
-        + dso_noise_vrms * np.random.randn(N_f)
+        + (np.sqrt(n_if_w_c2 * 50.0 / 2.0) * np.random.randn(N_f) if additive_noise_enable else 0.0)
+        + (dso_noise_vrms * np.random.randn(N_f) if additive_noise_enable else 0.0)
     )
 
     c2_target_phase_components = None
@@ -3248,11 +3276,27 @@ def run_isac_sim(cfg: SimConfig):
                 )
                 si_cfr_range_axis = np.asarray(si_cfr["range_m"], dtype=np.float64)
                 si_cfr_profile_db = np.asarray(si_cfr["profile_db"], dtype=np.float64)
-                si_cfr_peak_m = float(si_cfr["peak_m"])
+                target_window_m = max(
+                    0.05,
+                    2.0 * 3e8 / (2.0 * max(float(occupied_bw_hz), 1.0)),
+                )
+                target_bins = (
+                    np.isfinite(si_cfr_range_axis)
+                    & np.isfinite(si_cfr_profile_db)
+                    & (np.abs(si_cfr_range_axis - float(cfg.target_dist_m)) <= target_window_m)
+                )
+                if np.any(target_bins):
+                    target_indices = np.flatnonzero(target_bins)
+                    peak_local = int(target_indices[int(np.argmax(si_cfr_profile_db[target_bins]))])
+                    si_cfr_peak_m = float(si_cfr_range_axis[peak_local])
+                else:
+                    si_cfr_peak_m = float(si_cfr["peak_m"])
                 si_cfr_coherence = float(si_cfr["coherence"])
     except Exception:
         pass
-    proc_gain_db = 10.0 * np.log10(max(len(ref_sig), 1))
+    pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(baud_rate, 1.0)
+    ideal_processing_gain_lin = max(float(occupied_bw_hz) * pilot_time_s, 1.0)
+    proc_gain_db = 10.0 * np.log10(ideal_processing_gain_lin)
     radar_snr_db = float("nan")
     pslr_db = float("nan")
     selected_range_m = float("nan")
@@ -3312,13 +3356,19 @@ def run_isac_sim(cfg: SimConfig):
         v_com = v_tx_out * beta_com * np.exp(-1j * omega_c_tau_com)
 
     v_lna_sig_com = v_com * lna_gain_lin
-    awgn_lna_com = np.sqrt(n_out_vrms2 / 2.0) * (np.random.randn(total_samples) + 1j * np.random.randn(total_samples))
+    awgn_lna_com = (
+        np.sqrt(n_out_vrms2 / 2.0)
+        * (np.random.randn(total_samples) + 1j * np.random.randn(total_samples))
+        if additive_noise_enable
+        else np.zeros(total_samples, dtype=np.complex128)
+    )
     v_rx_in_com = v_lna_sig_com + awgn_lna_com
 
     if cfg.rx_mode == "ZBD":
         p_inst_w_com = (np.abs(v_rx_in_com) ** 2) / 50.0
         v_det_com = cfg.zbd_responsivity_vpw * p_inst_w_com
-        v_det_com += np.random.normal(0.0, v_nep_rms, total_samples)
+        if additive_noise_enable:
+            v_det_com += np.random.normal(0.0, v_nep_rms, total_samples)
         v_rec_com = v_det_com - np.mean(v_det_com)
     else:
         #
@@ -3341,11 +3391,15 @@ def run_isac_sim(cfg: SimConfig):
     amp_mask_com = (np.abs(f_axis_com) > 30e3) & (np.abs(f_axis_com) < if_chain_bw_hz)
     v_rec_filt_com = np.real(np.fft.ifft(np.fft.fft(v_rec_com) * amp_mask_com))
     c1_if_gain_lin = 10**((cfg.c1_drive_gain_db - cfg.c1_cable_loss_db) / 20.0)
-    n_if_w_c1 = 10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c1_drive_gain_db - 30.0) / 10.0)
+    n_if_w_c1 = (
+        10**((-174.0 + 10*np.log10(if_noise_bw_hz) + cfg.if_amp_nf_db + cfg.c1_drive_gain_db - 30.0) / 10.0)
+        if additive_noise_enable
+        else 0.0
+    )
     v_dso_in_com = (
         v_rec_filt_com * c1_if_gain_lin
-        + np.sqrt(n_if_w_c1 * 50.0 / 2.0) * np.random.randn(N_f_com)
-        + dso_noise_vrms * np.random.randn(N_f_com)
+        + (np.sqrt(n_if_w_c1 * 50.0 / 2.0) * np.random.randn(N_f_com) if additive_noise_enable else 0.0)
+        + (dso_noise_vrms * np.random.randn(N_f_com) if additive_noise_enable else 0.0)
     )
     v_demod_com = hilbert(v_dso_in_com) if cfg.rx_mode == "Mixer" else v_dso_in_com.astype(np.complex128)
     analysis_bw_hz = max(occupied_bw_hz, 1.0)
@@ -3447,6 +3501,31 @@ def run_isac_sim(cfg: SimConfig):
                     best_eq, best_tx, best_idx = teq, ttx, tidx
 
     elif waveform_kind == "DFT-s-OFDM" and dft_active_bins is not None and dft_pilot_active is not None:
+        def _smooth_one_tap_fde(h_raw: np.ndarray, weight: np.ndarray) -> np.ndarray:
+            """Match the DSO active-bin one-tap FDE response smoothing."""
+            h = np.asarray(h_raw, dtype=np.complex128).reshape(-1)
+            w = np.maximum(np.asarray(weight, dtype=np.float64).reshape(-1), 0.0)
+            valid = np.isfinite(h.real) & np.isfinite(h.imag) & (np.abs(h) > 1e-12)
+            if np.count_nonzero(valid) < max(4, len(h) // 32):
+                return np.ones_like(h, dtype=np.complex128)
+            idx = np.arange(len(h), dtype=np.float64)
+            h_fill = (
+                np.interp(idx, idx[valid], h.real[valid])
+                + 1j * np.interp(idx, idx[valid], h.imag[valid])
+            )
+            win = int(np.clip(len(h) // 32, 5, 65))
+            if win % 2 == 0:
+                win += 1
+            if win < 5 or win >= len(h):
+                return h_fill
+            kernel = np.hanning(win)
+            kernel /= np.sum(kernel) + 1e-15
+            pad = win // 2
+            den = np.convolve(np.pad(w, pad, mode="edge"), kernel, mode="valid")
+            num_r = np.convolve(np.pad(h_fill.real * w, pad, mode="edge"), kernel, mode="valid")
+            num_i = np.convolve(np.pad(h_fill.imag * w, pad, mode="edge"), kernel, mode="valid")
+            return (num_r + 1j * num_i) / (den + 1e-15)
+
         lag_candidates = range(max(0, demod_delay - 8), demod_delay + 9)
         for lag in lag_candidates:
             rec_syms = []
@@ -3457,10 +3536,15 @@ def run_isac_sim(cfg: SimConfig):
                 if start_idx + dft_n_fft > len(rx_bb_raw):
                     break
                 y = rx_bb_raw[start_idx:start_idx + dft_n_fft]
-                h_blk = np.vdot(tx_block, y) / (np.vdot(tx_block, tx_block) + 1e-15)
-                y_eq = y / (h_blk + 1e-15)
-                active = np.fft.fft(y_eq)[dft_active_bins]
-                data_active = (active - dft_sr * dft_pilot_active) / max(dft_sd, 1e-12)
+                y_active = np.fft.fft(y)[dft_active_bins]
+                tx_active = np.fft.fft(tx_block)[dft_active_bins]
+                h_scalar = np.vdot(tx_block, y) / (np.vdot(tx_block, tx_block) + 1e-15)
+                valid_h = np.abs(tx_active) > 1e-12
+                h_raw = np.full(dft_n_data, h_scalar, dtype=np.complex128)
+                h_raw[valid_h] = y_active[valid_h] / tx_active[valid_h]
+                h_fde = _smooth_one_tap_fde(h_raw, np.abs(tx_active) ** 2)
+                active_eq = y_active / (h_fde + 1e-15)
+                data_active = (active_eq - dft_sr * dft_pilot_active) / max(dft_sd, 1e-12)
                 scale_i = dft_data_scales[i] if i < len(dft_data_scales) else 1.0
                 sy_est = np.fft.ifft(data_active * scale_i * np.sqrt(max(dft_n_data, 1)))
                 sy_ref = dft_tx_symbol_blocks[i]
@@ -3593,6 +3677,7 @@ def run_isac_sim(cfg: SimConfig):
         "reradiated_structural_rcs_sqm": link["reradiated_structural_rcs_sqm"],
         "antenna_mode_rcs_sqm": link["antenna_mode_rcs_sqm"],
         "effective_rcs_sqm": link["effective_rcs_sqm"],
+        "effective_rcs_dbsm": link["effective_rcs_dbsm"],
         "rf_noise_bw_hz": rf_noise_bw_hz,
         "if_noise_bw_hz": if_noise_bw_hz,
         "optical_center_freq_thz": cfg.optical_center_freq_thz,
@@ -3651,7 +3736,7 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=True)
         self.si_enable_var = tk.BooleanVar(value=True)
-        self.ssb_enable_var = tk.BooleanVar(value=True)
+        self.ssb_enable_var = tk.BooleanVar(value=False)
         self.sim_welch_psd_var = tk.BooleanVar(value=True)
         self.show_si_norm_range_var = tk.BooleanVar(value=False)
         self.rx_mode_var = tk.StringVar(value="ZBD")
@@ -3677,9 +3762,8 @@ class PhotonicIsacSimPanel:
             with open(preset_path, "r", encoding="utf-8") as f:
                 preset = json.load(f)
             self._apply_sim_preset(preset)
-            # The measured transmitter always places a WSS before the UTC-PD.
-            # Keep legacy presets from silently restoring the old DSB model.
-            self.ssb_enable_var.set(True)
+            # Keep WSS-filtered SSB opt-in while the baseline system model is DSB.
+            self.ssb_enable_var.set(False)
             if "omt_iso_db" in self.params:
                 self.params["omt_iso_db"].set("24")
             self.status_var.set(f"Default preset: {preset_path.name}")
@@ -3864,11 +3948,7 @@ class PhotonicIsacSimPanel:
             "tx":        self.table.insert("", "end", text="UTC-PD Output (TX)", values=("0.00", "dBm")),
             "opt_pwr":   self.table.insert("", "end", text="UTC-PD Optical In", values=("0.00", "mW")),
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
-            "target_gain": self.table.insert("", "end", text="Common/Re-rad Ant Gain", values=("0.00", "dBi")),
-            "rcs_struct": self.table.insert("", "end", text="Structural RCS",     values=("0.00", "m^2")),
-            "rcs_struct_eff": self.table.insert("", "end", text="Pol.-adjusted Structural RCS", values=("0.00", "m^2")),
-            "rcs_ant":   self.table.insert("", "end", text="Antenna-mode RCS",   values=("0.00", "m^2")),
-            "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "m^2")),
+            "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "dBsm")),
             "delay":     self.table.insert("", "end", text="Sensing Echo Delay", values=("0.00", "ns")),
             "omt_il":    self.table.insert("", "end", text="OMT Insertion Loss (x2)", values=("0.00", "dB")),
             "comm_loss": self.table.insert("", "end", text="C1 FSPL (one-way)", values=("0.00", "dB")),
@@ -3894,7 +3974,7 @@ class PhotonicIsacSimPanel:
             "si_norm_ratio": self.table.insert("", "end", text="SI-align Target/SI", values=("N/A", "dB")),
             "si_norm_coh": self.table.insert("", "end", text="SI Phase Coherence", values=("N/A", "")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
-            "proc_gain": self.table.insert("", "end", text="Processing Gain",   values=("N/A", "dB")),
+            "proc_gain": self.table.insert("", "end", text="Ideal Processing Gain (BTp)", values=("N/A", "dB")),
             "evm_pct":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "%")),
             "evm_snr":   self.table.insert("", "end", text="EVM-implied SNR",    values=("N/A", "dB")),
         }
@@ -3953,7 +4033,7 @@ class PhotonicIsacSimPanel:
 
         # removed fs_gsps
         add_p(1, "linewidth_mhz", "Laser Linewidth [MHz]", "0.015")
-        add_p(2, "cspr_db", "Pre-WSS DSB CSPR [dB]", "13")
+        add_p(2, "cspr_db", "Effective CSPR [dB]", "13")
         add_p(3, "opt_center_thz", "Opt Tone Center [THz]", "193.41")
         add_p(4, "mzm_drive_gain_db", "MZM Drive Amp [dB]", "8.0")
         add_p(5, "utcpd_resp_aw", "UTC-PD Resp. [A/W]", "0.24")
@@ -3979,18 +4059,16 @@ class PhotonicIsacSimPanel:
         add_p(17, "c1_drive_gain_db","C1 Drive Amp [dB]",   "27")
         add_p(18, "if_amp_nf_db", "IF Amp NF [dB]",         "5.0")
         add_p(19, "c2_drive_gain_db","C2 Drive Amp [dB]",   "20")
-        add_p(20, "tx_ant_gain_dbi", "Common Ant Gain [dBi]", "33")
+        add_p(20, "tx_ant_gain_dbi", "Common Ant Gain [dBi]", "32")
         add_p(21, "mzm_vpi_v", "MZM Vpi @20GHz [V]", "3")
         add_p(22, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "10")
         add_p(23, "c2_cable_loss_db", "C2 Cable Loss [dB]", "22")
         add_p(24, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "24")
-        add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "2")
-        add_p(28, "rcs_sqm",      "Struct. RCS [m^2]",      "0.01")
+        add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "1.9")
+        add_p(28, "effective_rcs_dbsm", "Effective RCS [dBsm]", "-4.28")
         add_p(29, "mzm_phi_bias_deg", "MZM Bias phi [deg]", "45.0")
-        add_p(30, "target_gamma_mag", "Target |Gamma|",     "0.5")
-        add_p(31, "target_pol_eff", "Target Pol Eff",       "1.0")
         add_p(35, "mzm_eo_bw_ghz", "MZM EO BW [GHz]", "30.0")
         add_p(36, "awg_dac_bits", "AWG DAC ENOB [bits]", "8.0")
 
@@ -4062,28 +4140,23 @@ class PhotonicIsacSimPanel:
                 self._param_float("dso_vscale_mv", 100.0),
                 self._param_float("dso_bw_ghz", 40.0) * 1e9,
             ) * 1e3
-            tx_gain = self._param_float("tx_ant_gain_dbi", 33.0)
+            tx_gain = self._param_float("tx_ant_gain_dbi", 32.0)
             rx_gain = tx_gain
-            rcs = self._param_float("rcs_sqm", 0.01)
-            target_ant_gain = tx_gain
-            target_gamma = self._param_float("target_gamma_mag", 0.5)
-            target_pol = self._param_float("target_pol_eff", 1.0)
+            effective_rcs_dbsm = self._param_float("effective_rcs_dbsm", -4.28)
             link = calc_isac_link_budget(
                 distance_m=d,
                 rf_ghz=rf_ghz,
                 tx_dbm=tx_dbm,
                 tx_gain_dbi=tx_gain,
                 rx_gain_dbi=rx_gain,
-                rcs_sqm=rcs,
+                rcs_sqm=0.0,
                 lna_gain_db=self._param_float("lna_gain_db", 13.0),
                 c1_drive_gain_db=self._param_float("c1_drive_gain_db", 27.0),
                 c2_drive_gain_db=self._param_float("c2_drive_gain_db", 20.0),
                 c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
                 c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
                 omt_il_db=self._param_float("omt_il_db", 2.0),
-                target_ant_gain_dbi=target_ant_gain,
-                target_gamma_mag=target_gamma,
-                target_pol_eff=target_pol,
+                effective_rcs_dbsm=effective_rcs_dbsm,
             )
             delay_ns = link["delay_ns"]
             loss_db = link["radar_loss_db"]
@@ -4151,25 +4224,15 @@ class PhotonicIsacSimPanel:
             if "opt_pwr" in self.rows:
                 self.table.item(self.rows["opt_pwr"], values=(f"{opt_mw:.2f}", "mW"))
             if "mzm_rf" in self.rows:
-                post_cspr_db = effective_cspr_db(optical_cfg)
-                post_m = 10.0 ** (-post_cspr_db / 20.0)
                 self.table.item(
                     self.rows["mzm_rf"],
                     values=(
-                        f"{mzm_metrics['rf_in_dbm']:.1f} dBm, m_DSB={mzm_metrics['m_eff']:.3f}",
-                        f"CSPR DSB/SSB {mzm_metrics['effective_cspr_db']:.1f}/{post_cspr_db:.1f} dB, m_SSB={post_m:.3f}",
+                        f"{mzm_metrics['rf_in_dbm']:.1f} dBm, m={mzm_metrics['m_eff']:.3f}",
+                        f"CSPR {mzm_metrics['effective_cspr_db']:.1f} dB",
                     ),
                 )
-            if "target_gain" in self.rows:
-                self.table.item(self.rows["target_gain"], values=(f"{target_ant_gain:.1f}", "dBi"))
-            if "rcs_struct" in self.rows:
-                self.table.item(self.rows["rcs_struct"], values=(f"{link['structural_rcs_sqm']:.4g}", "m^2"))
-            if "rcs_struct_eff" in self.rows:
-                self.table.item(self.rows["rcs_struct_eff"], values=(f"{link['reradiated_structural_rcs_sqm']:.4g}", "m^2"))
-            if "rcs_ant" in self.rows:
-                self.table.item(self.rows["rcs_ant"], values=(f"{link['antenna_mode_rcs_sqm']:.4g}", "m^2"))
             if "rcs_eff" in self.rows:
-                self.table.item(self.rows["rcs_eff"], values=(f"{link['effective_rcs_sqm']:.4g}", "m^2"))
+                self.table.item(self.rows["rcs_eff"], values=(f"{link['effective_rcs_dbsm']:.2f}", "dBsm"))
             self.table.item(self.rows["delay"], values=(f"{delay_ns:.2f}", "ns"))
             if "omt_il" in self.rows:
                 self.table.item(self.rows["omt_il"], values=(f"{2.0 * link['omt_il_db']:.2f}", "dB"))
@@ -4240,15 +4303,16 @@ class PhotonicIsacSimPanel:
             dso_bandwidth_ghz=self._param_float("dso_bw_ghz", 40.0),
             omt_iso_db=self._param_float("omt_iso_db", 24.0),
             omt_il_db=self._param_float("omt_il_db", 2.0),
-            ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
-            tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
-            rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
+            ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
+            tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
+            rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
-            target_rcs_sqm=self._param_float("rcs_sqm", 0.01),
-            target_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
-            target_gamma_mag=self._param_float("target_gamma_mag", 0.5),
-            target_pol_eff=self._param_float("target_pol_eff", 1.0),
+            target_rcs_sqm=0.0,
+            target_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
+            target_gamma_mag=0.0,
+            target_pol_eff=1.0,
+            target_effective_rcs_dbsm=self._param_float("effective_rcs_dbsm", -4.28),
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
@@ -4272,6 +4336,7 @@ class PhotonicIsacSimPanel:
             target_ant_gain_dbi=cfg.target_ant_gain_dbi,
             target_gamma_mag=cfg.target_gamma_mag,
             target_pol_eff=cfg.target_pol_eff,
+            effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
         )["radar_path_loss_db"]
         cfg.tx_power_dbm = cfg.utcpd_target_dbm
         return cfg
@@ -4524,7 +4589,7 @@ class PhotonicIsacSimPanel:
         # artificially lower than spread DSB content.
         osa = self.data.get("osa_display", {})
         self.lines[0].set_data(osa.get("freq_thz", []), osa.get("signal_dbm", []))
-        sideband_mode = str(np.asarray(osa.get("sideband_mode", "SSB")).item()) if "sideband_mode" in osa else "SSB"
+        sideband_mode = str(np.asarray(osa.get("sideband_mode", "DSB")).item()) if "sideband_mode" in osa else "DSB"
         self.lines[0].set_label(f"MZM carrier + {sideband_mode}")
         self.l_lo.set_data(osa.get("freq_thz", []), osa.get("lo_dbm", []))
         self.l_lo.set_label("Optical tone")
@@ -13678,7 +13743,7 @@ class SystemModelValidationPanel:
         self.meas_points: list[dict[str, float | str]] = []
         self.status_var = tk.StringVar(value="Ready")
         self._build_ui()
-        self.status_var.set("Ready. Press Run to sweep distance.")
+        self.status_var.set("Ready. Sync parameters, then run the required sweep.")
 
     def _build_ui(self) -> None:
         outer = ttk.PanedWindow(self.parent, orient=tk.HORIZONTAL)
@@ -13691,17 +13756,17 @@ class SystemModelValidationPanel:
         ctrl = ttk.LabelFrame(left, text="Paper Model Parameters", padding=8)
         ctrl.pack(fill=tk.BOTH, expand=True)
 
-        def add(row: int, key: str, label: str, value: str) -> None:
+        def add(row: int, key: str, label: str, value: str, read_only: bool = False) -> None:
             ttk.Label(ctrl, text=label).grid(row=row, column=0, sticky="w", pady=2)
             var = tk.StringVar(value=value)
             self.params[key] = var
             ttk.Entry(ctrl, textvariable=var, width=12).grid(row=row, column=1, sticky="w", pady=2)
 
         add(0, "r_min_m", "Distance min [m]", "0.25")
-        add(1, "r_max_m", "Distance max [m]", "2")
+        add(1, "r_max_m", "Range max [m]", "2")
         add(2, "n_range", "Sweep points", "9")
         add(3, "rho", "rho pilot power", "0.20")
-        add(4, "cspr_db", "Pre-WSS DSB CSPR [dB]", "13")
+        add(4, "cspr_db", "Effective CSPR [dB]", "13")
         add(5, "iso_db", "OMT ISO [dB]", "25")
         add(6, "ac2", "A_c^2 [mW]", "1.0")
         add(7, "sqrt_k", "sqrt(K) [amp*m^2]", "1e-4")
@@ -13758,13 +13823,38 @@ class SystemModelValidationPanel:
 
     def _processing_gain_lin(self) -> float:
         bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
-        pilot_time_s = max(self._float("pilot_time_ns", 1024.0) * 1e-9, 1e-15)
+        if "pilot_symbols" in self.params and "symbol_rate_gbaud" in self.params:
+            pilot_symbols = max(self._float("pilot_symbols", 1024.0), 1.0)
+            symbol_rate_hz = max(self._float("symbol_rate_gbaud", 15.0) * 1e9, 1.0)
+            pilot_time_s = pilot_symbols / symbol_rate_hz
+        else:
+            pilot_time_s = max(self._float("pilot_time_ns", 1024.0) * 1e-9, 1e-15)
         return max(bandwidth_hz * pilot_time_s, 1.0)
 
     def _noise_power_mw(self) -> float:
+        if "system_nf_db" in self.params:
+            bandwidth_hz = max(self._float("bandwidth_ghz", 15.0) * 1e9, 1.0)
+            temperature_k = max(self._float("noise_temperature_k", 290.0), 1.0)
+            noise_factor = 10.0 ** (self._float("system_nf_db", 8.0) / 10.0)
+            # Common input-referred receiver noise for communication and
+            # sensing. Quantization noise is intentionally excluded.
+            return max(1.380649e-23 * temperature_k * bandwidth_hz * noise_factor * 1e3, 1e-30)
         density_dbmhz = self._float("noise_density_dbmhz", -130.0)
         bandwidth_hz = max(self._float("bandwidth_ghz", 2.0) * 1e9, 1.0)
         return max((10.0 ** (density_dbmhz / 10.0)) * bandwidth_hz, 1e-30)
+
+    def _theory_carrier_power_mw(self) -> float:
+        ac2_mw = max(self._float("ac2", 1.0), 1e-30)
+        if "sweep_tx_power_dbm" in self.params and "theory_tx_ref_dbm" in self.params:
+            tx_dbm = self._float("sweep_tx_power_dbm", self._float("theory_tx_ref_dbm", -10.0))
+            tx_ref_dbm = self._float("theory_tx_ref_dbm", tx_dbm)
+            ac2_mw *= 10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
+        return ac2_mw
+
+    def _theory_isolation_db(self) -> float:
+        if "si_on_iso_db" in self.params:
+            return self._float("si_on_iso_db", 24.0)
+        return self._float("iso_db", 25.0)
 
     def _qam_moment_factors(self) -> tuple[float, float]:
         try:
@@ -13818,7 +13908,7 @@ class SystemModelValidationPanel:
             opt_idx = int(np.nanargmax(sdinr)) if np.any(np.isfinite(sdinr)) else 0
 
         cspr_axis = 1.0 / np.maximum(m_axis ** 2, 1e-30)
-        cspr_now_db = self._float("cspr_db", 20.0) + 10.0 * np.log10(2.0)
+        cspr_now_db = self._float("cspr_db", 20.0)
         cspr_now = 10.0 ** (cspr_now_db / 10.0)
         m_now = 1.0 / np.sqrt(max(cspr_now, 1e-30))
         return {
@@ -13912,6 +14002,7 @@ class SystemModelValidationPanel:
                     target_ant_gain_dbi=cfg.target_ant_gain_dbi,
                     target_gamma_mag=cfg.target_gamma_mag,
                     target_pol_eff=cfg.target_pol_eff,
+                    effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
                 )
                 beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
                 self.params["sqrt_k"].set(f"{beta_ref * ref_r ** 2:.6g}")
@@ -13950,17 +14041,18 @@ class SystemModelValidationPanel:
                     self.params["modulation_order"].set("64")
             # N_c and N_sensing are not independent knobs here: both are the
             # integrated ZBD/DSO output noise density over B.
-            self._run()
+            self.status_var.set(
+                "Simulation parameters synchronized. "
+                "Press Range Sweep or Symbol Rate Sweep to update curves."
+            )
         except Exception as exc:
             messagebox.showerror("Sync Sim", str(exc), parent=self.parent)
 
     def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
         rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
-        # The GUI entry is the measured pre-WSS DSB CSPR.  The single
-        # retained sideband used by the system model is 3.0103 dB higher.
-        cspr = 2.0 * 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
-        alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
-        ac2 = max(self._float("ac2", 1.0), 1e-30)
+        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        alpha = 10.0 ** (-self._theory_isolation_db() / 20.0)
+        ac2 = self._theory_carrier_power_mw()
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
@@ -13968,7 +14060,7 @@ class SystemModelValidationPanel:
         n_comm = self._noise_power_mw()
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_comm)
-        snr_sens = (2.0 * rho_v * alpha * ac2 * sqrt_k * gp) / (n_sens * (r ** 2))
+        snr_sens = (2.0 * rho_v * alpha * ac2 * sqrt_k * gp) / (cspr * n_sens * (r ** 2))
         return {
             "rho": rho_v,
             "snr_comm": snr_comm,
@@ -13985,18 +14077,28 @@ class SystemModelValidationPanel:
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
-        cspr = 2.0 * 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
-        alpha = 10.0 ** (-self._float("iso_db", 25.0) / 20.0)
-        ac2 = max(self._float("ac2", 1.0), 1e-30)
+        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
+        alpha = 10.0 ** (-self._theory_isolation_db() / 20.0)
+        ac2 = self._theory_carrier_power_mw()
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
         n_sens = self._noise_power_mw()
         n_comm = self._noise_power_mw()
-        g_sens = 10.0 ** (self._sens_threshold_db() / 10.0)
-        g_comm = 10.0 ** (self._comm_threshold_db() / 10.0)
+        sens_threshold_db = (
+            self._float("sens_req_snr_db", 13.2)
+            if "sens_req_snr_db" in self.params
+            else self._sens_threshold_db()
+        )
+        comm_threshold_db = (
+            self._float("comm_req_snr_db", 15.75)
+            if "comm_req_snr_db" in self.params
+            else self._comm_threshold_db()
+        )
+        g_sens = 10.0 ** (sens_threshold_db / 10.0)
+        g_comm = 10.0 ** (comm_threshold_db / 10.0)
         r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_comm * g_comm))
-        r_sens = np.sqrt((2.0 * rho * alpha * ac2 * sqrt_k * gp) / (n_sens * g_sens))
+        r_sens = np.sqrt((2.0 * rho * alpha * ac2 * sqrt_k * gp) / (cspr * n_sens * g_sens))
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
 
     def _monte_carlo_snr_db(self, snr_lin: np.ndarray) -> np.ndarray:
@@ -14041,7 +14143,7 @@ class SystemModelValidationPanel:
             ax_snr.axhline(comm_thr_db, color="#2563eb", linestyle=":", linewidth=0.9, label=f"BER threshold {comm_thr_db:.1f} dB")
             ax_snr.axhline(sens_thr_db, color="#dc2626", linestyle=":", linewidth=0.9, label=f"Pfa thr {sens_thr_db:.1f} dB")
             ax_snr.set_title("SNR vs Range")
-            ax_snr.set_xlabel("Range [m]")
+            ax_snr.set_xlabel("Range (m)")
             ax_snr.set_ylabel("SNR [dB]")
             ax_snr.legend(fontsize=8)
 
@@ -14093,7 +14195,8 @@ class SystemModelValidationPanel:
             ax_rho.axvline(rho, color="#64748b", linestyle=":", linewidth=0.9)
             ax_rho.set_title("ISAC Range")
             ax_rho.set_xlabel("rho pilot power ratio")
-            ax_rho.set_ylabel("ISAC Range [m]")
+            ax_rho.set_ylabel("ISAC Range (m)")
+            ax_rho.set_ylim(0.0, 10)
             ax_rho.legend(fontsize=8)
 
             ax_meas.semilogx(ranges, self._db(snr_comm), color="#2563eb", alpha=0.35, label="comm calc")
@@ -14109,7 +14212,7 @@ class SystemModelValidationPanel:
                 if np.isfinite(rr) and np.isfinite(ss):
                     ax_meas.scatter([rr], [ss], color="#b91c1c", marker="D", s=34)
             ax_meas.set_title("Loaded Save Data Overlay")
-            ax_meas.set_xlabel("Distance [m]")
+            ax_meas.set_xlabel("Range (m)")
             ax_meas.set_ylabel("SNR [dB]")
             ax_meas.legend(fontsize=8)
 
@@ -14250,17 +14353,21 @@ class SystemModelValidationPanel:
         ctrl = ttk.LabelFrame(left, text="ISAC Range Validation", padding=8)
         ctrl.pack(fill=tk.BOTH, expand=True)
 
-        def add(row: int, key: str, label: str, value: str) -> None:
+        def add(row: int, key: str, label: str, value: str, read_only: bool = False) -> None:
             ttk.Label(ctrl, text=label).grid(row=row, column=0, sticky="w", pady=2)
             var = tk.StringVar(value=value)
             self.params[key] = var
             entry = ttk.Entry(ctrl, textvariable=var, width=12)
             entry.grid(row=row, column=1, sticky="ew", pady=2)
+            if read_only:
+                entry.configure(state="readonly")
             if key in {
-                "plot_x_min_m", "plot_x_max_m",
                 "sinr_ylim_min", "sinr_ylim_max",
                 "radar_ylim_min", "radar_ylim_max",
-                "c2_meas_power_min_dbm",
+                "system_nf_db", "bandwidth_ghz",
+                "pilot_symbols", "symbol_rate_gbaud",
+                "theoretical_snr_anchor_db",
+                "isac_range_ylim_min", "isac_range_ylim_max",
             }:
                 entry.bind("<Return>", lambda _event: self._refresh_plot())
                 entry.bind("<FocusOut>", lambda _event: self._refresh_plot())
@@ -14268,64 +14375,85 @@ class SystemModelValidationPanel:
         def hidden(key: str, value: str) -> None:
             self.params[key] = tk.StringVar(value=value)
 
-        add(0, "r_min_m", "Distance min [m]", "0.25")
-        add(1, "r_max_m", "Distance max [m]", "2")
-        add(2, "plot_x_min_m", "Plot x min [m]", "0")
-        add(3, "plot_x_max_m", "Plot x max [m]", "2")
-        add(4, "sweep_points", "Sweep points", "9")
-        add(5, "ref_range_m", "Metric ref distance [m]", "1.0")
-        add(6, "si_on_iso_db", "SI-on isolation [dB]", "24")
-        add(7, "si_off_iso_db", "SI-off isolation [dB]", "1000")
-        add(8, "sweep_tx_power_dbm", "Effective THz P_t (incl. PA) [dBm]", "-10")
-        add(9, "rho_ref", "rho at ref", "0.20")
-        add(10, "rho", "rho for curve", "0.20")
-        add(11, "sim_comm_ref_snr_db", "Comm SNR @ref [dB]", "17.49")
-        add(12, "c2_power_ref_dbm", "C2 target @ref [dBm]", "-42.52")
-        add(13, "c2_noise_power_dbm", "Fixed C2 noise [dBm]", "-46.47")
-        add(14, "radar_proc_gain_db", "Sensing proc. gain [dB]", "16.6")
-        add(15, "c2_meas_power_min_dbm", "C2 meas min [dBm]", "")
-        add(16, "comm_req_snr_db", "Pre-FEC req. SNR [dB]", "15.75")
-        add(17, "sens_req_snr_db", "Sensing req. SINR (Pd/Pfa) [dB]", "13.2")
-        add(18, "sinr_ylim_min", "Comm. SINR y min [dB]", "0")
-        add(19, "sinr_ylim_max", "Comm. SINR y max [dB]", "50")
-        add(20, "radar_ylim_min", "Sensing SINR y min [dB]", "-10")
-        add(21, "radar_ylim_max", "Sensing SINR y max [dB]", "40")
-        add(22, "manual_evm_points", "Manual EVM [mm:dB]", "1000:-17.49, 1100:-16.21, 1200:-15.1")
-        add(23, "manual_c2_si_on_points", "Manual C2 SI-on [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
-        add(24, "manual_c2_si_off_points", "Manual C2 SI-off [mm:dBm]", "")
+        add(0, "r_min_m", "Range min [m]", "0.5")
+        add(1, "r_max_m", "Range max [m]", "2")
+        add(2, "sweep_points", "Sweep points", "9")
+        add(3, "ref_range_m", "Reference range [m]", "1.0")
+        add(4, "si_on_iso_db", "SI-on isolation [dB]", "24")
+        add(5, "si_off_iso_db", "SI-off isolation [dB]", "1000")
+        add(6, "sweep_tx_power_dbm", "Effective THz P_t [dBm]", "-10")
+        add(7, "rho", "Power-allocation ratio, rho", "0.20")
+        add(8, "system_nf_db", "Common system NF [dB]", "8.0", read_only=True)
+        add(9, "bandwidth_ghz", "Symbol rate / bandwidth [GBd/GHz]", "15.0", read_only=True)
+        add(10, "theoretical_snr_anchor_db", "Theoretical SNR @4 GBd [dB]", "23.16")
+        add(11, "pilot_symbols", "Pilot symbols N_p", "1024", read_only=True)
+        add(12, "comm_req_snr_db", "Pre-FEC req. SINR [dB]", "15.75")
+        add(13, "sens_req_snr_db", "Sensing req. SINR [dB]", "13.2")
+        add(14, "sinr_ylim_min", "Comm. SINR y min [dB]", "0")
+        add(15, "sinr_ylim_max", "Comm. SINR y max [dB]", "50")
+        add(16, "radar_ylim_min", "Sensing SINR y min [dB]", "0")
+        add(17, "radar_ylim_max", "Sensing SINR y max [dB]", "50")
+        add(18, "manual_evm_points", "Measured EVM [GBd: dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
+        add(19, "manual_c2_si_on_points", "Measured C2 SI-on [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
+        add(20, "radar_proc_gain_db", "Sensing G_p,eff [dB]", "21.9", read_only=True)
+        add(21, "isac_range_ylim_min", "ISAC log y min [m]", "0.1")
+        add(22, "isac_range_ylim_max", "ISAC range y max [m]", "5")
+        hidden("rho_ref", "0.20")
+        hidden("symbol_rate_gbaud", "15.0")
+        hidden("sim_comm_ref_snr_db", "17.49")
+        hidden("c2_power_ref_dbm", "-42.52")
+        hidden("c2_meas_power_min_dbm", "")
         hidden("c2_no_si_power_ref_dbm", "")
         hidden("si_off_power_penalty_db", "")
         hidden("n_range", "9")
         hidden("comm_ref_snr_db", "17.49")
         hidden("sens_ref_snr_db", "21.6")
         hidden("sim_sens_ref_snr_db", "21.6")
-        hidden("bandwidth_ghz", "15.0")
+        hidden("noise_temperature_k", "290.0")
+        hidden("c2_noise_power_dbm", "-46.47")
         hidden("raw_noise_dbm", "")
         hidden("target_peak_dbm_ref", "")
         hidden("alpha_ref_db", "0")
         hidden("processing_gain_db", "0")
+        hidden("ac2", "1.0")
+        hidden("sqrt_k", "1e-4")
+        hidden("gc_db", "0")
+        hidden("cspr_db", "13")
+        hidden("theory_tx_ref_dbm", "-10")
+        hidden("effective_rcs_dbsm", "-4.28")
         hidden("rho_points", "201")
 
         btns = ttk.Frame(ctrl)
-        btns.grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(btns, text="Run Sweep", style="Primary.TButton", command=self._run).pack(side=tk.LEFT)
-        ttk.Button(btns, text="Redraw", command=self._refresh_plot).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Load Params JSON", command=self._load_params_json).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Load Save Data", command=self._load_measurement).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(btns, text="Clear Meas.", command=self._clear_measurements).pack(side=tk.LEFT, padx=(6, 0))
+        btns.grid(row=23, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(btns, text="Symbol Rate Sweep", command=self._run_symbol_rate_sweep).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Range Sweep", style="Primary.TButton", command=self._run).pack(side=tk.LEFT, padx=(6, 0))
 
-        save_btns = ttk.Frame(ctrl)
-        save_btns.grid(row=26, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Button(save_btns, text="Save SINR PNG", command=self._save_evm_radar_png).pack(side=tk.LEFT)
-        ttk.Button(save_btns, text="Save ISAC Range PNG", command=self._save_rho_tradeoff_png).pack(side=tk.LEFT, padx=(6, 0))
+        action_btns = ttk.Frame(ctrl)
+        action_btns.grid(row=24, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(action_btns, text="Redraw", command=self._refresh_plot).pack(side=tk.LEFT)
+        ttk.Button(action_btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(action_btns, text="Save Figures", command=self._save_all_figures).pack(side=tk.LEFT, padx=(6, 0))
 
         self.save_legend_var = tk.BooleanVar(value=True)
+        self.sinr_log_range_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            ctrl,
+            text="Log range axis for SINR figure",
+            variable=self.sinr_log_range_var,
+            command=self._refresh_plot,
+        ).grid(row=25, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        self.isac_log_range_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            ctrl,
+            text="Log ISAC range y axis",
+            variable=self.isac_log_range_var,
+            command=self._refresh_plot,
+        ).grid(row=26, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(
             ctrl,
             text="Include legend in saved PNG",
             variable=self.save_legend_var,
-        ).grid(row=27, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ).grid(row=27, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=280).grid(
             row=28, column=0, columnspan=2, sticky="ew", pady=(8, 0)
@@ -14340,7 +14468,16 @@ class SystemModelValidationPanel:
 
         self.meas_points = self._default_measurements()
         self.sim_sweep: dict[str, np.ndarray] | None = None
+        self.symbol_rate_sweep: dict[str, object] = self._load_cached_symbol_rate_sweep()
+        self._symbol_sweep_queue: queue.Queue = queue.Queue()
+        self._symbol_sweep_running = False
         self._evm_radar_plot_cache: dict[str, object] | None = None
+        try:
+            if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
+                self._sync_theory_params_from_cfg(self.photonic_source._cfg_from_ui())
+        except Exception:
+            pass
+        self._refresh_plot()
 
     def _finite_param(self, key: str) -> float:
         try:
@@ -14353,10 +14490,47 @@ class SystemModelValidationPanel:
             return float("nan")
 
     def _apply_evm_radar_limits(self, ax_sinr, ax_radar, x_min: float, x_max: float) -> None:
-        from matplotlib.ticker import MultipleLocator
+        from matplotlib.ticker import FixedLocator, FuncFormatter, MultipleLocator, NullFormatter
 
-        ax_sinr.set_xlim(x_min, x_max)
-        ax_sinr.xaxis.set_major_locator(MultipleLocator(0.5))
+        log_range_var = getattr(self, "sinr_log_range_var", None)
+        use_log_range = bool(log_range_var.get()) if log_range_var is not None else False
+        if use_log_range:
+            positive_x = []
+            for line in list(ax_sinr.get_lines()) + list(ax_radar.get_lines()):
+                values = np.asarray(line.get_xdata(), dtype=np.float64).reshape(-1)
+                positive_x.extend(values[np.isfinite(values) & (values > 0.0)].tolist())
+            log_min = x_min if x_min > 0.0 else (min(positive_x) if positive_x else 1e-3)
+            log_max = x_max if x_max > log_min else max(positive_x, default=log_min * 10.0)
+            ax_sinr.set_xscale("log")
+            ax_sinr.set_xlim(log_min, log_max)
+
+            decade_min = int(np.floor(np.log10(log_min))) - 1
+            decade_max = int(np.ceil(np.log10(log_max))) + 1
+            candidates = [log_min, log_max]
+            for decade in range(decade_min, decade_max + 1):
+                scale = 10.0 ** decade
+                candidates.extend(multiplier * scale for multiplier in (1.0, 1.5, 2.0, 3.0, 5.0, 7.5))
+            ticks = np.asarray(sorted({
+                round(value, 12)
+                for value in candidates
+                if log_min * (1.0 - 1e-10) <= value <= log_max * (1.0 + 1e-10)
+            }), dtype=np.float64)
+            if len(ticks) > 7:
+                targets = np.geomspace(log_min, log_max, 6)
+                selected = {float(ticks[int(np.argmin(np.abs(np.log(ticks / target))))]) for target in targets}
+                selected.update((float(log_min), float(log_max)))
+                if log_min <= 1.5 <= log_max:
+                    selected.add(1.5)
+                ticks = np.asarray(sorted(selected), dtype=np.float64)
+            ax_sinr.xaxis.set_major_locator(FixedLocator(ticks))
+            ax_sinr.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:g}"))
+            ax_sinr.xaxis.set_minor_formatter(NullFormatter())
+            ax_radar.set_xlabel("Range (m, log scale)")
+        else:
+            ax_sinr.set_xscale("linear")
+            ax_sinr.set_xlim(x_min, x_max)
+            ax_sinr.xaxis.set_major_locator(MultipleLocator(0.5))
+            ax_radar.set_xlabel("Range (m)")
         for ax, lo_key, hi_key in (
             (ax_sinr, "sinr_ylim_min", "sinr_ylim_max"),
             (ax_radar, "radar_ylim_min", "radar_ylim_max"),
@@ -14595,7 +14769,7 @@ class SystemModelValidationPanel:
                 ax_radar.scatter(rr, yy, facecolors=color if state == "on" else "none", edgecolors=color,
                                  marker=marker, s=62 if for_save else 52, linewidths=1.5, zorder=6)
 
-        ax_radar.set_xlabel("Distance [m]")
+        ax_radar.set_xlabel("Range (m)")
         ax_sinr.set_ylabel("Comm. SINR [dB]", color=blue)
         ax_radar.set_ylabel("Sensing SINR [dB]", color=red)
         ax_sinr.tick_params(axis="y", colors=blue)
@@ -14638,6 +14812,19 @@ class SystemModelValidationPanel:
             for_save=for_save,
         )
         self._add_grouped_sinr_legends(ax_sinr, ax_radar, no_si_valid, lw, for_save)
+        gp_eff_db = float(cache.get("effective_processing_gain_db", self._radar_proc_gain_db()))
+        if np.isfinite(gp_eff_db):
+            ax_radar.text(
+                0.03,
+                0.04,
+                rf"$G_{{p,\mathrm{{eff}}}}={gp_eff_db:.1f}$ dB",
+                transform=ax_radar.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=11 if for_save else 9,
+                fontname="Times New Roman",
+                color="#111111",
+            )
         self._style_ieee_axis(ax_sinr)
         self._style_ieee_axis(ax_radar)
         return ax_sinr, ax_radar
@@ -14665,7 +14852,330 @@ class SystemModelValidationPanel:
         except Exception as exc:
             messagebox.showerror("Save PNG", str(exc), parent=self.parent)
 
+    @staticmethod
+    def _symbol_rate_cache_path() -> Path:
+        return APP_DIR / "data" / "system_model_symbol_rate_sweep_32QAM.json"
+
+    def _symbol_rate_measurement_points(self) -> tuple[np.ndarray, np.ndarray]:
+        raw = self.params.get("manual_evm_points", tk.StringVar(value="")).get()
+        rows: list[tuple[float, float]] = []
+        for token in raw.replace("\n", ";").replace(",", ";").split(";"):
+            token = token.strip()
+            if not token:
+                continue
+            for separator in (":", "=", " "):
+                if separator in token:
+                    left, right = token.split(separator, 1)
+                    break
+            else:
+                continue
+            try:
+                rate_gbaud = float(left.strip())
+                evm_db = float(right.strip())
+            except Exception:
+                continue
+            if rate_gbaud > 0.0 and np.isfinite(rate_gbaud) and np.isfinite(evm_db):
+                rows.append((rate_gbaud, evm_db))
+        if not rows:
+            return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+        rows.sort(key=lambda row: row[0])
+        deduplicated: dict[float, float] = {}
+        for rate_gbaud, evm_db in rows:
+            deduplicated[rate_gbaud] = evm_db
+        rates = np.asarray(sorted(deduplicated), dtype=np.float64)
+        evm = np.asarray([deduplicated[rate] for rate in rates], dtype=np.float64)
+        return rates, evm
+
+    def _load_cached_symbol_rate_sweep(self) -> dict[str, object]:
+        import plot_evm_tradeoff_gui as tradeoff
+
+        measured = tradeoff.load_measured_table()["32QAM"]
+        manual_rate, manual_evm = self._symbol_rate_measurement_points()
+        if len(manual_rate):
+            measured_rate = manual_rate
+            measured_evm = manual_evm
+        else:
+            measured_rate = np.asarray(measured["symbol_rate_gbaud"], dtype=np.float64)
+            measured_evm = np.asarray(measured["evm_db"], dtype=np.float64)
+        cache: dict[str, object] = {
+            "modulation": "32QAM",
+            "measured_rate_gbaud": measured_rate,
+            "measured_evm_db": measured_evm,
+            "sim_rate_gbaud": np.asarray([], dtype=np.float64),
+            "sim_evm_db": np.asarray([], dtype=np.float64),
+            "bound_evm_db": np.asarray([], dtype=np.float64),
+        }
+        candidates = [
+            self._symbol_rate_cache_path(),
+            APP_DIR / "data" / "sim_evm_series_32QAM.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                rates = np.asarray(saved.get("baud_gbaud", []), dtype=np.float64)
+                sim_evm = np.asarray(saved.get("evm_db", []), dtype=np.float64)
+                bound_evm = np.asarray(saved.get("bound_evm_db", []), dtype=np.float64)
+                if len(rates) and len(rates) == len(sim_evm) == len(bound_evm):
+                    cache["sim_rate_gbaud"] = rates
+                    cache["sim_evm_db"] = sim_evm
+                    cache["bound_evm_db"] = bound_evm
+                    cache["source"] = path.name
+                    break
+            except Exception:
+                continue
+        return cache
+
+    def _run_symbol_rate_sweep(self) -> None:
+        if self._symbol_sweep_running:
+            self.status_var.set("Symbol-rate sweep is already running.")
+            return
+        if self.photonic_source is None or not hasattr(self.photonic_source, "_cfg_from_ui"):
+            messagebox.showerror("Symbol Rate Sweep", "Simulation parameters are unavailable.", parent=self.parent)
+            return
+        try:
+            import plot_evm_tradeoff_gui as tradeoff
+
+            base_cfg = copy.deepcopy(self.photonic_source._cfg_from_ui())
+            base_cfg.modulation = "32QAM"
+            measured_rate, measured_evm = self._symbol_rate_measurement_points()
+            if not len(measured_rate):
+                measured = tradeoff.load_measured_table()["32QAM"]
+                measured_rate = np.asarray(measured["symbol_rate_gbaud"], dtype=np.float64)
+                measured_evm = np.asarray(measured["evm_db"], dtype=np.float64)
+            rates = [float(v) for v in measured_rate]
+            self._symbol_sweep_running = True
+            self.status_var.set("Running 32QAM symbol-rate sweep in the background...")
+
+            def worker() -> None:
+                try:
+                    sim_evm = tradeoff._run_sim_series(
+                        base_cfg,
+                        rates,
+                        [0],
+                        run_name="GUI full",
+                    )
+                    bound_evm = tradeoff._run_sim_series(
+                        base_cfg,
+                        rates,
+                        [0],
+                        overrides=tradeoff._ELECTRONIC_NOISE_FREE_OVERRIDES,
+                        run_name="GUI noise-off",
+                    )
+                    payload = {
+                        "modulation": "32QAM",
+                        "baud_gbaud": rates,
+                        "measured_evm_db": measured_evm.tolist(),
+                        "evm_db": sim_evm.tolist(),
+                        "bound_evm_db": bound_evm.tolist(),
+                    }
+                    path = self._symbol_rate_cache_path()
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                    self._symbol_sweep_queue.put(("ok", payload))
+                except Exception as exc:
+                    self._symbol_sweep_queue.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            self.parent.after(100, self._poll_symbol_rate_sweep)
+        except Exception as exc:
+            self._symbol_sweep_running = False
+            messagebox.showerror("Symbol Rate Sweep", str(exc), parent=self.parent)
+
+    def _poll_symbol_rate_sweep(self) -> None:
+        try:
+            state, payload = self._symbol_sweep_queue.get_nowait()
+        except queue.Empty:
+            if self._symbol_sweep_running:
+                self.parent.after(100, self._poll_symbol_rate_sweep)
+            return
+
+        self._symbol_sweep_running = False
+        if state == "error":
+            self.status_var.set(f"Symbol-rate sweep failed: {payload}")
+            messagebox.showerror("Symbol Rate Sweep", str(payload), parent=self.parent)
+            return
+
+        self.symbol_rate_sweep = {
+            "modulation": "32QAM",
+            "measured_rate_gbaud": np.asarray(payload["baud_gbaud"], dtype=np.float64),
+            "measured_evm_db": np.asarray(payload["measured_evm_db"], dtype=np.float64),
+            "sim_rate_gbaud": np.asarray(payload["baud_gbaud"], dtype=np.float64),
+            "sim_evm_db": np.asarray(payload["evm_db"], dtype=np.float64),
+            "bound_evm_db": np.asarray(payload["bound_evm_db"], dtype=np.float64),
+            "source": self._symbol_rate_cache_path().name,
+        }
+        self._refresh_plot()
+        self.status_var.set("32QAM symbol-rate sweep complete.")
+
+    def _draw_symbol_rate_axis(self, ax, cache: dict[str, object], for_save: bool = False) -> None:
+        from matplotlib.ticker import AutoMinorLocator, NullFormatter, ScalarFormatter
+        import plot_evm_tradeoff_gui as tradeoff
+
+        sr = np.asarray(cache["measured_rate_gbaud"], dtype=np.float64)
+        measured_evm = np.asarray(cache["measured_evm_db"], dtype=np.float64)
+        order = np.argsort(sr)
+        sr = sr[order]
+        measured_evm = measured_evm[order]
+        _, _, awgn_offset_db = tradeoff._awgn_reference_from_low_rates(sr, measured_evm)
+        anchor_rate = 4.0
+        fitted_anchor_snr_db = -(awgn_offset_db + 10.0 * np.log10(anchor_rate / 2.0))
+        anchor_snr_db = self._finite_param("theoretical_snr_anchor_db")
+        if not np.isfinite(anchor_snr_db):
+            anchor_snr_db = fitted_anchor_snr_db
+        smooth_rate = np.geomspace(2.0, 20.0, 240)
+        snr_evm = tradeoff._snr_evm_curve(smooth_rate, anchor_rate, anchor_snr_db)
+
+        measured_line, = ax.plot(
+            sr,
+            measured_evm,
+            "o-",
+            color="#0000ff",
+            linewidth=1.65 if for_save else 1.35,
+            markersize=8.4 if for_save else 7.2,
+            markerfacecolor="#0000ff",
+            markeredgewidth=1.2,
+            label="Measurement",
+        )
+        snr_line, = ax.plot(
+            smooth_rate,
+            snr_evm,
+            "--",
+            color="#111111",
+            linewidth=1.7 if for_save else 1.4,
+            label="Theoretical SNR",
+        )
+
+        handles = [measured_line, snr_line]
+        sim_rate = np.asarray(cache.get("sim_rate_gbaud", []), dtype=np.float64)
+        sim_evm = np.asarray(cache.get("sim_evm_db", []), dtype=np.float64)
+        bound_evm = np.asarray(cache.get("bound_evm_db", []), dtype=np.float64)
+        if not for_save and len(sim_rate) and len(sim_rate) == len(bound_evm):
+            snr_at_sim_rate = tradeoff._snr_evm_curve(sim_rate, anchor_rate, anchor_snr_db)
+            ssbi_excess = tradeoff._ssbi_excess_evm_power(sim_rate, bound_evm, 4.0)
+            sinr_evm = tradeoff._evm_power_to_db(
+                tradeoff._evm_db_to_power(snr_at_sim_rate) + ssbi_excess
+            )
+            sinr_line, = ax.plot(
+                sim_rate,
+                sinr_evm,
+                "--",
+                color="#ff0000",
+                linewidth=1.7 if for_save else 1.4,
+                label="SINR",
+            )
+            handles.append(sinr_line)
+        if not for_save and len(sim_rate) and len(sim_rate) == len(sim_evm):
+            simulation_line, = ax.plot(
+                sim_rate,
+                sim_evm,
+                "-.",
+                color="#008000",
+                linewidth=1.8 if for_save else 1.5,
+                label="Simulation",
+            )
+            handles.append(simulation_line)
+
+        ax.axhline(-self._float("comm_req_snr_db", 15.75), color="#444444", linestyle=":", linewidth=1.0)
+        ax.set_xscale("log")
+        ax.set_xlim(2.0, 20.0)
+        ax.set_ylim(-30, -10)
+        ax.set_yticks([-30, -25, -20, -15, -10])
+        ax.set_xlabel("Symbol rate (GBaud)")
+        ax.set_ylabel("EVM (dB)")
+        ax.set_xticks([2, 4, 8, 10, 15, 20])
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.xaxis.set_minor_formatter(NullFormatter())
+        ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+        ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
+        ax.grid(True, which="minor", color="#e2e8f0", linewidth=0.4, alpha=0.45)
+        if for_save:
+            ax.set_box_aspect(0.8)
+        if not for_save or bool(self.save_legend_var.get()):
+            legend = ax.legend(handles=handles, loc="lower right", frameon=True, fontsize=11 if for_save else 9)
+            self._style_paper_legend(legend, 11 if for_save else 9)
+        self._style_ieee_axis(ax)
+
+    def _draw_c2_power_axis(self, ax, cache: dict[str, object], for_save: bool = False) -> None:
+        ranges = np.asarray(cache["ranges"], dtype=np.float64)
+        c2_on = np.asarray(cache["c2_on_power"], dtype=np.float64)
+        c2_off = np.asarray(cache["c2_off_power"], dtype=np.float64)
+        no_si_valid = bool(cache["no_si_valid"])
+        red = "#ff0000"
+        green = "#008000"
+        linewidth = 1.9 if for_save else 1.5
+        ax.plot(ranges, c2_on, color=red, linestyle="--", linewidth=linewidth, label="Sim. (with SI)")
+        if no_si_valid:
+            ax.plot(ranges, c2_off, color=green, linestyle="--", linewidth=linewidth * 0.9,
+                    label="Sim. (without SI)")
+        for state, color, marker, label in (
+            ("on", red, "s", "Meas. (with SI)"),
+            ("off", green, "^", "Meas. (without SI)"),
+        ):
+            points = cache.get(f"c2_{state}_points", [])
+            if points:
+                ax.scatter(
+                    [p[0] for p in points],
+                    [p[1] for p in points],
+                    facecolors=color if state == "on" else "none",
+                    edgecolors=color,
+                    marker=marker,
+                    s=48 if for_save else 38,
+                    linewidths=1.2,
+                    zorder=5,
+                    label=label,
+                )
+        ax.set_xlim(float(cache["x_min"]), float(cache["x_max"]))
+        ax.set_xlabel("Range (m)")
+        ax.set_ylabel("C2 band power (dBm)")
+        ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
+        if for_save:
+            ax.set_box_aspect(0.8)
+        if not for_save or bool(self.save_legend_var.get()):
+            legend = ax.legend(loc="best", fontsize=11 if for_save else 9, frameon=True)
+            self._style_paper_legend(legend, 11 if for_save else 9)
+        self._style_ieee_axis(ax)
+
+    def _save_all_figures(self) -> None:
+        if not self._evm_radar_plot_cache:
+            self._refresh_plot()
+        cache = self._evm_radar_plot_cache
+        if not cache:
+            messagebox.showinfo("Save Figures", "No range curves are available.", parent=self.parent)
+            return
+        output_dir = APP_DIR / "data"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        outputs = [
+            ("communication_sensing_sinr_vs_range.png", lambda fig: self._draw_evm_radar_figure(fig, cache, for_save=True)),
+            ("evm_vs_symbol_rate.png", lambda fig: self._draw_symbol_rate_axis(fig.add_subplot(111), self.symbol_rate_sweep, for_save=True)),
+            ("c2_band_power_vs_range.png", lambda fig: self._draw_c2_power_axis(fig.add_subplot(111), cache, for_save=True)),
+            ("isac_range_vs_rho.png", lambda fig: self._draw_rho_tradeoff_axis(fig.add_subplot(111), for_save=True)),
+        ]
+        try:
+            saved_names: list[str] = []
+            for filename, draw in outputs:
+                fig = Figure(figsize=(5.0, 4.0), dpi=600)
+                draw(fig)
+                fig.tight_layout(pad=0.35)
+                path = output_dir / filename
+                fig.savefig(path, dpi=600, bbox_inches="tight", facecolor="white")
+                fig.clear()
+                saved_names.append(filename)
+            self.status_var.set(f"Saved 4 figures to {output_dir}")
+            messagebox.showinfo(
+                "Save Figures",
+                "Saved to data folder:\n" + "\n".join(saved_names),
+                parent=self.parent,
+            )
+        except Exception as exc:
+            messagebox.showerror("Save Figures", str(exc), parent=self.parent)
+
     def _draw_rho_tradeoff_axis(self, ax, for_save: bool = False) -> None:
+        from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
+
+        if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
+            self._sync_theory_params_from_cfg(self.photonic_source._cfg_from_ui())
         blue = "#0000ff"
         red = "#ff0000"
         black = "#111111"
@@ -14692,9 +15202,13 @@ class SystemModelValidationPanel:
             np.asarray(r_joint_on, dtype=np.float64).reshape(-1),
         ])
         range_values = range_values[np.isfinite(range_values) & (range_values >= 0.0)]
-        y_upper = 3.0
-        if len(range_values):
-            y_upper = max(3.0, 0.5 * np.ceil(2.0 * 1.08 * float(np.max(range_values))))
+        configured_y_upper = self._finite_param("isac_range_ylim_max")
+        if np.isfinite(configured_y_upper) and configured_y_upper > 0.0:
+            y_upper = float(configured_y_upper)
+        else:
+            y_upper = 3.0
+            if len(range_values):
+                y_upper = max(3.0, 0.5 * np.ceil(2.0 * 1.08 * float(np.max(range_values))))
         finite_joint = np.isfinite(r_joint_on)
         if np.any(finite_joint):
             finite_indices = np.flatnonzero(finite_joint)
@@ -14751,17 +15265,41 @@ class SystemModelValidationPanel:
                 fontname="Times New Roman",
                 color=black,
             )
+        ax.set_xscale("linear")
         ax.set_xlim(0.0, 1.0)
-        ax.set_ylim(0.0, y_upper)
         ax.set_xlabel(r"Power-allocation ratio, $\rho$")
-        ax.set_ylabel("ISAC Range (m)")
+
+        log_range_var = getattr(self, "isac_log_range_var", None)
+        use_log_range = bool(log_range_var.get()) if log_range_var is not None else True
+        if use_log_range:
+            configured_y_lower = self._finite_param("isac_range_ylim_min")
+            y_lower = float(configured_y_lower) if np.isfinite(configured_y_lower) and configured_y_lower > 0.0 else 0.1
+            if y_upper <= y_lower:
+                y_upper = max(10.0 * y_lower, 1.0)
+            decade_min = int(np.floor(np.log10(y_lower))) - 1
+            decade_max = int(np.ceil(np.log10(y_upper))) + 1
+            y_ticks = sorted({
+                round(multiplier * (10.0 ** decade), 12)
+                for decade in range(decade_min, decade_max + 1)
+                for multiplier in (1.0, 2.0, 5.0)
+                if y_lower * (1.0 - 1e-10) <= multiplier * (10.0 ** decade) <= y_upper * (1.0 + 1e-10)
+            })
+            ax.set_yscale("log")
+            ax.set_ylim(y_lower, y_upper)
+            ax.yaxis.set_major_locator(FixedLocator(y_ticks))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:g}"))
+            ax.yaxis.set_minor_formatter(NullFormatter())
+            ax.set_ylabel("ISAC range (m, log scale)")
+        else:
+            ax.set_yscale("linear")
+            ax.set_ylim(0.0, y_upper)
+            ax.set_ylabel("ISAC range (m)")
         # if not for_save:
         #     ax.set_title("rho Trade-off")
         if not for_save or bool(self.save_legend_var.get()):
             legend_size = 11 if for_save else 9
             legend = ax.legend(
-                loc="center left",
-                bbox_to_anchor=(1.02, 0.5),
+                loc="upper right",
                 fontsize=legend_size,
                 frameon=True,
                 handlelength=2.4,
@@ -14906,7 +15444,7 @@ class SystemModelValidationPanel:
         return points
 
     def _default_measurements(self) -> list[dict[str, float | str]]:
-        return self._default_radar_measurements()
+        return self._default_comm_measurements() + self._default_radar_measurements()
 
     @staticmethod
     def _range_value_from_token(token: str) -> tuple[float, float]:
@@ -14952,10 +15490,12 @@ class SystemModelValidationPanel:
         return points
 
     def _manual_measurements(self) -> list[dict[str, float | str]]:
-        points = self._parse_manual_points("manual_evm_points", "evm_db", "Manual EVM")
-        points.extend(self._parse_manual_points("manual_c2_si_on_points", "c2_inband_power_dbm", "Manual C2 SI-on", "on"))
-        points.extend(self._parse_manual_points("manual_c2_si_off_points", "c2_inband_power_dbm", "Manual C2 SI-off", "off"))
-        return points
+        return self._parse_manual_points(
+            "manual_c2_si_on_points",
+            "c2_inband_power_dbm",
+            "Manual C2 SI-on",
+            "on",
+        )
 
     def _active_measurements(self) -> list[dict[str, float | str]]:
         manual = self._manual_measurements()
@@ -14971,11 +15511,11 @@ class SystemModelValidationPanel:
             state = str(p.get("c2_si_state", "")).strip().lower()
             rr = float(p.get("range_m", float("nan")))
             has_c2 = np.isfinite(float(p.get("c2_inband_power_dbm", float("nan"))))
-            same_range_override = any(
+            same_c2_range_override = any(
                 np.isfinite(rr) and abs(rr - manual_rr) <= 5e-4
                 for manual_rr in manual_c2_ranges.get(state, [])
             )
-            if has_c2 and same_range_override:
+            if has_c2 and same_c2_range_override:
                 continue
             active.append(p)
         active.extend(manual)
@@ -15201,22 +15741,69 @@ class SystemModelValidationPanel:
             sens_on_at_ref = sens_on_ref + 10.0 * np.log10(rho / rho_ref)
             r_sens_on = ref_r * (10.0 ** ((sens_on_at_ref - sens_thr) / 40.0))
             r_sens_off = np.full_like(rho, np.nan, dtype=np.float64)
+        # The ISAC-range figure is a theoretical link-budget result. Use the
+        # paper model with common kTBF noise and ideal BT_p processing gain for
+        # the communication and SI-assisted sensing limits. The no-SI branch
+        # remains the separately simulated square-law echo-self-beat case.
+        r_comm_theory, r_sens_on_theory, r_isac_on_theory = self._rmax(rho)
         return (
-            r_comm,
-            r_sens_on,
+            r_comm_theory,
+            r_sens_on_theory,
             r_sens_off,
-            np.minimum(r_comm, r_sens_on),
-            np.minimum(r_comm, r_sens_off),
+            r_isac_on_theory,
+            np.minimum(r_comm_theory, r_sens_off),
         )
+
+    def _sync_theory_params_from_cfg(self, cfg: SimConfig) -> None:
+        """Synchronize the deterministic Sec. II link-budget parameters."""
+        waveform_kind = classify_isac_waveform(cfg.waveform)
+        bandwidth_hz = max(estimate_waveform_bandwidth_hz(cfg, waveform_kind), 1.0)
+        self.params["bandwidth_ghz"].set(f"{bandwidth_hz / 1e9:.6g}")
+        self.params["symbol_rate_gbaud"].set(f"{float(cfg.baud_gbaud):.6g}")
+        self.params["pilot_symbols"].set(f"{int(max(cfg.syms_per_chirp, 1))}")
+        self.params["system_nf_db"].set(f"{calc_common_receiver_nf_db(cfg):.6g}")
+        self.params["cspr_db"].set(f"{float(cfg.cspr_db):.6g}")
+        self.params["theory_tx_ref_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
+        rcs_dbsm = cfg.target_effective_rcs_dbsm
+        if rcs_dbsm is None or not np.isfinite(float(rcs_dbsm)):
+            rcs_dbsm = 10.0 * np.log10(max(float(cfg.target_rcs_sqm), 1e-12))
+        self.params["effective_rcs_dbsm"].set(f"{float(rcs_dbsm):.6g}")
+
+        rf_lines = calc_utcpd_rf_line_powers(cfg)
+        ac2_mw = max(float(rf_lines.get("carrier_w", 1e-30)) * 1e3, 1e-30)
+        self.params["ac2"].set(f"{ac2_mw:.9g}")
+
+        ref_r = max(self._float("ref_range_m", float(cfg.target_dist_m)), 1e-6)
+        link = calc_isac_link_budget(
+            distance_m=ref_r,
+            rf_ghz=cfg.rf_carrier_ghz,
+            tx_dbm=cfg.utcpd_target_dbm,
+            tx_gain_dbi=cfg.tx_ant_gain_dbi,
+            rx_gain_dbi=cfg.rx_ant_gain_dbi,
+            rcs_sqm=cfg.target_rcs_sqm,
+            lna_gain_db=cfg.lna_gain_db,
+            c1_drive_gain_db=cfg.c1_drive_gain_db,
+            c2_drive_gain_db=cfg.c2_drive_gain_db,
+            c1_cable_loss_db=cfg.c1_cable_loss_db,
+            c2_cable_loss_db=cfg.c2_cable_loss_db,
+            omt_il_db=cfg.omt_il_db,
+            target_ant_gain_dbi=cfg.target_ant_gain_dbi,
+            target_gamma_mag=cfg.target_gamma_mag,
+            target_pol_eff=cfg.target_pol_eff,
+            effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
+        )
+        beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
+        self.params["sqrt_k"].set(f"{beta_ref * ref_r ** 2:.9g}")
+        c1_total_mw = dbm_to_w(float(link["c1_rf_dbm"])) * 1e3
+        gc = max(c1_total_mw * ref_r ** 2 / ac2_mw, 1e-30)
+        self.params["gc_db"].set(f"{10.0 * np.log10(gc):.9g}")
 
     def _sync_from_sim(self) -> None:
         try:
             if self.photonic_source is None or not hasattr(self.photonic_source, "_cfg_from_ui"):
                 return
             cfg = self.photonic_source._cfg_from_ui()
-            waveform_kind = classify_isac_waveform(cfg.waveform)
-            bw_hz = estimate_waveform_bandwidth_hz(cfg, waveform_kind)
-            self.params["bandwidth_ghz"].set(f"{bw_hz / 1e9:.6g}")
+            self._sync_theory_params_from_cfg(cfg)
             self.params["sweep_tx_power_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
             self.params["si_on_iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
             self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
@@ -15245,7 +15832,10 @@ class SystemModelValidationPanel:
                 n_dbm = float(c2m.get("noise_power_dbm", float("nan")))
                 if np.isfinite(n_dbm):
                     self.params["raw_noise_dbm"].set(f"{n_dbm:.6g}")
-            self._run()
+            self.status_var.set(
+                "Simulation parameters synchronized. "
+                "Press Range Sweep or Symbol Rate Sweep to update curves."
+            )
         except Exception as exc:
             messagebox.showerror("Sync Sim", str(exc), parent=self.parent)
 
@@ -15264,6 +15854,7 @@ class SystemModelValidationPanel:
             if self.photonic_source is not None and hasattr(self.photonic_source, "_apply_sim_preset"):
                 self.photonic_source._apply_sim_preset(preset)
                 cfg = self.photonic_source._cfg_from_ui()
+                self._sync_theory_params_from_cfg(cfg)
                 ref_r = max(self._float("ref_range_m", float(cfg.target_dist_m)), 1e-6)
                 cfg.target_dist_m = ref_r
                 self.params["ref_range_m"].set(f"{ref_r:.6g}")
@@ -15372,6 +15963,10 @@ class SystemModelValidationPanel:
 
     def _refresh_plot(self) -> None:
         """Redraw from the cached sweep without running the physical simulation."""
+        rates, evm_db = self._symbol_rate_measurement_points()
+        if len(rates):
+            self.symbol_rate_sweep["measured_rate_gbaud"] = rates
+            self.symbol_rate_sweep["measured_evm_db"] = evm_db
         self._run(use_cached_sweep=True)
 
     def _sweep_metric_row(self, data: dict, fixed_noise_dbm: float | None = None, fixed_pg_db: float | None = None) -> dict[str, float]:
@@ -15512,16 +16107,14 @@ class SystemModelValidationPanel:
 
     def _run(self, use_cached_sweep: bool = False) -> None:
         try:
+            if (not use_cached_sweep
+                    and self.photonic_source is not None
+                    and hasattr(self.photonic_source, "_cfg_from_ui")):
+                self._sync_theory_params_from_cfg(self.photonic_source._cfg_from_ui())
             r_min = max(self._float("r_min_m", 0.0), 0.0)
             r_max = max(self._float("r_max_m", 4.0), max(r_min + 0.1, 0.1))
-            plot_x_min = self._finite_param("plot_x_min_m")
-            plot_x_max = self._finite_param("plot_x_max_m")
-            if not np.isfinite(plot_x_min):
-                plot_x_min = 0.0
-            if not np.isfinite(plot_x_max):
-                plot_x_max = 2.0
-            if plot_x_max <= plot_x_min:
-                plot_x_max = plot_x_min + max(r_max - r_min, 0.1)
+            plot_x_min = r_min
+            plot_x_max = r_max
             n_range = max(3, min(self._int("sweep_points", self._int("n_range", 21)), 101))
             ranges = np.linspace(r_min, r_max, n_range)
             ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
@@ -15599,6 +16192,11 @@ class SystemModelValidationPanel:
                 "no_si_valid": bool(no_si_valid),
                 "on_radar_points": self._c2_power_radar_snr_points("on"),
                 "off_radar_points": self._c2_power_radar_snr_points("off"),
+                "c2_on_power": np.asarray(sim_c2_on_power, dtype=np.float64).copy(),
+                "c2_off_power": np.asarray(sim_c2_off_power, dtype=np.float64).copy(),
+                "c2_on_points": self._c2_power_points("on"),
+                "c2_off_points": self._c2_power_points("off"),
+                "effective_processing_gain_db": float(self._radar_proc_gain_db()),
             }
             for p in active_points:
                 rr = float(p.get("range_m", float("nan")))
@@ -15636,7 +16234,7 @@ class SystemModelValidationPanel:
                         linewidths=1.5,
                         zorder=6,
                     )
-            ax_rad.set_xlabel("Distance (m)")
+            ax_rad.set_xlabel("Range (m)")
             ax_evm.set_ylabel("Comm. SINR (dB)", color=blue)
             ax_rad.set_ylabel("Sensing SINR (dB)", color=red)
             ax_evm.tick_params(axis="y", colors=blue)
@@ -15687,57 +16285,22 @@ class SystemModelValidationPanel:
                 for_save=False,
             )
             self._add_grouped_sinr_legends(ax_evm, ax_rad, no_si_valid, 1.9, False)
-
-            ax_snr.grid(True, alpha=0.30)
-            ax_snr.plot(ranges, sim_comm_snr, color=blue, linestyle="--", linewidth=1.5, label="Effective SINR")
-            ax_snr.plot(ranges, sim_sens_on_snr, color=red, linestyle="--", linewidth=1.5, label="Sensing with SI")
-            if no_si_valid:
-                ax_snr.plot(ranges, sim_sens_off_snr, color=green, linestyle="--", linewidth=1.4, label="Sensing without SI")
-            ax_snr.axhline(comm_thr, color=blue, linestyle=":", linewidth=0.9, alpha=0.55)
-            ax_snr.axhline(sens_thr, color=red, linestyle=":", linewidth=0.9, alpha=0.55)
-            ax_snr.set_xlim(plot_x_min, plot_x_max)
-            ax_snr.set_xlabel("Distance [m]")
-            ax_snr.set_ylabel("SINR [dB]")
-            ax_snr.set_title("SINR Detail")
-            detail_legend = ax_snr.legend(loc="best", fontsize=9, frameon=True)
-            self._style_paper_legend(detail_legend, 9)
-
-            c2_on_pts = self._c2_power_points("on")
-            c2_off_pts = self._c2_power_points("off")
-            ax_c2pow.grid(True, alpha=0.30)
-            ax_c2pow.plot(ranges, sim_c2_on_power, color=red, linestyle="--", linewidth=1.5, label="SI on")
-            if no_si_valid:
-                ax_c2pow.plot(ranges, sim_c2_off_power, color=green, linestyle="--", linewidth=1.4, label="No SI")
-            if c2_on_pts:
-                ax_c2pow.scatter(
-                    [p[0] for p in c2_on_pts],
-                    [p[1] for p in c2_on_pts],
-                    facecolors="none",
-                    edgecolors=red,
-                    marker="s",
-                    s=42,
-                    linewidths=1.2,
-                    zorder=5,
-                    label="Meas. SI on",
+            gp_eff_db = self._radar_proc_gain_db()
+            if np.isfinite(gp_eff_db):
+                ax_rad.text(
+                    0.03,
+                    0.04,
+                    rf"$G_{{p,\mathrm{{eff}}}}={gp_eff_db:.1f}$ dB",
+                    transform=ax_rad.transAxes,
+                    ha="left",
+                    va="bottom",
+                    fontsize=9,
+                    fontname="Times New Roman",
+                    color=black,
                 )
-            if c2_off_pts:
-                ax_c2pow.scatter(
-                    [p[0] for p in c2_off_pts],
-                    [p[1] for p in c2_off_pts],
-                    facecolors="none",
-                    edgecolors=black,
-                    marker="^",
-                    s=44,
-                    linewidths=1.2,
-                    zorder=5,
-                    label="Meas. no SI",
-                )
-            ax_c2pow.set_xlim(plot_x_min, plot_x_max)
-            ax_c2pow.set_xlabel("Distance (m)")
-            ax_c2pow.set_ylabel("C2 band power (dBm)")
-            ax_c2pow.set_title("C2 Band Power")
-            power_legend = ax_c2pow.legend(loc="best", fontsize=9, frameon=True)
-            self._style_paper_legend(power_legend, 9)
+
+            self._draw_symbol_rate_axis(ax_snr, self.symbol_rate_sweep, for_save=False)
+            self._draw_c2_power_axis(ax_c2pow, self._evm_radar_plot_cache, for_save=False)
 
             self._draw_rho_tradeoff_axis(ax_rho, for_save=False)
 
@@ -15762,12 +16325,17 @@ class SystemModelValidationPanel:
             )
             c2_slope, _ = self._fit_c2_power_slope("on")
             c2_slope_txt = f"{c2_slope:.1f} dB/dec" if np.isfinite(c2_slope) else "N/A"
+            theory_gp_db = 10.0 * np.log10(max(self._processing_gain_lin(), 1e-30))
+            theory_noise_dbm = 10.0 * np.log10(max(self._noise_power_mw(), 1e-30))
             self.status_var.set(
                 f"rho={rho:.3f}  R_max^comm={rc[0]:.3g} m  "
                 f"R_max^sens(on/off)={rs_on[0]:.3g}/{rs_off[0]:.3g} m  "
                 f"R_max(ISAC,on/off)={rj_on[0]:.3g}/{rj_off[0]:.3g} m  "
                 f"comm_ref={self._float('sim_comm_ref_snr_db', 17.49):.2f} dB  "
-                f"sens_ref={sens_ref:.2f} dB = C2P {self._c2_power_ref_dbm():.1f} - N {self._c2_noise_power_dbm():.1f} + PG {self._radar_proc_gain_db():.1f}  "
+                f"sens_ref(meas/sim)={sens_ref:.2f} dB  "
+                f"ISAC theory: NF={self._float('system_nf_db', 8.0):.2f} dB, "
+                f"N=kTBF={theory_noise_dbm:.2f} dBm, Gp=BTp={theory_gp_db:.2f} dB, "
+                f"RCS={self._float('effective_rcs_dbsm', -4.28):.2f} dBsm  "
                 f"iso on/off={self._float('si_on_iso_db', 24.0):.0f}/{self._float('si_off_iso_db', 1000.0):.0f} dB  "
                 f"TX={self._finite_param('sweep_tx_power_dbm'):.1f} dBm  "
                 f"meas EVM/sensing/C2on/off={n_evm_meas}/{n_radar_meas}/{len(self._c2_power_points('on'))}/{len(self._c2_power_points('off'))}  "

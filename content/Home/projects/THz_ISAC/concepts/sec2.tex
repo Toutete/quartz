@@ -64,7 +64,11 @@ range must instead be estimated from the channel frequency response
 (CFR), which is drift-immune as shown in Sec.~\ref{sec:cfr}. The
 waveform is therefore drawn from the orthogonal frequency-division
 multiplexing (OFDM) family, which pairs naturally with per-subcarrier
-CFR estimation and frequency-domain equalization. Within this family, the
+CFR estimation and frequency-domain equalization. After synchronization,
+one complex equalization coefficient is applied to each active frequency
+bin, i.e., $\widehat X[k]=Y[k]/\widehat H[k]$, before IDFT despreading.
+This conventional one-tap FDE is distinct from the optional symbol-domain
+scalar gain/phase correction used only before EVM evaluation. Within this family, the
 transmit power at THz frequencies is strongly constrained by the
 peak-to-average power ratio (PAPR): the saturated output power of power
 amplifiers falls rapidly with carrier frequency, so a lower PAPR is
@@ -77,33 +81,19 @@ the $2$~dB reduction translates directly into a $2$~dB higher average
 transmit power under the same peak-power limit, a significant gain on a
 power-scarce THz link.
 
-The quadrature-biased MZM initially produces a symmetric double-sideband
-optical signal. The measured CSPR is referenced before the
-wavelength-selective switch (WSS) and includes both sidebands,
+To keep the system model independent of implementation-specific optical
+filtering reference planes, the carrier-to-signal power ratio (CSPR) is
+defined directly for the effective transmitted THz waveform as
 \begin{equation}
-\mathrm{CSPR}_{\mathrm{DSB}}
-=\frac{P_c}{P_++P_-}=\frac{1}{m_{\mathrm{DSB}}^2}.
+\mathrm{CSPR}=\frac{P_c}{P_s}=\frac{1}{m^2}.
+\label{eq:effective_cspr}
 \end{equation}
-The WSS suppresses one sideband before photomixing. For the ideal
-symmetric case $P_+=P_-$, the quantities entering the single-sideband
-THz model are therefore
-\begin{equation}
-\mathrm{CSPR}_{\mathrm{SSB}}=2\,\mathrm{CSPR}_{\mathrm{DSB}},
-\qquad m=\frac{m_{\mathrm{DSB}}}{\sqrt{2}}.
-\label{eq:wss_cspr_conversion}
-\end{equation}
-Thus the measured pre-WSS value of $13$~dB gives
-$\mathrm{CSPR}_{\mathrm{SSB}}=16.01$~dB,
-$m_{\mathrm{DSB}}=0.2239$, and the modulation index in
-\eqref{eq:vthz} is $m=0.1583$. The $3.01$-dB reduction applies to the
-retained data-bearing sideband power and is included once through $m$.
-Hereafter, every occurrence of $m$ in the transmitted-THz, ZBD, SSBI,
-and SINR equations denotes this post-WSS index; the pre-WSS MZM Taylor
-expansion alone uses $m_{\mathrm{DSB}}$.
-It is not an additional $3$-dB reduction of the carrier-inclusive total
-THz power $P_t$, which is calibrated after the WSS from the UTC-PD
-operating point. Any WSS insertion loss is likewise included in that
-post-WSS calibration.
+The measured operating value $\mathrm{CSPR}=13$~dB therefore gives
+$m=10^{-13/20}=0.2239$. This same effective modulation index is used
+consistently in the transmitted-signal, ZBD, SSBI, and SINR equations.
+The experimental optical filtering arrangement is described separately
+with the hardware setup and is absorbed here into the calibrated CSPR
+and transmitted power $P_t$.
 
 \subsubsection{Power Allocation}
 The waveform carries a deterministic sensing pilot and the communication
@@ -276,10 +266,9 @@ satisfies $P_{\mathrm{rx}}m_{\mathrm{opt}}^4\xi=N_c$, i.e., the in-band
 SSBI and receiver-noise terms are equal. The maximizing CSPR is therefore
 not universal: it depends on the noise
 level, received power, waveform-dependent leakage factor $\xi$, and
-constellation moments. We use the measured pre-WSS DSB value of
-$13$~dB, corresponding to a post-WSS SSB value of $16.01$~dB, as the
-fixed operating point for the reported experiment and simulation,
-rather than claiming it as a system-independent optimum.
+constellation moments. We use the calibrated effective value of
+$13$~dB as the fixed operating point for the reported experiment and
+simulation, rather than claiming it as a system-independent optimum.
 
 \subsection{Sensing Branch}
 \label{sec:sens_branch}
@@ -309,12 +298,15 @@ $G_p^{\mathrm{ssbi}}\le G_p$, since $|s(t)|^2$ is weakly correlated with
 $p(t)$.
 
 Equation~\eqref{eq:sinr_sens} uses the ideal coherent time--bandwidth
-gain $G_{p,\mathrm{ideal}}=BT_p$; it is $30.10$~dB for the nominal
-$15$-GHz, $1024$-symbol pilot. The measurement-calibrated validation
-plots instead substitute an effective profile-domain gain
-$G_{p,\mathrm{eff}}=16.6$~dB, which includes windowing, usable-bin,
-normalization, and implementation losses. The latter is a processing
-gain and is unrelated to CSPR.
+gain $G_{p,\mathrm{ideal}}=BT_p$. For a fixed $N_p$-symbol pilot,
+$T_p=N_p/R_s$ and hence $G_{p,\mathrm{ideal}}=N_pB/R_s$; when
+$B\simeq R_s$, the gain is approximately $N_p$ and equals $30.10$~dB
+for $N_p=1024$. The communication and sensing branches use the same
+input-referred thermal-noise model $N=kTBF$, with a common equivalent
+receiver noise figure $F$ obtained from the simulated LNA/IF-amplifier
+Friis cascade and without ZBD-NEP or quantization noise. The measured
+SI-normalized CFR profile gain is retained only as an experimental DSP
+metric and is not substituted into the theoretical ISAC-range bound.
 
 Under a distance-independent post-detection noise floor, the SI-assisted
 ZBD output SINR scales as $R^{-4}$, from the $\alpha\beta$ cross-beat
