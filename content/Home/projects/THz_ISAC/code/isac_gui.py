@@ -13890,10 +13890,7 @@ class SystemModelValidationPanel:
 
     def _processing_gain_lin(self) -> float:
         """Effective sensing gain; BT_p is retained only as an upper bound."""
-        effective_db = self._finite_param("radar_proc_gain_db")
-        if np.isfinite(effective_db):
-            return max(10.0 ** (effective_db / 10.0), 1.0)
-        return self._ideal_processing_gain_lin()
+        return max(10.0 ** (self._radar_proc_gain_db() / 10.0), 1e-30)
 
     def _noise_power_mw(self) -> float:
         if "system_nf_db" in self.params:
@@ -13963,10 +13960,9 @@ class SystemModelValidationPanel:
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_sens = self._noise_power_mw()
-        n_comm = self._noise_power_mw()
+        n_mw = self._noise_power_mw()
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
-        snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_comm)
+        snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_mw)
         # All powers are represented numerically in mW, i.e. normalized by
         # P0=1 mW.  The square-law cross-beat model is therefore
         # gamma=Gp*2*m^2*rho*P_SI*P_echo/(P0*N), with P0 numerically equal to
@@ -13974,7 +13970,7 @@ class SystemModelValidationPanel:
         # R^-4.  Do not use the field product alpha*beta directly here.
         p_si_mw = ac2 * alpha ** 2
         p_echo_mw = ac2 * (sqrt_k / (r ** 2)) ** 2
-        snr_sens = gp * 2.0 * rho_v * p_si_mw * p_echo_mw / (cspr * n_sens)
+        snr_sens = gp * 2.0 * rho_v * p_si_mw * p_echo_mw / (cspr * n_mw)
         return {
             "rho": rho_v,
             "snr_comm": snr_comm,
@@ -13982,7 +13978,7 @@ class SystemModelValidationPanel:
             "alpha": alpha,
             "cspr": cspr,
             "gp": gp,
-            "n_mw": n_comm,
+            "n_mw": n_mw,
         }
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -13993,8 +13989,7 @@ class SystemModelValidationPanel:
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
         gp = self._processing_gain_lin()
         gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_sens = self._noise_power_mw()
-        n_comm = self._noise_power_mw()
+        n_mw = self._noise_power_mw()
         sens_threshold_db = (
             self._float("sens_req_snr_db", 13.2)
             if "sens_req_snr_db" in self.params
@@ -14007,12 +14002,12 @@ class SystemModelValidationPanel:
         )
         g_sens = 10.0 ** (sens_threshold_db / 10.0)
         g_comm = 10.0 ** (comm_threshold_db / 10.0)
-        r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_comm * g_comm))
+        r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_mw * g_comm))
         p_si_mw = ac2 * alpha ** 2
         echo_coefficient_mw_m4 = ac2 * sqrt_k ** 2
         sensing_coefficient = (
             2.0 * rho * gp * p_si_mw * echo_coefficient_mw_m4
-            / (cspr * n_sens)
+            / (cspr * n_mw)
         )
         r_sens = np.maximum(sensing_coefficient / g_sens, 0.0) ** 0.25
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
@@ -14169,7 +14164,7 @@ class SystemModelValidationPanel:
         add(18, "manual_evm_points", "Measured EVM [GBd: dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
         add(19, "manual_c2_si_on_points", "Measured C2 SI-on [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
         add(20, "ideal_processing_gain_db", "Ideal processing gain BT_p [dB]", "30.10", read_only=True)
-        add(21, "radar_proc_gain_db", "Effective processing gain G_p,eff [dB]", "21.9")
+        add(21, "radar_proc_gain_db", "Assumed effective processing gain G_p,eff [dB]", "26.0")
         add(22, "isac_range_ylim_min", "ISAC log y min [m]", "0.1")
         add(23, "isac_range_ylim_max", "ISAC range y max [m]", "5")
         add(24, "rcs_min_dbsm", "Effective RCS min [dBsm]", "-30")
@@ -14950,10 +14945,8 @@ class SystemModelValidationPanel:
 
         With SI, the desired ZBD cross-beat is proportional to P_SI*P_ec and
         decays as R^-4.  Without SI, echo self-beat is proportional to P_ec^2
-        and decays as R^-8.  At the SI-assisted limiting range their SINR ratio
-        is P_SI/P_ec, which gives
-
-            R_no_SI = R_with_SI * (P_ec/P_SI)^(1/8).
+        and decays as R^-8.  The two limiting ranges are solved independently
+        from those equations.
 
         Effective RCS is used directly as a scenario variable.  It already
         includes mismatch, structural scattering, aspect, and polarization;
@@ -15343,6 +15336,11 @@ class SystemModelValidationPanel:
         pts = self._c2_power_points(si_state)
         if len(pts) < 2:
             return float("nan"), float("nan")
+        ranges = np.asarray([p[0] for p in pts], dtype=np.float64)
+        if np.max(ranges) / np.min(ranges) < 1.5:
+            return float("nan"), float("nan")
+        x = np.log10(ranges)
+        y = np.asarray([p[1] for p in pts], dtype=np.float64)
         if len(np.unique(np.round(x, 9))) < 2:
             return float("nan"), float("nan")
         slope, intercept = np.polyfit(x, y, 1)
@@ -15374,9 +15372,11 @@ class SystemModelValidationPanel:
 
     def _radar_proc_gain_db(self) -> float:
         entered = self._finite_param("radar_proc_gain_db")
+        ideal_db = float(10.0 * np.log10(max(self._ideal_processing_gain_lin(), 1e-30)))
         if np.isfinite(entered):
-            return float(entered)
-        return float(10.0 * np.log10(max(self._ideal_processing_gain_lin(), 1.0)))
+            # BT_p is the coherent-observation upper bound in this model.
+            return float(min(entered, ideal_db))
+        return ideal_db
 
     def _c2_target_power_curve_dbm(self, ranges: np.ndarray, si_state: str) -> np.ndarray:
         """Target-only detector-output power used for sensing SINR."""

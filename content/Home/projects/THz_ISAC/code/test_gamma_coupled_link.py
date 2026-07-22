@@ -45,6 +45,19 @@ class _Var:
 
 
 class GammaCoupledLinkTest(unittest.TestCase):
+    def test_c2_power_slope_fit_used_by_redraw_validation(self):
+        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
+        panel.meas_points = []
+        panel.params = {
+            "manual_c2_si_on_points": _Var("500:-20, 1000:-26.0206, 2000:-32.0412"),
+            "c2_meas_power_min_dbm": _Var(""),
+        }
+
+        slope, intercept = panel._fit_c2_power_slope("on")
+
+        self.assertTrue(np.isfinite(intercept))
+        self.assertAlmostEqual(slope, -20.0, places=4)
+
     def test_default_sensing_measurement_survives_manual_power_override(self):
         panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
         radar_points = panel._default_radar_measurements()
@@ -224,34 +237,34 @@ class GammaCoupledLinkTest(unittest.TestCase):
         }
         rho = np.asarray([0.2])
         comm_ideal, sens_ideal, _ = panel._rmax(rho)
-        panel.params["radar_proc_gain_db"].set(21.9)
+        panel.params["radar_proc_gain_db"].set(26.0)
         comm_eff, sens_eff, _ = panel._rmax(rho)
 
         self.assertAlmostEqual(float(comm_eff[0] / comm_ideal[0]), 1.0, places=12)
         self.assertAlmostEqual(
             float(sens_eff[0] / sens_ideal[0]),
-            10.0 ** ((21.9 - 30.1029996) / 40.0),
+            10.0 ** ((26.0 - 30.1029996) / 40.0),
             places=7,
         )
 
         panel.params["radar_proc_gain_db"].set(30.1029996)
         rcs = np.asarray([-10.0])
         rc_i, rs_i, rs_off_i, _ = panel._rmax_vs_effective_rcs(rcs, 0.2)
-        panel.params["radar_proc_gain_db"].set(21.9)
+        panel.params["radar_proc_gain_db"].set(26.0)
         rc_e, rs_e, rs_off_e, _ = panel._rmax_vs_effective_rcs(rcs, 0.2)
         self.assertAlmostEqual(float(rc_e[0] / rc_i[0]), 1.0, places=12)
         self.assertAlmostEqual(
             float(rs_e[0] / rs_i[0]),
-            10.0 ** ((21.9 - 30.1029996) / 40.0),
+            10.0 ** ((26.0 - 30.1029996) / 40.0),
             places=7,
         )
         self.assertAlmostEqual(
             float(rs_off_e[0] / rs_off_i[0]),
-            10.0 ** ((21.9 - 30.1029996) / 80.0),
+            10.0 ** ((26.0 - 30.1029996) / 80.0),
             places=7,
         )
 
-        panel.params["radar_proc_gain_db"].set(21.9)
+        panel.params["radar_proc_gain_db"].set(26.0)
         comm_rho, sens_rho, _ = panel._rmax(np.asarray([0.2, 0.4]))
         off_rho = panel._rmax_sensing_without_si(np.asarray([0.2, 0.4]))
         self.assertAlmostEqual(float(comm_rho[1] / comm_rho[0]), np.sqrt(0.6 / 0.8), places=7)
@@ -268,6 +281,13 @@ class GammaCoupledLinkTest(unittest.TestCase):
         self.assertAlmostEqual(float(sens_p10[0] / sens_p0[0]), 10.0 ** 0.5, places=7)
         self.assertAlmostEqual(float(off_p10[0] / off_p0[0]), 10.0 ** 0.25, places=7)
 
+        panel.params["radar_proc_gain_db"].set(40.0)
+        self.assertAlmostEqual(
+            panel._radar_proc_gain_db(),
+            10.0 * np.log10(panel._ideal_processing_gain_lin()),
+            places=12,
+        )
+
     def test_sensing_model_uses_power_product_and_r_minus_four(self):
         panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
         panel.params = {
@@ -276,7 +296,7 @@ class GammaCoupledLinkTest(unittest.TestCase):
             "si_on_iso_db": _Var(24.0),
             "ac2": _Var(0.1),
             "sqrt_k": _Var(2e-4),
-            "radar_proc_gain_db": _Var(21.9),
+            "radar_proc_gain_db": _Var(26.0),
             "gc_db": _Var(-80.0),
             "system_nf_db": _Var(8.0),
             "bandwidth_ghz": _Var(15.0),
@@ -291,7 +311,7 @@ class GammaCoupledLinkTest(unittest.TestCase):
         p_si = ac2 * alpha ** 2
         p_echo = ac2 * (2e-4) ** 2
         expected = (
-            10.0 ** (21.9 / 10.0)
+            10.0 ** (26.0 / 10.0)
             * 2.0
             * 0.2
             * p_si

@@ -44,13 +44,14 @@ DSO bandwidth & -- & $40$ GHz & DSO vertical scale & -- & $100$ mV/div \\
 \multicolumn{6}{@{}l}{\textit{ISAC-range validation}} \\
 Required comm. SINR & $\gamma_c$ & $15.75$ dB & Required sensing SINR & $\gamma_{\mathrm{th}}$ & $13.2$ dB \\
 Normalized thermal noise$^{b,d}$ & $N/P_0,\ P_0=1$ mW & $-64.14$ dB at $15$ GHz & Ideal processing gain$^b$ & $G_{p,\mathrm{ideal}}$ & $30.10$ dB \\
-Effective processing gain$^d$ & $G_{p,\mathrm{eff}}=\eta_pBT_p$ & $21.9$ dB & Processing loss / efficiency$^d$ & $L_p/\eta_p$ & $8.20$ dB / $0.151$ \\
+Assumed effective processing gain$^d$ & $G_{p,\mathrm{eff}}=\eta_pBT_p$ & $26.0$ dB & Processing loss / efficiency$^d$ & $L_p/\eta_p$ & $4.10$ dB / $0.389$ \\
+Retained / equivalent CFR bins$^d$ & $N_{\mathrm{keep}}/N_{\mathrm{eff}}$ & $908/526.5$ & Weighted-bin gain bound$^d$ & $10\log_{10}N_{\mathrm{eff}}$ & $27.21$ dB \\
 Distance sweep / samples & -- & $0.25$--$2$ m / $9$ & EVM preview / paper seeds & -- & $1/4$ \\
 \bottomrule
 \multicolumn{6}{@{}l}{\footnotesize $^a$The system model absorbs implementation-specific optical filtering into the calibrated effective CSPR; $13$ dB gives $m=10^{-13/20}=0.2239$.} \\
 \multicolumn{6}{@{}l}{\footnotesize $^b$The common NF is obtained from the simulated LNA/IF-amplifier Friis cascade. The ISAC-range bound excludes ZBD-NEP/digitizer noise and uses $T_p=N_p/R_s$.} \\
 \multicolumn{6}{@{}l}{\footnotesize $^c$The coupled-antenna model uses $\sigma_{\mathrm{eff}}\simeq\sigma_{\mathrm{str}}+\lambda^2G_{\mathrm{tar}}^2|\Gamma|^2\eta_{\mathrm{pol}}/(4\pi)$ and applies the same $|\Gamma|$ to communication acceptance. The sum is an incoherent-power approximation.} \\
-\multicolumn{6}{@{}l}{\footnotesize $^d$Sensing products are normalized by $P_0=1$ mW. $G_{p,\mathrm{ideal}}$ is an upper bound; all reported bounds use the $21.9$-dB effective baseline, with $20$--$24$ dB for sensitivity.} \\
+\multicolumn{6}{@{}l}{\footnotesize $^d$Sensing products are normalized by $P_0=1$ mW. $N_{\mathrm{eff}}=(\sum w_k)^2/\sum w_k^2$ is evaluated from the saved C2 CFR weights. Reported bounds use an assumed $26.0$-dB baseline, with $24$--$28$ dB for sensitivity.} \\
 \end{tabular}
 \end{table*}
 

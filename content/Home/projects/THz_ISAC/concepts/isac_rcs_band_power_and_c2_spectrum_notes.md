@@ -336,7 +336,7 @@ Monostatic 표적의 왕복 지연 \(\tau=2R/c\)를 적용하면
 - 작은 화면에서 세 번째 탭 제어부를 사용할 수 있도록 scroll 지원
 - Effective processing gain을 사용자가 조절하고 `Redraw`로 cached target-power SINR에 적용
 
-Python syntax 검사와 관련 회귀 테스트 4개가 통과했다. 전체 test discovery는 계측기 제어용 선택 의존성인 `pyvisa`가 설치되지 않은 환경에서 하드웨어 모듈 import 단계가 제한된다.
+최종 점검에서는 `_fit_c2_power_slope()`에 누락된 `x`, `y` 초기화를 복구했다. 이 누락이 `Redraw` 마지막 validation 단계의 `name 'x' is not defined` 오류 원인이었다. 거리 span이 1.5배 미만이면 불안정한 기울기를 보고하지 않고, 그 이상이면 `log10(range)`에 대해 dBm 기울기를 적합한다. Python syntax 검사, 실제 Tk `Redraw` smoke test, 관련 회귀 테스트 9개가 통과했다. 또한 세 번째 탭 클래스에 중복 method 및 중복 GUI parameter key가 없음을 AST로 확인했다. 전체 test discovery는 계측기 제어용 선택 의존성인 `pyvisa`가 설치되지 않은 환경에서 하드웨어 모듈 import 단계가 제한된다.
 
 ## 11. 실제 측정 데이터에 의한 SI–echo 간섭 검증
 
@@ -681,32 +681,40 @@ G_{p,\mathrm{ideal}}=BT_p
 
 이며, 현재 조건 $B=15\,\mathrm{GHz}$, $N_p=1024$, $T_p=N_p/R_s$, $R_s=15\,\mathrm{GBd}$에서는 $30.10\,\mathrm{dB}$이다. 이는 모든 pilot sample이 완전한 시간·주파수·위상 정렬 상태로 coherent하게 합쳐진다는 상한선이므로 실제 range 계산에 그대로 쓰는 것은 낙관적이다.
 
-기준값은 $G_{p,\mathrm{eff}}=21.9\,\mathrm{dB}$, 즉 약 $22\,\mathrm{dB}$로 둔다. 이는 기존 profile-domain 결과와 일관되면서 이상적 gain에 대해 $8.20\,\mathrm{dB}$의 aggregate processing loss를 허용한다. 대응하는 coherent efficiency는
+저장된 기본 C2 NPZ에서는 1024 active subcarrier 중 CFR mask를 통과한 bin이 908개이고, 저장된 weight에 대한 equivalent independent-bin count는
+
+\[
+N_{\mathrm{eff}}=\frac{(\sum_k w_k)^2}{\sum_k w_k^2}=526.5,
+\qquad 10\log_{10}N_{\mathrm{eff}}=27.21\,\mathrm{dB}
+\]
+
+이다. 이 값은 masking과 nonuniform weighting을 반영한 데이터 기반 상한이다. 따라서 기준값은 이보다 1.21 dB 낮은 $G_{p,\mathrm{eff}}=26.0\,\mathrm{dB}$로 둔다. 이는 이상적 gain에 대해 $4.10\,\mathrm{dB}$의 aggregate processing loss를 허용한다. 대응하는 coherent efficiency는
 
 \[
 \eta_p=\frac{G_{p,\mathrm{eff}}}{G_{p,\mathrm{ideal}}}
-=10^{(21.9-30.10)/10}=0.151
+=10^{(26.0-30.10)/10}=0.389
 \]
 
-이다. 이 손실에는 synchronization/reference mismatch, windowing, 잔여 phase error, 유효 sample 손실, sidelobe 억제 및 구현 손실이 함께 포함된다. 현재 단일 NPZ만으로 각 손실을 독립적으로 식별할 수는 없으므로 $21.9\,\mathrm{dB}$를 보편적 상수나 직접 측정된 절대값으로 주장하지 않고, calibrated/assumed baseline으로 명시해야 한다.
+이다. CFR mask와 weight가 설명하는 손실은 $N_{\mathrm{eff}}$에 이미 포함되어 있으므로 window/bin 손실을 다시 빼지 않는다. 27.21 dB와 26.0 dB 사이의 1.21 dB margin만 synchronization/reference mismatch, 잔여 phase error 및 구현 손실로 둔다. 단일 NPZ만으로 이 margin의 각 원인을 독립 식별할 수 없으므로 26.0 dB는 직접 측정된 절대값이 아니라 assumed baseline으로 명시한다. 기존 21.9 dB는 profile-domain PSLR 예시에서 유래한 값이어서 processing gain으로 재사용하지 않는다.
 
 | 항목 | 권장값 | 해석 |
 |---|---:|---|
 | Ideal upper bound | 30.10 dB | $BT_p$, 완전 coherent 상한 |
-| Effective baseline | 21.9 dB | 모든 sensing SINR 및 ISAC-range 계산에 적용 |
-| Aggregate loss | 8.20 dB | ideal 대비 practical loss |
-| Coherent efficiency | 0.151 | ideal linear gain의 15.1% |
-| Sensitivity interval | 20--24 dB | 결과의 processing-gain 불확실성 범위 |
+| Weighted-bin bound | 27.21 dB | 저장된 CFR weight의 $N_{\mathrm{eff}}=526.5$ |
+| Assumed effective baseline | 26.0 dB | 모든 sensing SINR 및 ISAC-range 계산에 적용 |
+| Aggregate loss | 4.10 dB | ideal 대비 practical loss |
+| Coherent efficiency | 0.389 | ideal linear gain의 38.9% |
+| Sensitivity interval | 24--28 dB | 결과의 processing-gain 불확실성 범위 |
 
-SI-assisted sensing은 output SINR가 $G_{p,\mathrm{eff}}R^{-4}$에 비례하므로 range는 $G_{p,\mathrm{eff}}^{1/4}$에 비례한다. 따라서 21.9 dB의 range는 ideal 30.10 dB 결과의
+SI-assisted sensing은 output SINR가 $G_{p,\mathrm{eff}}R^{-4}$에 비례하므로 range는 $G_{p,\mathrm{eff}}^{1/4}$에 비례한다. 따라서 26.0 dB의 range는 ideal 30.10 dB 결과의
 
 \[
-10^{(21.9-30.10)/40}=0.624
+10^{(26.0-30.10)/40}=0.790
 \]
 
-배이다. Without-SI self-beat은 $G_{p,\mathrm{eff}}R^{-8}$이므로 해당 비율은 $10^{(21.9-30.10)/80}=0.790$이다. Communication range에는 sensing processing gain이 적용되지 않는다.
+배이다. Without-SI self-beat은 $G_{p,\mathrm{eff}}R^{-8}$이므로 해당 비율은 $10^{(26.0-30.10)/80}=0.889$이다. Communication range에는 sensing processing gain이 적용되지 않는다.
 
-GUI에서는 ideal gain을 read-only 상한으로 표시하고, effective gain은 편집 가능하게 둔다. `Redraw`를 누르면 cached target-only sensing SINR와 Effective-RCS 기반 sensing/ISAC range에 새 값이 반영된다.
+GUI에서는 ideal gain을 read-only 상한으로 표시하고, effective gain은 편집 가능하게 둔다. 입력값이 $BT_p$를 넘으면 계산에는 ideal bound가 적용되어 구현 효율이 1을 초과하지 않는다. `Redraw`를 누르면 cached target-only sensing SINR와 Effective-RCS 기반 sensing/ISAC range에 새 값이 반영된다.
 
 ## 17. 최종 물리·수학 모델 감사
 

@@ -205,22 +205,23 @@ scalar 하나를 곱한다는 뜻이 아니라, 각 frequency bin 또는 subcarr
 
 ## 6. Sensing processing gain 구분
 
-System Model Validation 탭에는 서로 다른 목적의 processing gain 두 개가 존재한다.
+System Model Validation 탭은 ideal upper bound와 실제 계산에 쓰는 assumed effective gain을 구분한다.
 
 ### 6.1 Sensing SINR vs Range
 
-측정 및 거리 sweep Sensing SINR에는 calibrated effective gain을 사용한다.
+측정 및 거리 sweep Sensing SINR에는 assumed effective gain을 사용한다.
 
 ```math
-G_{p,\mathrm{eff}}=21.9\ \mathrm{dB}.
+G_{p,\mathrm{eff}}=26.0\ \mathrm{dB}.
 ```
 
-이 값은 GUI parameter와 Sensing SINR figure 내부에 표시된다. Profile-domain implementation loss를
-포함한 calibration 값이므로 ideal time-bandwidth product와 동일시하면 안 된다.
+이 값은 GUI parameter와 Sensing SINR figure 내부에 표시된다. 기본 C2 NPZ의 CFR weight에서
+$N_{\mathrm{eff}}=526.5$, 즉 27.21 dB의 weighted-bin bound를 얻고, 여기에 1.21 dB의
+동기·위상·구현 margin을 둔 가정값이다. 직접 측정된 processing gain으로 표현하지 않는다.
 
-### 6.2 ISAC Range vs rho
+### 6.2 ISAC Range vs Effective RCS
 
-이론적 ISAC Range bound에는
+이론적 상한은
 
 ```math
 G_{p,\mathrm{ideal}}=BT_p
@@ -233,8 +234,10 @@ G_{p,\mathrm{ideal}}=BT_p
 G_{p,\mathrm{ideal}}=10\log_{10}(1024)=30.10\ \mathrm{dB}.
 ```
 
-따라서 논문에서는 `21.9 dB`를 measured/calibrated effective profile gain으로, `30.1 dB`를
-ideal theoretical bound로 구분해야 한다.
+논문의 ISAC range에는 ideal 값이 아니라 동일한 `26.0 dB` effective gain을 적용한다. 따라서
+`26.0 dB`를 assumed effective processing gain으로, `27.21 dB`를 저장된 CFR weight 기반
+bound로, `30.1 dB`를 ideal theoretical bound로 구분해야 한다. 기존 `21.9 dB`
+profile-domain PSLR 예시는 processing gain으로 사용하지 않는다.
 
 ## 7. 재현 방법
 

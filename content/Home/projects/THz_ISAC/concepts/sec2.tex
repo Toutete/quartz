@@ -323,13 +323,18 @@ The ideal coherent time--bandwidth gain $G_{p,\mathrm{ideal}}=BT_p$ is
 retained only as an upper bound. For a fixed $N_p$-symbol pilot,
 $T_p=N_p/R_s$ and hence $G_{p,\mathrm{ideal}}=N_pB/R_s$; when
 $B\simeq R_s$, the gain is approximately $N_p$ and equals $30.10$~dB
-for $N_p=1024$. We use $G_{p,\mathrm{eff}}=21.9$~dB for both the
-sensing-SINR and ISAC-range results, corresponding to an aggregate
-processing loss of $8.20$~dB and a coherent efficiency
-$\eta_p=10^{-8.20/10}=0.151$. This effective factor absorbs finite
-synchronization and reference mismatch, windowing, phase-coherence loss,
-and implementation loss. Because it is not a universal constant, we use
-$20$--$24$~dB as a sensitivity interval around the $21.9$-dB baseline.
+for $N_p=1024$. In the saved C2 capture, 908 CFR bins survive the mask and
+their nonuniform weights give the equivalent count
+$N_{\mathrm{eff}}=(\sum_k w_k)^2/\sum_k w_k^2=526.5$, or $27.21$~dB.
+We therefore use a conservative assumed value
+$G_{p,\mathrm{eff}}=26.0$~dB for both the sensing-SINR and ISAC-range
+results. It is $4.10$~dB below the ideal bound and $1.21$~dB below the
+weighted-bin bound, corresponding to $\eta_p=10^{-4.10/10}=0.389$.
+The residual margin represents synchronization, phase-coherence,
+reference-mismatch, and implementation loss; weighting and discarded
+bins are already represented in $N_{\mathrm{eff}}$ and are not counted
+again. Because this is an assumed operating value rather than a directly
+measured universal gain, we use $24$--$28$~dB as a sensitivity interval.
 The communication and sensing bounds use the same input-referred
 thermal-noise model $N=kTBF$, with a common equivalent
 receiver noise figure $F$ obtained from the simulated LNA/IF-amplifier
