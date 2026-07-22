@@ -298,7 +298,8 @@ reference plane. After pilot correlation with effective processing gain
 $G_{p,\mathrm{eff}}=\eta_pT_pB$,
 \begin{equation}
 \mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}(m,\rho,R)
-=G_{p,\mathrm{eff}}\frac{2m^2\rho P_{\mathrm{SI}}P_{\mathrm{ec}}(R)}
+=G_{p,\mathrm{eff}}\frac{2m^2\rho
+\left[P_{\mathrm{SI}}P_{\mathrm{ec}}(R)+P_{\mathrm{ec}}^2(R)\right]}
 {P_0N},
 \label{eq:sinr_sens}
 \end{equation}
@@ -316,8 +317,13 @@ the SI reference, the echo is detected only through its own self-beat,
 {P_0N}.
 \label{eq:sinr_sens_nosi}
 \end{equation}
-Their ratio is $P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ in the noise-limited
-regime.
+Consequently, the exact phase-averaged with-SI to without-SI ratio is
+$1+P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ in the noise-limited regime.
+The commonly quoted $P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ result drops the
+self-beat from the with-SI numerator and is only the
+$P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$ approximation. Retaining both positive
+power terms guarantees that adding the SI reference cannot reduce the
+phase-averaged sensing bound.
 
 The ideal coherent time--bandwidth gain $G_{p,\mathrm{ideal}}=BT_p$ is
 retained only as an upper bound. For a fixed $N_p$-symbol pilot,
@@ -340,12 +346,12 @@ thermal-noise model $N=kTBF$, with a common equivalent
 receiver noise figure $F$ obtained from the simulated LNA/IF-amplifier
 Friis cascade and without ZBD-NEP or quantization noise.
 
-Under a distance-independent post-detection noise floor, the SI-assisted
-ZBD output SINR scales as $R^{-4}$, from the $\alpha\beta$ cross-beat
-power. Without the SI reference, the ZBD would detect the echo only
-through its own self-beat, whose output power scales as $R^{-8}$; the SI
-reference thus restores the $R^{-8}$ dependence to $R^{-4}$, which is the
-homodyne range-extension gain. The $R^{-8}$ figure is specific to
+Under a distance-independent post-detection noise floor, the exact
+SI-assisted ZBD output SINR is the sum of an $R^{-4}$ SI--echo term and an
+$R^{-8}$ echo-self-beat term. At long range, where
+$P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$, the former dominates and gives the
+usual homodyne $R^{-4}$ range-extension law. Without the SI reference only
+the $R^{-8}$ self-beat remains. The $R^{-8}$ figure is specific to
 square-law self-detection in the output domain, not the conventional
 $R^{-4}$ radar signal-to-noise ratio defined at the RF input; the
  measured sensing SINR reported here is defined in the ZBD output domain.
@@ -366,24 +372,25 @@ $P_{\mathrm{ec}}(R)=P_tK/R^4$,
 $P_{\mathrm{SI}}=P_t\alpha_0^2$, and
 $P_{\mathrm{rx},c}(R)=P_tG_c/R^2$, where $G_c$ already contains the
 one-way Friis coefficient, insertion losses, and the load-acceptance
-factor $1-|\Gamma|^2$.  The noise-limited range bounds implemented in
-the GUI are then
+factor $1-|\Gamma|^2$. Define
+$C=2\rho m^2G_{p,\mathrm{eff}}/(P_0N)$,
+$A_4=CP_{\mathrm{SI}}P_tK$, and $A_8=C(P_tK)^2$. The noise-limited
+range bounds implemented in the GUI are then
 \begin{align}
 R_{\max}^{\mathrm{comm}}
 &=\left[\frac{(1-\rho)m^2P_tG_c}{N\gamma_c}\right]^{1/2},\notag\\
 R_{\max}^{\mathrm{sens,w/\ SI}}
-&=\left[\frac{2\rho m^2G_{p,\mathrm{eff}}P_{\mathrm{SI}}P_tK}
-{P_0N\gamma_{\mathrm{th}}}\right]^{1/4},\notag\\
+&=\left[\frac{A_4+\sqrt{A_4^2+4\gamma_{\mathrm{th}}A_8}}
+{2\gamma_{\mathrm{th}}}\right]^{1/4},\notag\\
 R_{\max}^{\mathrm{sens,w/o\ SI}}
-&=\left[\frac{2\rho m^2G_{p,\mathrm{eff}}(P_tK)^2}
-{P_0N\gamma_{\mathrm{th}}}\right]^{1/8}.
+&=\left[\frac{A_8}{\gamma_{\mathrm{th}}}\right]^{1/8}.
 \label{eq:range_bounds}
 \end{align}
 Thus effective RCS appears only through $K\propto\sigma_{\mathrm{eff}}$:
-the with-SI and without-SI ranges scale respectively as
-$\sigma_{\mathrm{eff}}^{1/4}$ and $\sigma_{\mathrm{eff}}^{1/4}$, while
-their different $R^{-4}$ and $R^{-8}$ laws produce fourth- and
-eighth-root sensitivity to SINR gain.  The communication curve remains
+both sensing ranges scale as $\sigma_{\mathrm{eff}}^{1/4}$. The exact
+with-SI sensitivity to a common SINR gain transitions between an
+eighth-root self-beat limit and a fourth-root cross-beat limit. The
+communication curve remains
 constant on an effective-RCS sweep because $|\Gamma|$ is held fixed and
 is not inferred back from the scenario-level RCS.
 

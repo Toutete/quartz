@@ -13917,6 +13917,49 @@ class SystemModelValidationPanel:
             return self._float("si_on_iso_db", 24.0)
         return self._float("iso_db", 25.0)
 
+    def _theory_link_terms(self) -> dict[str, float]:
+        """Return the common, input-referred terms used by every range equation."""
+        return {
+            "cspr": 10.0 ** (self._float("cspr_db", 20.0) / 10.0),
+            "alpha": 10.0 ** (-self._theory_isolation_db() / 20.0),
+            "ac2_mw": self._theory_carrier_power_mw(),
+            "sqrt_k": max(self._float("sqrt_k", 1e-4), 1e-30),
+            "gp": self._processing_gain_lin(),
+            "gc": 10.0 ** (self._float("gc_db", 0.0) / 10.0),
+            "noise_mw": self._noise_power_mw(),
+        }
+
+    def _sensing_sinr_coefficients(
+        self, rho: np.ndarray | float, terms: dict[str, float] | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return C4 and C8 for gamma_with-SI(R)=C4/R^4+C8/R^8.
+
+        C4 is the phase-averaged SI--echo cross-beat contribution and C8 is
+        the echo self-beat contribution.  Without SI only C8 remains.  Powers
+        are numerical mW values normalized by P0=1 mW.
+        """
+        t = self._theory_link_terms() if terms is None else terms
+        rho_arr = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
+        p_si_mw = t["ac2_mw"] * t["alpha"] ** 2
+        echo_coefficient_mw_m4 = t["ac2_mw"] * t["sqrt_k"] ** 2
+        common = 2.0 * rho_arr * t["gp"] / (t["cspr"] * t["noise_mw"])
+        c4 = common * p_si_mw * echo_coefficient_mw_m4
+        c8 = common * echo_coefficient_mw_m4 ** 2
+        return np.asarray(c4, dtype=np.float64), np.asarray(c8, dtype=np.float64)
+
+    @staticmethod
+    def _solve_sensing_range(
+        c4: np.ndarray | float,
+        c8: np.ndarray | float,
+        gamma_threshold: float,
+    ) -> np.ndarray:
+        """Solve gamma*R^8-C4*R^4-C8=0 for the positive range."""
+        c4_arr = np.maximum(np.asarray(c4, dtype=np.float64), 0.0)
+        c8_arr = np.maximum(np.asarray(c8, dtype=np.float64), 0.0)
+        gamma = max(float(gamma_threshold), 1e-30)
+        r4 = (c4_arr + np.sqrt(c4_arr ** 2 + 4.0 * gamma * c8_arr)) / (2.0 * gamma)
+        return np.maximum(r4, 0.0) ** 0.25
+
     def _comm_threshold_db(self) -> float:
         try:
             m = max(2, int(round(self._float("modulation_order", 32.0))))
@@ -13954,42 +13997,32 @@ class SystemModelValidationPanel:
 
     def _model(self, ranges_m: np.ndarray, rho: float | None = None) -> dict[str, np.ndarray | float]:
         rho_v = float(np.clip(self._float("rho", 0.2) if rho is None else rho, 1e-9, 1.0 - 1e-9))
-        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
-        alpha = 10.0 ** (-self._theory_isolation_db() / 20.0)
-        ac2 = self._theory_carrier_power_mw()
-        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
-        gp = self._processing_gain_lin()
-        gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_mw = self._noise_power_mw()
+        terms = self._theory_link_terms()
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
-        snr_comm = ((1.0 - rho_v) * ac2 * gc) / (cspr * (r ** 2) * n_mw)
-        # All powers are represented numerically in mW, i.e. normalized by
-        # P0=1 mW.  The square-law cross-beat model is therefore
-        # gamma=Gp*2*m^2*rho*P_SI*P_echo/(P0*N), with P0 numerically equal to
-        # one.  P_echo follows R^-4, so the output sensing SINR also follows
-        # R^-4.  Do not use the field product alpha*beta directly here.
-        p_si_mw = ac2 * alpha ** 2
-        p_echo_mw = ac2 * (sqrt_k / (r ** 2)) ** 2
-        snr_sens = gp * 2.0 * rho_v * p_si_mw * p_echo_mw / (cspr * n_mw)
+        snr_comm = (
+            (1.0 - rho_v) * terms["ac2_mw"] * terms["gc"]
+            / (terms["cspr"] * r ** 2 * terms["noise_mw"])
+        )
+        c4, c8 = self._sensing_sinr_coefficients(rho_v, terms)
+        # The exact phase-averaged ZBD target power contains both the
+        # SI--echo cross-beat and echo self-beat.  Dropping C8 is valid only
+        # when P_SI >> P_echo and can otherwise make with-SI look worse.
+        snr_sens = c4 / r ** 4 + c8 / r ** 8
         return {
             "rho": rho_v,
             "snr_comm": snr_comm,
             "snr_sens": snr_sens,
-            "alpha": alpha,
-            "cspr": cspr,
-            "gp": gp,
-            "n_mw": n_mw,
+            "snr_sens_cross": c4 / r ** 4,
+            "snr_sens_self": c8 / r ** 8,
+            "alpha": terms["alpha"],
+            "cspr": terms["cspr"],
+            "gp": terms["gp"],
+            "n_mw": terms["noise_mw"],
         }
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
-        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
-        alpha = 10.0 ** (-self._theory_isolation_db() / 20.0)
-        ac2 = self._theory_carrier_power_mw()
-        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
-        gp = self._processing_gain_lin()
-        gc = 10.0 ** (self._float("gc_db", 0.0) / 10.0)
-        n_mw = self._noise_power_mw()
+        terms = self._theory_link_terms()
         sens_threshold_db = (
             self._float("sens_req_snr_db", 13.2)
             if "sens_req_snr_db" in self.params
@@ -14002,37 +14035,25 @@ class SystemModelValidationPanel:
         )
         g_sens = 10.0 ** (sens_threshold_db / 10.0)
         g_comm = 10.0 ** (comm_threshold_db / 10.0)
-        r_comm = np.sqrt(((1.0 - rho) * ac2 * gc) / (cspr * n_mw * g_comm))
-        p_si_mw = ac2 * alpha ** 2
-        echo_coefficient_mw_m4 = ac2 * sqrt_k ** 2
-        sensing_coefficient = (
-            2.0 * rho * gp * p_si_mw * echo_coefficient_mw_m4
-            / (cspr * n_mw)
+        r_comm = np.sqrt(
+            (1.0 - rho) * terms["ac2_mw"] * terms["gc"]
+            / (terms["cspr"] * terms["noise_mw"] * g_comm)
         )
-        r_sens = np.maximum(sensing_coefficient / g_sens, 0.0) ** 0.25
+        c4, c8 = self._sensing_sinr_coefficients(rho, terms)
+        r_sens = self._solve_sensing_range(c4, c8, g_sens)
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
 
     def _rmax_sensing_without_si(self, rho: np.ndarray) -> np.ndarray:
         """Noise-limited echo-self-beat range from the Sec. II equation."""
         rho = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
-        cspr = 10.0 ** (self._float("cspr_db", 20.0) / 10.0)
-        ac2 = self._theory_carrier_power_mw()
-        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
-        gp = self._processing_gain_lin()
-        n_sens = self._noise_power_mw()
         threshold_db = (
             self._float("sens_req_snr_db", 13.2)
             if "sens_req_snr_db" in self.params
             else self._sens_threshold_db()
         )
         gamma_threshold = 10.0 ** (threshold_db / 10.0)
-        # P_echo(R)=echo_coefficient/R^4. Squaring it produces R^-8.
-        echo_coefficient_mw_m4 = ac2 * sqrt_k ** 2
-        coefficient = (
-            2.0 * rho * gp * echo_coefficient_mw_m4 ** 2
-            / (cspr * n_sens)
-        )
-        return np.maximum(coefficient / gamma_threshold, 0.0) ** 0.125
+        _c4, c8 = self._sensing_sinr_coefficients(rho)
+        return self._solve_sensing_range(np.zeros_like(c8), c8, gamma_threshold)
 
     @staticmethod
     def _as_float(value, default: float = float("nan")) -> float:
@@ -14459,7 +14480,7 @@ class SystemModelValidationPanel:
             )
         radar_handles.append(
             Line2D([0], [0], color=red, marker="s", linestyle="None", markerfacecolor=red,
-                   markeredgecolor=red, markersize=6.5, label="Meas.")
+                   markeredgecolor=red, markersize=6.5, label="Meas./band-power est.")
         )
         comm_handles = [
             Line2D([0], [0], color=blue, linestyle="--", linewidth=linewidth, label="Sim."),
@@ -14868,6 +14889,14 @@ class SystemModelValidationPanel:
         ranges = np.asarray(cache["ranges"], dtype=np.float64)
         c2_on = np.asarray(cache["c2_on_power"], dtype=np.float64)
         c2_off = np.asarray(cache["c2_off_power"], dtype=np.float64)
+        c2_on_target = np.asarray(
+            cache.get("c2_on_target_power", np.full_like(ranges, np.nan)),
+            dtype=np.float64,
+        )
+        c2_off_target = np.asarray(
+            cache.get("c2_off_target_power", np.full_like(ranges, np.nan)),
+            dtype=np.float64,
+        )
         no_si_valid = bool(cache["no_si_valid"])
         red = "#ff0000"
         green = "#008000"
@@ -14876,6 +14905,12 @@ class SystemModelValidationPanel:
         if no_si_valid:
             ax.plot(ranges, c2_off, color=green, linestyle="--", linewidth=linewidth * 0.9,
                     label="Sim. raw (without SI)")
+        if np.any(np.isfinite(c2_on_target)):
+            ax.plot(ranges, c2_on_target, color=red, linestyle=":", linewidth=linewidth * 0.9,
+                    label="Sim. target-only (with SI)")
+        if np.any(np.isfinite(c2_off_target)):
+            ax.plot(ranges, c2_off_target, color=green, linestyle=":", linewidth=linewidth * 0.9,
+                    label="Sim. echo-only (without SI)")
         for state, color, marker, label in (
             ("on", red, "s", "Meas. raw (with SI)"),
             ("off", green, "^", "Meas. raw (without SI)"),
@@ -14895,7 +14930,7 @@ class SystemModelValidationPanel:
                 )
         ax.set_xlim(float(cache["x_min"]), float(cache["x_max"]))
         ax.set_xlabel("Range (m)")
-        ax.set_ylabel("C2 raw IF-band power (dBm)")
+        ax.set_ylabel("C2 IF-band power (dBm)")
         ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
         if for_save:
             ax.set_box_aspect(0.8)
@@ -14943,10 +14978,10 @@ class SystemModelValidationPanel:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Return effective-processing-gain range limits versus effective RCS.
 
-        With SI, the desired ZBD cross-beat is proportional to P_SI*P_ec and
-        decays as R^-4.  Without SI, echo self-beat is proportional to P_ec^2
-        and decays as R^-8.  The two limiting ranges are solved independently
-        from those equations.
+        With SI, the exact phase-averaged target power is the sum of the
+        P_SI*P_ec cross-beat (R^-4) and P_ec^2 self-beat (R^-8). Without SI,
+        only the latter remains. The two limiting ranges are solved directly
+        from those equations, so the with-SI bound cannot be smaller.
 
         Effective RCS is used directly as a scenario variable.  It already
         includes mismatch, structural scattering, aspect, and polarization;
@@ -15390,43 +15425,36 @@ class SystemModelValidationPanel:
             if not np.isfinite(p_ref):
                 return np.full_like(r, np.nan, dtype=np.float64)
             return p_ref + rho_term - 80.0 * np.log10(r / ref_r)
-        return (
-            self._c2_target_power_ref_dbm()
-            + rho_term
-            - 40.0 * np.log10(r / ref_r)
+        on_ref_mw = 10.0 ** (self._c2_target_power_ref_dbm() / 10.0)
+        off_ref_dbm = self._finite_param("c2_no_si_power_ref_dbm")
+        off_ref_mw = 10.0 ** (off_ref_dbm / 10.0) if np.isfinite(off_ref_dbm) else 0.0
+        # The with-SI target is the sum of the echo self-beat (R^-8) and
+        # phase-averaged SI--echo cross-beat (R^-4), matching the range model.
+        cross_ref_mw = max(on_ref_mw - off_ref_mw, 0.0)
+        target_mw = (rho_v / rho_ref) * (
+            off_ref_mw * (r / ref_r) ** (-8.0)
+            + cross_ref_mw * (r / ref_r) ** (-4.0)
         )
+        return 10.0 * np.log10(np.maximum(target_mw, 1e-30))
 
     def _c2_power_curve_dbm(self, ranges: np.ndarray, si_state: str) -> np.ndarray:
         """Return raw IF-band power, including the range-independent background."""
         r = np.maximum(np.asarray(ranges, dtype=np.float64), 1e-12)
-        ref_r = max(self._float("ref_range_m", 1.0), 1e-12)
-        rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-9, 1.0 - 1e-9))
-        rho_v = float(np.clip(self._float("rho", 0.20), 1e-9, 1.0 - 1e-9))
-        rho_term = 10.0 * np.log10(rho_v / rho_ref)
+        target_dbm = self._c2_target_power_curve_dbm(r, si_state)
+        if not np.any(np.isfinite(target_dbm)):
+            return np.full_like(r, np.nan, dtype=np.float64)
+        target_mw = 10.0 ** (target_dbm / 10.0)
         if str(si_state).strip().lower() == "off":
-            pts = self._c2_power_points("off")
-            if pts:
-                r_pts = np.asarray([p[0] for p in pts], dtype=np.float64)
-                p_pts = np.asarray([p[1] for p in pts], dtype=np.float64)
-                idx = int(np.argmin(np.abs(np.log10(np.maximum(r_pts, 1e-12) / ref_r))))
-                ref_r = float(r_pts[idx])
-                p_ref = float(p_pts[idx])
-            else:
-                p_ref = self._finite_param("c2_no_si_power_ref_dbm")
-                if not np.isfinite(p_ref):
-                    return np.full_like(r, np.nan, dtype=np.float64)
-                if p_ref >= self._c2_power_ref_dbm():
-                    return np.full_like(r, np.nan, dtype=np.float64)
-            # No-SI ZBD output is echo self-beat: echo RF power follows
-            # 1/R^4, and the detector output electrical power follows 1/R^8.
-            return p_ref + rho_term - 80.0 * np.log10(r / max(ref_r, 1e-12))
+            # Raw no-SI power approaches the receiver-noise background even
+            # though its echo-only component continues to decay as R^-8.
+            background_mw = 10.0 ** (self._c2_noise_power_dbm() / 10.0)
+            return 10.0 * np.log10(np.maximum(background_mw + target_mw, 1e-30))
         # The measurement points are raw spectrum integrals.  Preserve the
-        # range-independent SI/noise background and apply R^-4 only to the
-        # target-dependent homodyne component.
+        # range-independent SI/noise background while using the full target
+        # curve (R^-4 cross-beat plus R^-8 echo self-beat).
         raw_ref_mw = 10.0 ** (self._c2_power_ref_dbm() / 10.0)
         target_ref_mw = 10.0 ** (self._c2_target_power_ref_dbm() / 10.0)
         background_mw = max(raw_ref_mw - target_ref_mw, 0.0)
-        target_mw = target_ref_mw * (rho_v / rho_ref) * (r / ref_r) ** (-4.0)
         return 10.0 * np.log10(np.maximum(background_mw + target_mw, 1e-30))
 
     def _no_si_anchor_status(self) -> str:
@@ -15449,7 +15477,13 @@ class SystemModelValidationPanel:
         )
 
     def _c2_power_radar_snr_points(self, si_state: str | None = None) -> list[tuple[float, float]]:
-        """Return independently measured sensing-SINR markers."""
+        """Return sensing-SINR markers, including relative band-power estimates.
+
+        A saved range profile provides the absolute SINR anchor.  Other raw
+        SI-on band-power measurements are converted only differentially after
+        subtracting the common measured background.  This does not invent a
+        second absolute calibration and preserves the anchor exactly.
+        """
         pts: list[tuple[float, float]] = []
         state_filter = str(si_state).strip().lower() if si_state is not None else ""
         for point in self._active_measurements():
@@ -15461,7 +15495,34 @@ class SystemModelValidationPanel:
             snr = float(point.get("snr_sens_db", float("nan")))
             if np.isfinite(rr) and rr > 0.0 and np.isfinite(snr):
                 pts.append((rr, snr))
-        return pts
+        if state_filter not in ("", "on") or not pts:
+            return sorted(pts)
+
+        raw_points = self._c2_power_points("on")
+        if len(raw_points) < 2:
+            return sorted(pts)
+        anchor_r, anchor_snr = min(
+            pts,
+            key=lambda p: min(abs(p[0] - raw_r) for raw_r, _raw_p in raw_points),
+        )
+        anchor_raw_r, anchor_raw_dbm = min(raw_points, key=lambda p: abs(p[0] - anchor_r))
+        if abs(anchor_raw_r - anchor_r) > 5e-3:
+            return sorted(pts)
+        background_mw = 10.0 ** (self._c2_noise_power_dbm() / 10.0)
+        anchor_signal_mw = 10.0 ** (anchor_raw_dbm / 10.0) - background_mw
+        if anchor_signal_mw <= 0.0:
+            return sorted(pts)
+
+        combined = {round(r, 9): (r, snr) for r, snr in pts}
+        for rr, raw_dbm in raw_points:
+            key = round(rr, 9)
+            if key in combined:
+                continue
+            signal_mw = 10.0 ** (raw_dbm / 10.0) - background_mw
+            if signal_mw > 0.0:
+                estimated_snr = anchor_snr + 10.0 * np.log10(signal_mw / anchor_signal_mw)
+                combined[key] = (rr, float(estimated_snr))
+        return sorted(combined.values())
 
     def _derived_radar_ref_snr_db(self) -> float:
         return float(self._c2_target_power_ref_dbm() - self._c2_noise_power_dbm() + self._radar_proc_gain_db())
@@ -15889,6 +15950,14 @@ class SystemModelValidationPanel:
                 sim_eff_sinr = sim_comm_snr
                 sim_c2_on_power = sweep["on_c2_power_dbm"]
                 sim_c2_off_power = sweep["off_c2_power_dbm"]
+                sim_c2_on_target_power = np.asarray(
+                    sweep.get("on_c2_target_power_dbm", np.full_like(ranges, np.nan)),
+                    dtype=np.float64,
+                )
+                sim_c2_off_target_power = np.asarray(
+                    sweep.get("off_c2_target_power_dbm", np.full_like(ranges, np.nan)),
+                    dtype=np.float64,
+                )
                 ref_noise_arr = np.asarray(sweep.get("ref_noise_dbm", []), dtype=np.float64)
                 ref_noise = float(ref_noise_arr[0]) if len(ref_noise_arr) else self._c2_noise_power_dbm()
                 effective_pg = self._radar_proc_gain_db()
@@ -15920,6 +15989,8 @@ class SystemModelValidationPanel:
                 sim_c2_off_power = self._c2_power_curve_dbm(curve_ranges, "off")
                 target_on = self._c2_target_power_curve_dbm(curve_ranges, "on")
                 target_off = self._c2_target_power_curve_dbm(curve_ranges, "off")
+                sim_c2_on_target_power = np.asarray(target_on, dtype=np.float64)
+                sim_c2_off_target_power = np.asarray(target_off, dtype=np.float64)
                 sim_sens_on_snr = self._sensing_sinr_from_target_power_dbm(target_on)
                 sim_sens_off_snr = self._sensing_sinr_from_target_power_dbm(target_off)
                 no_si_valid = bool(np.any(np.isfinite(sim_sens_off_snr)))
@@ -15961,6 +16032,8 @@ class SystemModelValidationPanel:
                 "off_radar_points": self._c2_power_radar_snr_points("off"),
                 "c2_on_power": np.asarray(sim_c2_on_power, dtype=np.float64).copy(),
                 "c2_off_power": np.asarray(sim_c2_off_power, dtype=np.float64).copy(),
+                "c2_on_target_power": sim_c2_on_target_power.copy(),
+                "c2_off_target_power": sim_c2_off_target_power.copy(),
                 "c2_on_points": self._c2_power_points("on"),
                 "c2_off_points": self._c2_power_points("off"),
                 "effective_processing_gain_db": float(self._radar_proc_gain_db()),

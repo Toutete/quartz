@@ -77,6 +77,28 @@ class GammaCoupledLinkTest(unittest.TestCase):
         self.assertAlmostEqual(snr_points[0][0], 1.1)
         self.assertAlmostEqual(power_points[0][1], -40.6)
 
+    def test_three_c2_band_power_points_produce_three_anchored_sinr_markers(self):
+        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
+        panel.meas_points = [{
+            "name": "C2 range-profile anchor",
+            "range_m": 1.1,
+            "snr_sens_db": 20.5,
+            "c2_inband_power_dbm": float("nan"),
+            "c2_si_state": "on",
+        }]
+        panel.params = {
+            "manual_c2_si_on_points": _Var("1000:-38.3, 1100:-40.6, 1200:-42.4"),
+            "c2_noise_power_dbm": _Var(-46.47),
+        }
+
+        points = panel._c2_power_radar_snr_points("on")
+
+        self.assertEqual(len(points), 3)
+        self.assertAlmostEqual(points[1][0], 1.1)
+        self.assertAlmostEqual(points[1][1], 20.5)
+        self.assertGreater(points[0][1], points[1][1])
+        self.assertGreater(points[1][1], points[2][1])
+
     def test_third_tab_separates_raw_c2_power_from_target_sinr_power(self):
         panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
         row = panel._sweep_metric_row(
@@ -97,6 +119,26 @@ class GammaCoupledLinkTest(unittest.TestCase):
         self.assertAlmostEqual(row["c2_power_dbm"], -30.0)
         self.assertAlmostEqual(row["c2_target_power_dbm"], -50.0)
         self.assertAlmostEqual(row["radar_snr_db"], 41.0)
+
+    def test_no_si_raw_power_flattens_only_at_noise_floor_while_echo_decays(self):
+        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
+        panel.meas_points = []
+        panel.params = {
+            "manual_c2_si_on_points": _Var(""),
+            "ref_range_m": _Var(1.0),
+            "rho_ref": _Var(0.2),
+            "rho": _Var(0.2),
+            "c2_no_si_power_ref_dbm": _Var(-60.0),
+            "c2_noise_power_dbm": _Var(-70.0),
+        }
+        ranges = np.asarray([1.0, 2.0, 10.0])
+
+        target = panel._c2_target_power_curve_dbm(ranges, "off")
+        raw = panel._c2_power_curve_dbm(ranges, "off")
+
+        self.assertAlmostEqual(float(target[1] - target[0]), -80.0 * np.log10(2.0), places=10)
+        self.assertGreater(float(raw[1]), float(target[1]))
+        self.assertAlmostEqual(float(raw[-1]), -70.0, places=5)
 
     def test_link_budget_limits_and_structural_floor(self):
         matched = _link(0.0)
@@ -206,6 +248,7 @@ class GammaCoupledLinkTest(unittest.TestCase):
             rcs_axis, 0.2
         )
         self.assertTrue(np.allclose(r_comm, r_comm[0]))
+        self.assertTrue(np.all(r_sens_si >= r_sens_no_si))
         self.assertAlmostEqual(
             r_sens_si[-1] / r_sens_si[0],
             10.0 ** (30.0 / 40.0),
@@ -241,11 +284,10 @@ class GammaCoupledLinkTest(unittest.TestCase):
         comm_eff, sens_eff, _ = panel._rmax(rho)
 
         self.assertAlmostEqual(float(comm_eff[0] / comm_ideal[0]), 1.0, places=12)
-        self.assertAlmostEqual(
-            float(sens_eff[0] / sens_ideal[0]),
-            10.0 ** ((26.0 - 30.1029996) / 40.0),
-            places=7,
-        )
+        gain_ratio = 10.0 ** ((26.0 - 30.1029996) / 10.0)
+        sensing_gain_ratio = float(sens_eff[0] / sens_ideal[0])
+        self.assertGreaterEqual(sensing_gain_ratio, gain_ratio ** 0.25)
+        self.assertLessEqual(sensing_gain_ratio, gain_ratio ** 0.125)
 
         panel.params["radar_proc_gain_db"].set(30.1029996)
         rcs = np.asarray([-10.0])
@@ -253,11 +295,9 @@ class GammaCoupledLinkTest(unittest.TestCase):
         panel.params["radar_proc_gain_db"].set(26.0)
         rc_e, rs_e, rs_off_e, _ = panel._rmax_vs_effective_rcs(rcs, 0.2)
         self.assertAlmostEqual(float(rc_e[0] / rc_i[0]), 1.0, places=12)
-        self.assertAlmostEqual(
-            float(rs_e[0] / rs_i[0]),
-            10.0 ** ((26.0 - 30.1029996) / 40.0),
-            places=7,
-        )
+        rcs_gain_ratio = float(rs_e[0] / rs_i[0])
+        self.assertGreaterEqual(rcs_gain_ratio, gain_ratio ** 0.25)
+        self.assertLessEqual(rcs_gain_ratio, gain_ratio ** 0.125)
         self.assertAlmostEqual(
             float(rs_off_e[0] / rs_off_i[0]),
             10.0 ** ((26.0 - 30.1029996) / 80.0),
@@ -268,7 +308,8 @@ class GammaCoupledLinkTest(unittest.TestCase):
         comm_rho, sens_rho, _ = panel._rmax(np.asarray([0.2, 0.4]))
         off_rho = panel._rmax_sensing_without_si(np.asarray([0.2, 0.4]))
         self.assertAlmostEqual(float(comm_rho[1] / comm_rho[0]), np.sqrt(0.6 / 0.8), places=7)
-        self.assertAlmostEqual(float(sens_rho[1] / sens_rho[0]), 2.0 ** 0.25, places=7)
+        self.assertGreaterEqual(float(sens_rho[1] / sens_rho[0]), 2.0 ** 0.125)
+        self.assertLessEqual(float(sens_rho[1] / sens_rho[0]), 2.0 ** 0.25)
         self.assertAlmostEqual(float(off_rho[1] / off_rho[0]), 2.0 ** 0.125, places=7)
 
         panel.params["sweep_tx_power_dbm"].set(0.0)
@@ -278,7 +319,8 @@ class GammaCoupledLinkTest(unittest.TestCase):
         comm_p10, sens_p10, _ = panel._rmax(rho)
         off_p10 = panel._rmax_sensing_without_si(rho)
         self.assertAlmostEqual(float(comm_p10[0] / comm_p0[0]), 10.0 ** 0.5, places=7)
-        self.assertAlmostEqual(float(sens_p10[0] / sens_p0[0]), 10.0 ** 0.5, places=7)
+        self.assertGreaterEqual(float(sens_p10[0] / sens_p0[0]), 10.0 ** 0.25)
+        self.assertLessEqual(float(sens_p10[0] / sens_p0[0]), 10.0 ** 0.5)
         self.assertAlmostEqual(float(off_p10[0] / off_p0[0]), 10.0 ** 0.25, places=7)
 
         panel.params["radar_proc_gain_db"].set(40.0)
@@ -288,7 +330,7 @@ class GammaCoupledLinkTest(unittest.TestCase):
             places=12,
         )
 
-    def test_sensing_model_uses_power_product_and_r_minus_four(self):
+    def test_sensing_model_adds_cross_and_self_beat_powers(self):
         panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
         panel.params = {
             "rho": _Var(0.2),
@@ -301,10 +343,16 @@ class GammaCoupledLinkTest(unittest.TestCase):
             "system_nf_db": _Var(8.0),
             "bandwidth_ghz": _Var(15.0),
             "noise_temperature_k": _Var(290.0),
+            "sens_req_snr_db": _Var(13.2),
+            "comm_req_snr_db": _Var(15.75),
         }
         model = panel._model(np.asarray([1.0, 2.0]))
         sensing = np.asarray(model["snr_sens"], dtype=np.float64)
-        self.assertAlmostEqual(float(sensing[1] / sensing[0]), 1.0 / 16.0, places=12)
+        cross = np.asarray(model["snr_sens_cross"], dtype=np.float64)
+        self_beat = np.asarray(model["snr_sens_self"], dtype=np.float64)
+        self.assertTrue(np.allclose(sensing, cross + self_beat))
+        self.assertAlmostEqual(float(cross[1] / cross[0]), 1.0 / 16.0, places=12)
+        self.assertAlmostEqual(float(self_beat[1] / self_beat[0]), 1.0 / 256.0, places=12)
 
         ac2 = 0.1
         alpha = 10.0 ** (-24.0 / 20.0)
@@ -314,11 +362,24 @@ class GammaCoupledLinkTest(unittest.TestCase):
             10.0 ** (26.0 / 10.0)
             * 2.0
             * 0.2
-            * p_si
-            * p_echo
+            * (p_si * p_echo + p_echo ** 2)
             / (10.0 ** (13.0 / 10.0) * panel._noise_power_mw())
         )
         self.assertAlmostEqual(float(sensing[0]), expected, places=12)
+
+        with_si = panel._rmax(np.asarray([0.2]))[1]
+        without_si = panel._rmax_sensing_without_si(np.asarray([0.2]))
+        self.assertGreaterEqual(float(with_si[0]), float(without_si[0]))
+        at_limit = panel._model(np.asarray([with_si[0]]), rho=0.2)["snr_sens"]
+        self.assertAlmostEqual(float(at_limit[0]), 10.0 ** (13.2 / 10.0), places=9)
+
+        panel.params["theory_tx_ref_dbm"] = _Var(-10.0)
+        panel.params["sweep_tx_power_dbm"] = _Var(-10.0)
+        for tx_dbm in (-30.0, -20.0, -10.0, 0.0, 10.0):
+            panel.params["sweep_tx_power_dbm"].set(tx_dbm)
+            with_si = panel._rmax(np.asarray([0.2]))[1]
+            without_si = panel._rmax_sensing_without_si(np.asarray([0.2]))
+            self.assertGreaterEqual(float(with_si[0]), float(without_si[0]))
 
 
 if __name__ == "__main__":

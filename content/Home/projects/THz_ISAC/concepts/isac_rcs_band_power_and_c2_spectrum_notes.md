@@ -97,15 +97,15 @@ R_{\max}^{\mathrm{comm}}(\sigma_{\mathrm{eff}})
 
 ## 4. SI 유무에 따른 sensing SINR
 
-SI reference가 존재할 때 원하는 ZBD cross-beat는 \(P_{\mathrm{SI}}P_{\mathrm{ec}}\)에 비례한다.
+SI reference가 존재할 때 phase-averaged ZBD target power에는 SI--echo cross-beat와 echo self-beat가 모두 존재한다.
 
 \[
 \mathrm{SINR}_{\mathrm{sens}}^{\mathrm{with\ SI}}
-\propto
-G_p\frac{2m^2\rho P_{\mathrm{SI}}P_{\mathrm{ec}}(R)}{N}.
+=
+G_p\frac{2m^2\rho\left[P_{\mathrm{SI}}P_{\mathrm{ec}}(R)+P_{\mathrm{ec}}^2(R)\right]}{P_0N}.
 \]
 
-Echo power는 \(P_{\mathrm{ec}}(R)\propto \sigma_{\mathrm{eff}}R^{-4}\)이므로, with-SI sensing SINR은 \(R^{-4}\)로 감소한다.
+따라서 exact with-SI SINR은 \(R^{-4}\) cross-beat와 \(R^{-8}\) self-beat의 합이다. 장거리에서 \(P_{\mathrm{SI}}\gg P_{\mathrm{ec}}\)일 때만 \(R^{-4}\) 근사가 지배적이다.
 
 SI reference가 없으면 echo self-beat만 사용한다.
 
@@ -121,10 +121,10 @@ G_p\frac{2m^2\rho P_{\mathrm{ec}}^2(R)}{N},
 \frac{\mathrm{SINR}_{\mathrm{with\ SI}}}
 {\mathrm{SINR}_{\mathrm{w/o\ SI}}}
 =
-\frac{P_{\mathrm{SI}}}{P_{\mathrm{ec}}(R)}
+1+\frac{P_{\mathrm{SI}}}{P_{\mathrm{ec}}(R)}
 \]
 
-가 되며, 이것이 homodyne range-extension gain이다.
+가 된다. 흔히 사용하는 \(P_{\mathrm{SI}}/P_{\mathrm{ec}}\)는 with-SI 식에서도 self-beat를 생략한 장거리 근사이다. exact 식에서는 with-SI sensing range가 without-SI보다 작아질 수 없다.
 
 Effective RCS에 대한 with-SI sensing range의 scaling은
 
@@ -336,7 +336,7 @@ Monostatic 표적의 왕복 지연 \(\tau=2R/c\)를 적용하면
 - 작은 화면에서 세 번째 탭 제어부를 사용할 수 있도록 scroll 지원
 - Effective processing gain을 사용자가 조절하고 `Redraw`로 cached target-power SINR에 적용
 
-최종 점검에서는 `_fit_c2_power_slope()`에 누락된 `x`, `y` 초기화를 복구했다. 이 누락이 `Redraw` 마지막 validation 단계의 `name 'x' is not defined` 오류 원인이었다. 거리 span이 1.5배 미만이면 불안정한 기울기를 보고하지 않고, 그 이상이면 `log10(range)`에 대해 dBm 기울기를 적합한다. Python syntax 검사, 실제 Tk `Redraw` smoke test, 관련 회귀 테스트 9개가 통과했다. 또한 세 번째 탭 클래스에 중복 method 및 중복 GUI parameter key가 없음을 AST로 확인했다. 전체 test discovery는 계측기 제어용 선택 의존성인 `pyvisa`가 설치되지 않은 환경에서 하드웨어 모듈 import 단계가 제한된다.
+최종 점검에서는 `_fit_c2_power_slope()`에 누락된 `x`, `y` 초기화를 복구했다. 이 누락이 `Redraw` 마지막 validation 단계의 `name 'x' is not defined` 오류 원인이었다. 거리 span이 1.5배 미만이면 불안정한 기울기를 보고하지 않고, 그 이상이면 `log10(range)`에 대해 dBm 기울기를 적합한다. Python syntax 검사, 실제 Tk `Redraw` smoke test, 관련 회귀 테스트 11개가 통과했다. 또한 세 번째 탭 클래스에 중복 method 및 중복 GUI parameter key가 없음을 AST로 확인했다. 전체 test discovery는 계측기 제어용 선택 의존성인 `pyvisa`가 설치되지 않은 환경에서 하드웨어 모듈 import 단계가 제한된다.
 
 ## 11. 실제 측정 데이터에 의한 SI–echo 간섭 검증
 
@@ -706,13 +706,13 @@ N_{\mathrm{eff}}=\frac{(\sum_k w_k)^2}{\sum_k w_k^2}=526.5,
 | Coherent efficiency | 0.389 | ideal linear gain의 38.9% |
 | Sensitivity interval | 24--28 dB | 결과의 processing-gain 불확실성 범위 |
 
-SI-assisted sensing은 output SINR가 $G_{p,\mathrm{eff}}R^{-4}$에 비례하므로 range는 $G_{p,\mathrm{eff}}^{1/4}$에 비례한다. 따라서 26.0 dB의 range는 ideal 30.10 dB 결과의
+Exact SI-assisted sensing은 \(R^{-4}\)와 \(R^{-8}\) 항의 합이므로 processing gain에 대한 range 민감도는 cross-beat 지배 시 \(G_p^{1/4}\), self-beat 지배 시 \(G_p^{1/8}\) 사이에 있다. 따라서 26.0 dB의 range는 ideal 30.10 dB 결과의
 
 \[
 10^{(26.0-30.10)/40}=0.790
 \]
 
-배이다. Without-SI self-beat은 $G_{p,\mathrm{eff}}R^{-8}$이므로 해당 비율은 $10^{(26.0-30.10)/80}=0.889$이다. Communication range에는 sensing processing gain이 적용되지 않는다.
+배 이상이고, self-beat limit의 \(10^{(26.0-30.10)/80}=0.889\)배 이하이다. Without-SI는 후자의 0.889가 정확한 비율이다. Communication range에는 sensing processing gain이 적용되지 않는다.
 
 GUI에서는 ideal gain을 read-only 상한으로 표시하고, effective gain은 편집 가능하게 둔다. 입력값이 $BT_p$를 넘으면 계산에는 ideal bound가 적용되어 구현 효율이 1을 초과하지 않는다. `Redraw`를 누르면 cached target-only sensing SINR와 Effective-RCS 기반 sensing/ISAC range에 새 값이 반영된다.
 
@@ -723,20 +723,21 @@ GUI에서는 ideal gain을 read-only 상한으로 표시하고, effective gain�
 | Branch | 구현식 | 거리 법칙 | Effective-RCS 법칙 |
 |---|---|---:|---:|
 | Communication | \((1-\rho)m^2P_tG_c/(NR^2)\) | \(R^{-2}\) | RCS sweep과 무관 |
-| Sensing with SI | \(2\rho m^2G_{p,\mathrm{eff}}P_{\mathrm{SI}}P_{\mathrm{ec}}/(P_0N)\) | \(R^{-4}\) | \(\sigma_{\mathrm{eff}}\) |
+| Sensing with SI | \(2\rho m^2G_{p,\mathrm{eff}}[P_{\mathrm{SI}}P_{\mathrm{ec}}+P_{\mathrm{ec}}^2]/(P_0N)\) | \(R^{-4}+R^{-8}\) | \(\sigma_{\mathrm{eff}}+\sigma_{\mathrm{eff}}^2\) |
 | Sensing without SI | \(2\rho m^2G_{p,\mathrm{eff}}P_{\mathrm{ec}}^2/(P_0N)\) | \(R^{-8}\) | \(\sigma_{\mathrm{eff}}^2\) |
 
 여기서 \(P_0=1\) mW는 코드가 모든 power를 mW 숫자로 계산할 때 필요한 명시적 normalization reference이다. 따라서 range scaling은 다음과 같다.
 
 - \(R_{\mathrm{comm}}\propto[(1-\rho)P_t]^{1/2}\)
-- \(R_{\mathrm{sens,SI}}\propto[\rho G_{p,\mathrm{eff}}P_t^2\sigma_{\mathrm{eff}}]^{1/4}\)
+- \(R_{\mathrm{sens,SI}}\)는 \(C_4/R^4+C_8/R^8=\gamma_{\mathrm{th}}\)의 positive root
 - \(R_{\mathrm{sens,noSI}}\propto[\rho G_{p,\mathrm{eff}}P_t^2\sigma_{\mathrm{eff}}^2]^{1/8}\)
 
-두 sensing range 모두 \(\sigma_{\mathrm{eff}}^{1/4}\)에 비례하지만, processing gain에는 각각 \(G_p^{1/4}\)와 \(G_p^{1/8}\)로 반응한다. Communication range가 Effective-RCS sweep에서 일정한 것은 effective RCS를 \(\Gamma\)로 역산하지 않고, 통신 load mismatch를 고정하기 때문이다.
+두 sensing range 모두 \(\sigma_{\mathrm{eff}}^{1/4}\)에 정확히 비례한다. Exact with-SI range의 processing-gain 및 \(\rho\) 지수는 지배 항에 따라 \(1/8\)과 \(1/4\) 사이이며, without-SI는 \(1/8\)이다. Communication range가 Effective-RCS sweep에서 일정한 것은 effective RCS를 \(\Gamma\)로 역산하지 않고, 통신 load mismatch를 고정하기 때문이다.
 
 감사 과정에서 수정한 오류는 다음과 같다.
 
 - field product \(\alpha\beta\propto R^{-2}\)를 sensing SINR 자체로 사용하던 식을 power product \(P_{\mathrm{SI}}P_{\mathrm{ec}}\propto R^{-4}\)로 수정
+- with-SI 식에서 echo self-beat를 누락해 낮은 TX power에서 without-SI range보다 작아지던 오류를 수정하고, $C_4/R^4+C_8/R^8$의 positive root로 교체
 - ideal gain으로 계산한 뒤 effective-gain fourth-root correction을 다시 곱하던 이중 정규화 제거
 - without-SI range를 with-SI limiting point에서 간접 추론하던 경로를 \(P_{\mathrm{ec}}^2\) 식의 직접 eighth-root 해로 교체
 - raw C2 band power를 sensing SINR로 변환하던 fallback 제거
@@ -745,7 +746,7 @@ GUI에서는 ideal gain을 read-only 상한으로 표시하고, effective gain�
 - 실제 기본 C2 measurement NPZ 경로를 data/captures/range_1100mm으로 수정
 - 사용되지 않던 legacy range-anchor, exploratory SDINR/rho GUI, 중복 handler와 숨은 중복 파라미터 제거
 
-기본 C2 range-profile 측정값은 1.1 m에서 약 20.56 dB이며, manual raw-band-power 입력과 독립적인 sensing-SINR marker로 유지된다.
+기본 C2 range-profile 측정값은 1.1 m에서 약 20.56 dB이며, absolute sensing-SINR anchor로 유지된다. 1.0/1.2 m의 raw SI-on band-power는 공통 background를 선형 전력에서 제거한 뒤 이 anchor에 대한 상대 변화로 환산하여 약 23.45/17.90 dB의 band-power-based estimate로 표시한다. Raw C2 plot에는 noise floor로 평탄해질 수 있는 raw total과 계속 감소하는 target/echo-only power를 함께 표시한다.
 
 ## 18. 최종 결론
 
