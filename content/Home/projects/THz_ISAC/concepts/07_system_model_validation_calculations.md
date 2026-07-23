@@ -438,7 +438,78 @@ requirement. The saved \(1.1\)-m C2 range profile gives \(20.56\) dB, so the
 corrected model is conservative by about \(2.18\) dB at that measured point
 rather than being tens of decibels inconsistent with it.
 
-### 9.1 Previous C2 raw-band diagnostic
+### 9.1 Realizable UTC-PD photocurrent sweep
+
+The independent SI-power sweep is retained as a theoretical diagnostic, but
+the experimentally realizable control variable is UTC-PD photocurrent. Below
+saturation, the GUI uses
+
+\[
+P_t(I_{\mathrm{ph}})
+=P_{t,0}\left(\frac{I_{\mathrm{ph}}}{I_{\mathrm{ph},0}}\right)^2,
+\qquad
+P_{t,\mathrm{dBm}}
+=-10+20\log_{10}\left(\frac{I_{\mathrm{ph}}}{7~\mathrm{mA}}\right).
+\]
+
+At fixed isolation, target range, RCS, CSPR, and \(\rho\), both the SI carrier
+and echo RF powers scale with \(q=P_t/P_{t,0}\). Therefore the detector-output
+cross and self terms both scale as \(q^2\):
+
+\[
+P_{\mathrm{cross}}(q)=q^2P_{\mathrm{cross},0},
+\qquad
+P_{\mathrm{self}}(q)=q^2P_{\mathrm{self},0}.
+\]
+
+The sensing prediction used in the photocurrent figure is
+
+\[
+\gamma_{\mathrm{sens,on}}(q)
+=G_{p,\mathrm{eff}}\rho
+\frac{q^2(P_{\mathrm{cross},0}+P_{\mathrm{self},0})}
+{N_{\mathrm{base},0}
++q(N_{\mathrm{on},0}-N_{\mathrm{off},0})},
+\]
+
+while the no-SI curve retains only the echo self-beat and the SI-off detector
+noise. Thus sensing SINR has a \(2\)-dB/dB low-power slope when the baseline
+noise dominates and approaches a \(1\)-dB/dB slope when SI--noise beating
+dominates.
+
+The `Photocurrent SINR` button opens a separate two-panel figure so the
+existing SI-power figure remains unchanged. Its primary x-axis is measured
+photocurrent and its secondary x-axis is the calibrated equivalent THz Tx
+power. The top panel compares communication simulation with measured
+\(-\mathrm{EVM}_{\mathrm{dB}}\). The bottom panel compares with-SI and no-SI
+sensing simulations with raw-C2 matched-filter SINR proxies.
+
+The measured sensing markers are not copied from the saved C2 summary. Every
+`rx__C2__sig` waveform in `data/captures/photocurrent` is downconverted,
+resampled, synchronized, and matched-filtered again using its embedded
+`tx__*` reference. All captures use the same \(1.014\)-m target ROI; this
+prevents a weak target from being replaced by the \(0.05\)-m zero-guard edge.
+The plotted proxy is the selected target-bin profile level relative to the
+median out-of-guard profile background. Filled sensing markers exceed the
+13.2-dB threshold; open markers are non-detections/low-confidence ROI peaks.
+
+The resulting comparison should be interpreted as follows:
+
+- communication measurements approach the detector-reference simulation
+  smoothly as photocurrent increases;
+- at 6.5 and 7 mA, the 16QAM raw-C2 values are 19.60 and 19.55 dB, versus
+  phase-averaged simulations of 18.65 and 19.84 dB;
+- the remaining raw-C2 points, including the 32QAM series, lie around
+  3--6 dB and are not monotonic with photocurrent.
+
+Consequently the phase-averaged calculation is a plausible upper-envelope
+link budget, but it does not predict every single coherent capture.
+SI--echo phase/frequency-selective fading can produce deep sensing outages
+even while communication improves monotonically. The low raw-C2 markers
+must not be fitted away or presented as independent calibrated absolute
+SINR measurements.
+
+### 9.2 Previous C2 raw-band diagnostic
 
 raw C2 curve는
 
@@ -453,7 +524,7 @@ P_{\mathrm{raw}}=P_{\mathrm{background}}+P_{\mathrm{target}}
 Sensing SINR에는 raw total을 사용하지 않고 분리한 target-only power를
 사용한다. SI-on target은 \(R^{-4}+R^{-8}\), SI-off target은 \(R^{-8}\)이다.
 
-### 9.2 Measured sensing-SINR markers
+### 9.3 Measured sensing-SINR markers
 
 The three measured C2 raw-band powers and one absolute profile-SINR
 measurement do not share the simulator's detector-noise reference plane.

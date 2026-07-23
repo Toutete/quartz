@@ -67,6 +67,7 @@ def _validation_model():
         "lna_ip1db_dbm": -20.0,
         "si_sinr_ylim_min": -10.0,
         "si_sinr_ylim_max": 50.0,
+        "photocurrent_target_range_m": 1.014,
     }
     model.params = {key: _Var(value) for key, value in values.items()}
     model.meas_points = []
@@ -321,6 +322,44 @@ class SystemModelValidationMathTest(unittest.TestCase):
         )
         self.assertAlmostEqual(noise_off / expected_off, 1.0, places=10)
         self.assertAlmostEqual(noise_ref / expected_on, 1.0, places=10)
+
+    def test_photocurrent_model_uses_joint_tx_scaling(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        curves = model._photocurrent_model_curves()
+        current = np.asarray(curves["photocurrent_ma"], dtype=np.float64)
+        tx_power = np.asarray(curves["tx_power_dbm"], dtype=np.float64)
+        sensing_on = np.asarray(curves["sensing_on_db"], dtype=np.float64)
+        sensing_off = np.asarray(curves["sensing_off_db"], dtype=np.float64)
+        self.assertAlmostEqual(float(tx_power[-1]), -10.0, places=10)
+        self.assertAlmostEqual(
+            float(tx_power[0]),
+            -10.0 + 20.0 * np.log10(4.5 / 7.0),
+            places=10,
+        )
+        self.assertTrue(np.all(np.diff(current) > 0.0))
+        self.assertTrue(np.all(np.diff(sensing_on) > 0.0))
+        self.assertTrue(np.all(sensing_on >= sensing_off))
+        self.assertGreater(float(sensing_on[-1]), 13.2)
+
+    def test_raw_photocurrent_capture_reprocessing_finds_known_target(self):
+        model = _validation_model()
+        path = (
+            Path(__file__).resolve().parent
+            / "data"
+            / "captures"
+            / "photocurrent"
+            / "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph6.5.npz"
+        )
+        result = model._reprocess_photocurrent_capture(path, 1.014, 13.2)
+        self.assertAlmostEqual(float(result["target_peak_m"]), 1.014, delta=0.002)
+        self.assertAlmostEqual(
+            float(result["sensing_sinr_db"]), 19.60335, delta=0.05
+        )
+        self.assertTrue(bool(result["target_detected"]))
 
     def test_low_tx_with_si_range_remains_above_no_si_range(self):
         model = _validation_model()

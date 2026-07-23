@@ -13987,18 +13987,29 @@ class SystemModelValidationPanel:
             baseline_mw + si_excess_ref_mw * scale, dtype=np.float64
         )
 
-    def _detector_si_power_scale(self) -> float:
-        """Return current SI carrier power relative to the detector reference."""
-        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+    def _detector_si_power_scale(
+        self, tx_power_dbm: np.ndarray | float | None = None
+    ) -> np.ndarray | float:
+        """Return SI carrier power relative to the detector reference."""
+        tx_dbm = (
+            self._float("sweep_tx_power_dbm", -10.0)
+            if tx_power_dbm is None
+            else np.asarray(tx_power_dbm, dtype=np.float64)
+        )
         tx_ref_dbm = self._float(
-            "detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", tx_dbm)
+            "detector_ref_tx_dbm",
+            self._float(
+                "theory_tx_ref_dbm",
+                float(np.asarray(tx_dbm, dtype=np.float64).reshape(-1)[0]),
+            ),
         )
         iso_db = self._theory_isolation_db()
         iso_ref_db = self._float("detector_ref_iso_db", iso_db)
-        return float(
+        scale = (
             10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
             * 10.0 ** ((iso_ref_db - iso_db) / 10.0)
         )
+        return float(scale) if np.ndim(scale) == 0 else np.asarray(scale, dtype=np.float64)
 
     def _noise_power_mw(self) -> float:
         if "system_nf_db" in self.params:
@@ -14038,7 +14049,10 @@ class SystemModelValidationPanel:
         }
 
     def _comm_sinr_from_reference(
-        self, ranges_m: np.ndarray | float, rho: np.ndarray | float
+        self,
+        ranges_m: np.ndarray | float,
+        rho: np.ndarray | float,
+        tx_power_dbm: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Propagate EVM-equivalent C1 SINR from one physical simulation point.
 
@@ -14070,7 +14084,11 @@ class SystemModelValidationPanel:
                 1.0 - 1e-12,
             )
         )
-        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_dbm = (
+            self._float("sweep_tx_power_dbm", -10.0)
+            if tx_power_dbm is None
+            else np.asarray(tx_power_dbm, dtype=np.float64)
+        )
         tx_ref_dbm = self._float(
             "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0)
         )
@@ -14256,6 +14274,7 @@ class SystemModelValidationPanel:
         self,
         rho: np.ndarray | float,
         rcs_dbsm: np.ndarray | float,
+        tx_power_dbm: np.ndarray | float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return detector-domain C4/C8 coefficients for an RCS sweep.
 
@@ -14269,9 +14288,15 @@ class SystemModelValidationPanel:
         source_var = self.params.get("detector_reference_source")
         source = source_var.get().strip().lower() if source_var is not None else ""
         if source != "simulation":
+            tx_shape_value = (
+                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                if tx_power_dbm is None
+                else np.asarray(tx_power_dbm, dtype=np.float64)
+            )
             shape = np.broadcast_arrays(
                 np.asarray(rho, dtype=np.float64),
                 np.asarray(rcs, dtype=np.float64),
+                tx_shape_value,
             )[0].shape
             missing = np.full(shape, np.nan, dtype=np.float64)
             return missing.copy(), missing
@@ -14306,9 +14331,15 @@ class SystemModelValidationPanel:
             and np.isfinite(cross_mw) and cross_mw >= 0.0
             and np.isfinite(self_mw) and self_mw >= 0.0
         ):
+            tx_shape_value = (
+                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                if tx_power_dbm is None
+                else np.asarray(tx_power_dbm, dtype=np.float64)
+            )
             shape = np.broadcast_arrays(
                 np.asarray(rho, dtype=np.float64),
                 np.asarray(rcs, dtype=np.float64),
+                tx_shape_value,
             )[0].shape
             missing = np.full(shape, np.nan, dtype=np.float64)
             return missing.copy(), missing
@@ -14319,7 +14350,11 @@ class SystemModelValidationPanel:
         rho_arr = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
         rho_scale = rho_arr / rho_ref
 
-        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_dbm = (
+            self._float("sweep_tx_power_dbm", -10.0)
+            if tx_power_dbm is None
+            else np.asarray(tx_power_dbm, dtype=np.float64)
+        )
         tx_ref_dbm = self._float("detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0))
         # Both RF fields scale as sqrt(P_t); detector-output target power
         # therefore scales as P_t^2.
@@ -14335,8 +14370,8 @@ class SystemModelValidationPanel:
         # SI--noise beating is already present in the calibrated detector
         # noise.  Scale only the positive SI-on minus SI-off component when
         # transmit power or isolation moves away from the reference.
-        si_power_scale = self._detector_si_power_scale()
-        noise_mw = float(self._detector_output_noise_mw(si_power_scale))
+        si_power_scale = self._detector_si_power_scale(tx_dbm)
+        noise_mw = self._detector_output_noise_mw(si_power_scale)
 
         rcs_ref_dbsm = self._float(
             "detector_ref_rcs_dbsm",
@@ -14347,8 +14382,12 @@ class SystemModelValidationPanel:
 
         # The detector components contain the complete unit-power waveform.
         # Only rho_ref is the sensing-pilot fraction in the Sec. II model.
-        cross_snr_ref = gp * rho_ref * cross_mw / max(noise_mw, 1e-30)
-        self_snr_ref = gp * rho_ref * self_mw / max(noise_mw, 1e-30)
+        cross_snr_ref = (
+            gp * rho_ref * cross_mw / np.maximum(noise_mw, 1e-30)
+        )
+        self_snr_ref = (
+            gp * rho_ref * self_mw / np.maximum(noise_mw, 1e-30)
+        )
         c4 = (
             cross_snr_ref
             * common_scale
@@ -14543,6 +14582,7 @@ class SystemModelValidationPanel:
         hidden("cspr_db", "13")
         hidden("theory_tx_ref_dbm", "-10")
         hidden("effective_rcs_dbsm", "-19.10")
+        hidden("photocurrent_target_range_m", "1.014")
 
         btns = ttk.Frame(ctrl)
         btns.grid(row=38, column=0, columnspan=2, sticky="ew", pady=(8, 0))
@@ -14555,6 +14595,14 @@ class SystemModelValidationPanel:
         ttk.Button(action_btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(action_btns, text="Save Figures", command=self._save_all_figures).pack(side=tk.LEFT, padx=(6, 0))
 
+        photocurrent_btns = ttk.Frame(ctrl)
+        photocurrent_btns.grid(row=40, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Button(
+            photocurrent_btns,
+            text="Photocurrent SINR",
+            command=self._show_photocurrent_sinr,
+        ).pack(side=tk.LEFT)
+
         self.save_legend_var = tk.BooleanVar(value=True)
         self.sinr_log_range_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -14562,22 +14610,22 @@ class SystemModelValidationPanel:
             text="Log range axis for SINR figure",
             variable=self.sinr_log_range_var,
             command=self._refresh_plot,
-        ).grid(row=40, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ).grid(row=41, column=0, columnspan=2, sticky="w", pady=(5, 0))
         self.isac_log_range_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             ctrl,
             text="Log ISAC range y axis",
             variable=self.isac_log_range_var,
             command=self._refresh_plot,
-        ).grid(row=41, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=42, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(
             ctrl,
             text="Include legend in saved PNG",
             variable=self.save_legend_var,
-        ).grid(row=42, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=43, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=280).grid(
-            row=43, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+            row=44, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
         ctrl.columnconfigure(1, weight=1)
 
@@ -14593,6 +14641,8 @@ class SystemModelValidationPanel:
         self._symbol_sweep_queue: queue.Queue = queue.Queue()
         self._symbol_sweep_running = False
         self._evm_radar_plot_cache: dict[str, object] | None = None
+        self._photocurrent_measurements_cache: list[dict[str, float | str]] | None = None
+        self._photocurrent_processing = False
         try:
             if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
                 cfg = self.photonic_source._cfg_from_ui()
@@ -15555,6 +15605,436 @@ class SystemModelValidationPanel:
             self._style_paper_legend(legend, 10.5 if for_save else 8.5)
         self._style_ieee_axis(ax)
 
+    @staticmethod
+    def _offline_value_var(value):
+        """Return the minimal get/set object needed by offline DSO DSP."""
+        class _OfflineValue:
+            def __init__(self, initial):
+                self.value = str(initial)
+
+            def get(self):
+                return self.value
+
+            def set(self, new_value):
+                self.value = str(new_value)
+
+        return _OfflineValue(value)
+
+    def _reprocess_photocurrent_capture(
+        self,
+        path: Path,
+        target_range_m: float,
+        sensing_threshold_db: float,
+    ) -> dict[str, float | str]:
+        """Reprocess one saved raw C2 waveform at a fixed target-range ROI."""
+        with np.load(path, allow_pickle=True) as loaded:
+            if "rx__C2__sig" not in loaded.files or "rx__C2__fs" not in loaded.files:
+                raise ValueError(f"{path.name}: raw C2 DSO waveform is missing")
+            payload_host = object.__new__(DsoPanel)
+            payload = payload_host._tx_payload_from_npz(loaded)
+            c2_signal = np.asarray(loaded["rx__C2__sig"], dtype=np.float64)
+            c2_fs = float(np.asarray(loaded["rx__C2__fs"]).reshape(-1)[0])
+            try:
+                modulation = str(np.asarray(loaded["modulation"]).reshape(-1)[0])
+            except Exception:
+                modulation = str(payload.get("modulation", "unknown"))
+            try:
+                photocurrent_ma = float(
+                    np.asarray(loaded["photocurrent_ma"]).reshape(-1)[0]
+                )
+            except Exception:
+                photocurrent_ma = float("nan")
+            evm_db = self._metric_float_from_loaded(loaded, "evm_db")
+            stored_c2_snr_db = self._metric_float_from_loaded(
+                loaded, "snr_com_db_c2", "snr_rad_db"
+            )
+
+        # Reuse the exact DSO-tab matched-filter path without constructing Tk
+        # widgets.  A fixed reference center makes every capture use the same
+        # 1.014-m target ROI instead of selecting the zero-guard edge.
+        dso = object.__new__(DsoPanel)
+        dso.runtime = {
+            "lfm_range_zero_by_ch": {
+                "C2": {
+                    "abs_range_m": float(target_range_m),
+                    "profile_center_m": float(target_range_m),
+                }
+            }
+        }
+        dso.log_q = queue.Queue()
+        dso.fc_var = self._offline_value_var(
+            float(payload.get("if_freq", 11e9)) / 1e9
+        )
+        dso.sr_var = self._offline_value_var(
+            float(payload.get("symbol_rate_actual", payload.get("symbol_rate", 15e9)))
+            / 1e9
+        )
+        dso.demod_beta_var = self._offline_value_var(
+            payload.get("qam_rrc_beta", 0.20)
+        )
+        dso.demod_mod_var = self._offline_value_var(modulation)
+        dso.auto_sync_tx_params_var = self._offline_value_var(False)
+        dso.live_var = self._offline_value_var(False)
+        dso._last_loaded_capture_path = str(path)
+        dso.range_mode_var = self._offline_value_var(
+            "Row1 one-way, Row2 monostatic"
+        )
+        dso.range_target_m_var = self._offline_value_var(0.0)
+        dso.range_tolerance_m_var = self._offline_value_var(40.0)
+
+        result = dso._compute_isac_range_profile_for_signal(
+            c2_signal,
+            c2_fs,
+            payload,
+            ch_label="C2",
+            row=1,
+        )
+        peak_m = float(result.get("est_range", float("nan")))
+        sensing_sinr_db = float(
+            result.get("range_profile_snr_db", float("nan"))
+        )
+        return {
+            "filename": path.name,
+            "modulation": modulation,
+            "photocurrent_ma": photocurrent_ma,
+            "tx_power_dbm": calc_utcpd_output_dbm(photocurrent_ma),
+            "comm_sinr_db": -evm_db if np.isfinite(evm_db) else float("nan"),
+            "sensing_sinr_db": sensing_sinr_db,
+            "stored_c2_snr_db": stored_c2_snr_db,
+            "target_peak_m": peak_m,
+            "pslr_db": float(result.get("pslr_db", float("nan"))),
+            "cfr_coherence": float(
+                result.get("si_cfr_coherence", float("nan"))
+            ),
+            "target_detected": bool(
+                np.isfinite(sensing_sinr_db)
+                and sensing_sinr_db >= float(sensing_threshold_db)
+                and np.isfinite(peak_m)
+                and abs(peak_m - target_range_m) <= 0.04
+            ),
+            "source": "raw C2 DSO matched filter, fixed target ROI",
+        }
+
+    def _load_photocurrent_measurements(
+        self,
+        force: bool = False,
+        target_range_m: float | None = None,
+        sensing_threshold_db: float | None = None,
+    ) -> list[dict[str, float | str]]:
+        cached = getattr(self, "_photocurrent_measurements_cache", None)
+        if cached is not None and not force:
+            return list(cached)
+        capture_dir = APP_DIR / "data" / "captures" / "photocurrent"
+        target_range = max(
+            self._float("photocurrent_target_range_m", 1.014)
+            if target_range_m is None
+            else float(target_range_m),
+            1e-6,
+        )
+        threshold_db = (
+            self._float("sens_req_snr_db", 13.2)
+            if sensing_threshold_db is None
+            else float(sensing_threshold_db)
+        )
+        measurements: list[dict[str, float | str]] = []
+        for path in sorted(capture_dir.glob("Data_*.npz")):
+            try:
+                measurements.append(
+                    self._reprocess_photocurrent_capture(
+                        path, target_range, threshold_db
+                    )
+                )
+            except Exception:
+                continue
+        measurements.sort(
+            key=lambda point: (
+                str(point.get("modulation", "")),
+                float(point.get("photocurrent_ma", float("nan"))),
+            )
+        )
+        self._photocurrent_measurements_cache = list(measurements)
+        return measurements
+
+    def _photocurrent_model_curves(self) -> dict[str, np.ndarray | float]:
+        """Return fixed-range SINR curves for a realizable photocurrent sweep."""
+        current_ma = np.linspace(4.5, 7.0, 201)
+        tx_power_dbm = -10.0 + 20.0 * np.log10(current_ma / 7.0)
+        target_range_m = max(
+            self._float("photocurrent_target_range_m", 1.014), 1e-6
+        )
+        rho = float(np.clip(self._float("rho", 0.20), 1e-9, 1.0 - 1e-9))
+        rcs_dbsm = self._float("effective_rcs_dbsm", -4.28)
+
+        comm_sinr = self._comm_sinr_from_reference(
+            target_range_m, rho, tx_power_dbm=tx_power_dbm
+        )
+        c4, c8 = self._detector_domain_sensing_coefficients(
+            rho,
+            rcs_dbsm,
+            tx_power_dbm=tx_power_dbm,
+        )
+        sensing_on = (
+            np.asarray(c4, dtype=np.float64) / target_range_m ** 4
+            + np.asarray(c8, dtype=np.float64) / target_range_m ** 8
+        )
+        si_scale = self._detector_si_power_scale(tx_power_dbm)
+        noise_on_mw = self._detector_output_noise_mw(si_scale)
+        noise_off_mw = float(self._detector_output_noise_mw(0.0))
+        sensing_off = (
+            np.asarray(c8, dtype=np.float64)
+            * np.asarray(noise_on_mw, dtype=np.float64)
+            / max(noise_off_mw, 1e-30)
+            / target_range_m ** 8
+        )
+        return {
+            "photocurrent_ma": current_ma,
+            "tx_power_dbm": tx_power_dbm,
+            "comm_sinr_db": 10.0
+            * np.log10(np.maximum(np.asarray(comm_sinr), 1e-300)),
+            "sensing_on_db": 10.0
+            * np.log10(np.maximum(sensing_on, 1e-300)),
+            "sensing_off_db": 10.0
+            * np.log10(np.maximum(sensing_off, 1e-300)),
+            "target_range_m": target_range_m,
+            "rcs_dbsm": rcs_dbsm,
+            "rho": rho,
+        }
+
+    def _draw_photocurrent_sinr_figure(
+        self,
+        fig: Figure,
+        measurements: list[dict[str, float | str]] | None = None,
+        for_save: bool = False,
+    ) -> None:
+        from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+
+        data = (
+            self._load_photocurrent_measurements()
+            if measurements is None
+            else measurements
+        )
+        curves = self._photocurrent_model_curves()
+        current = np.asarray(curves["photocurrent_ma"], dtype=np.float64)
+        fig.set_size_inches(7.4, 6.0, forward=True)
+        axes = np.asarray(fig.subplots(2, 1, sharex=True), dtype=object)
+        ax_comm, ax_sens = axes
+        linewidth = 2.0 if for_save else 1.7
+
+        ax_comm.plot(
+            current,
+            np.asarray(curves["comm_sinr_db"], dtype=np.float64),
+            color="#0000ff",
+            linewidth=linewidth,
+            label="Simulation",
+        )
+        ax_sens.plot(
+            current,
+            np.asarray(curves["sensing_on_db"], dtype=np.float64),
+            color="#ff0000",
+            linewidth=linewidth,
+            label="Simulation, with SI",
+        )
+        ax_sens.plot(
+            current,
+            np.asarray(curves["sensing_off_db"], dtype=np.float64),
+            color="#008000",
+            linestyle="--",
+            linewidth=linewidth,
+            label="Simulation, without SI",
+        )
+
+        marker_by_mod = {"32QAM": "s", "16QAM": "^"}
+        for modulation in ("32QAM", "16QAM"):
+            points = [
+                point
+                for point in data
+                if str(point.get("modulation", "")).strip().upper() == modulation
+            ]
+            if not points:
+                continue
+            x = np.asarray(
+                [point["photocurrent_ma"] for point in points], dtype=np.float64
+            )
+            comm = np.asarray(
+                [point["comm_sinr_db"] for point in points], dtype=np.float64
+            )
+            sensing = np.asarray(
+                [point["sensing_sinr_db"] for point in points], dtype=np.float64
+            )
+            marker = marker_by_mod[modulation]
+            ax_comm.scatter(
+                x,
+                comm,
+                marker=marker,
+                s=50 if for_save else 42,
+                facecolors="none",
+                edgecolors="#0000aa",
+                linewidths=1.3,
+                zorder=5,
+                label=f"Measured −EVM, {modulation}",
+            )
+            detected = np.asarray(
+                [bool(point.get("target_detected", False)) for point in points],
+                dtype=bool,
+            )
+            if np.any(~detected):
+                ax_sens.scatter(
+                    x[~detected],
+                    sensing[~detected],
+                    marker=marker,
+                    s=50 if for_save else 42,
+                    facecolors="none",
+                    edgecolors="#aa0000",
+                    linewidths=1.3,
+                    zorder=5,
+                    label=f"Raw C2 MF-SINR proxy, {modulation}",
+                )
+            if np.any(detected):
+                ax_sens.scatter(
+                    x[detected],
+                    sensing[detected],
+                    marker=marker,
+                    s=50 if for_save else 42,
+                    facecolors="#ff0000",
+                    edgecolors="#660000",
+                    linewidths=0.9,
+                    zorder=6,
+                    label=(
+                        f"Raw C2 MF-SINR proxy, {modulation}"
+                        if not np.any(~detected)
+                        else None
+                    ),
+                )
+
+        comm_threshold = self._float("comm_req_snr_db", 15.75)
+        sensing_threshold = self._float("sens_req_snr_db", 13.2)
+        ax_comm.axhline(
+            comm_threshold,
+            color="#666666",
+            linestyle=(0, (2, 2)),
+            linewidth=1.0,
+            label=rf"Required {comm_threshold:.1f} dB",
+        )
+        ax_sens.axhline(
+            sensing_threshold,
+            color="#666666",
+            linestyle=(0, (2, 2)),
+            linewidth=1.0,
+            label=rf"Required {sensing_threshold:.1f} dB",
+        )
+
+        def current_to_tx(current_value):
+            values = np.asarray(current_value, dtype=np.float64)
+            return -10.0 + 20.0 * np.log10(np.maximum(values, 1e-12) / 7.0)
+
+        def tx_to_current(tx_value):
+            return 7.0 * 10.0 ** (
+                (np.asarray(tx_value, dtype=np.float64) + 10.0) / 20.0
+            )
+
+        secondary = ax_comm.secondary_xaxis(
+            "top", functions=(current_to_tx, tx_to_current)
+        )
+        secondary.set_xlabel("Equivalent THz Tx power (dBm)")
+        ax_comm.set_ylabel("Communication SINR (dB)")
+        ax_sens.set_ylabel("Sensing SINR (dB)")
+        ax_sens.set_xlabel(r"UTC-PD photocurrent, $I_{\mathrm{ph}}$ (mA)")
+        ax_sens.set_xlim(
+            float(np.min(current)) - 0.10, float(np.max(current)) + 0.10
+        )
+        ax_sens.xaxis.set_major_locator(MultipleLocator(0.5))
+
+        for ax in axes:
+            ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
+            ax.grid(True, which="minor", color="#e2e8f0", linewidth=0.35, alpha=0.45)
+            ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+            legend = ax.legend(
+                loc="center left",
+                fontsize=9.5 if for_save else 8.0,
+                frameon=True,
+                bbox_to_anchor=(1.01, 0.5),
+            )
+            self._style_paper_legend(legend, 9.5 if for_save else 8.0)
+            self._style_ieee_axis(ax)
+        ax_sens.xaxis.set_minor_locator(AutoMinorLocator(2))
+        target_range_m = float(curves["target_range_m"])
+        ax_sens.text(
+            0.02,
+            0.03,
+            (
+                rf"$R={target_range_m:.3f}$ m, "
+                rf"$\sigma_{{\mathrm{{eff}}}}={float(curves['rcs_dbsm']):.2f}$ dBsm, "
+                rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():.1f}$ dB"
+            ),
+            transform=ax_sens.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=8.5 if for_save else 7.5,
+            color="#333333",
+        )
+        fig.tight_layout(pad=0.5)
+
+    def _open_photocurrent_sinr_window(
+        self, measurements: list[dict[str, float | str]]
+    ) -> None:
+        win = tk.Toplevel(self.parent)
+        win.title("SINR vs UTC-PD Photocurrent")
+        win.geometry("980x820")
+        fig = Figure(figsize=(7.4, 6.6), dpi=100)
+        self._draw_photocurrent_sinr_figure(
+            fig, measurements=measurements, for_save=False
+        )
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.draw_idle()
+
+    def _show_photocurrent_sinr(self) -> None:
+        cached = getattr(self, "_photocurrent_measurements_cache", None)
+        if cached is not None:
+            self._open_photocurrent_sinr_window(
+                list(cached)
+            )
+            return
+        if self._photocurrent_processing:
+            return
+        self._photocurrent_processing = True
+        target_range_m = max(
+            self._float("photocurrent_target_range_m", 1.014), 1e-6
+        )
+        sensing_threshold_db = self._float("sens_req_snr_db", 13.2)
+        self.status_var.set(
+            f"Reprocessing raw C2 photocurrent captures at the fixed "
+            f"{target_range_m:.3f}-m ROI..."
+        )
+
+        def worker():
+            try:
+                measurements = self._load_photocurrent_measurements(
+                    force=True,
+                    target_range_m=target_range_m,
+                    sensing_threshold_db=sensing_threshold_db,
+                )
+
+                def finish():
+                    self._photocurrent_processing = False
+                    self.status_var.set(
+                        f"Photocurrent plot: {len(measurements)} raw captures reprocessed."
+                    )
+                    self._open_photocurrent_sinr_window(measurements)
+
+                self.parent.after(0, finish)
+            except Exception as exc:
+                def fail(message=str(exc)):
+                    self._photocurrent_processing = False
+                    self.status_var.set(f"Photocurrent processing failed: {message}")
+                    messagebox.showerror(
+                        "Photocurrent SINR", message, parent=self.parent
+                    )
+
+                self.parent.after(0, fail)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _save_all_figures(self) -> None:
         if not self._evm_radar_plot_cache:
             self._refresh_plot()
@@ -15569,6 +16049,14 @@ class SystemModelValidationPanel:
             ("evm_vs_symbol_rate.png", lambda fig: self._draw_symbol_rate_axis(fig.add_subplot(111), self.symbol_rate_sweep, for_save=True)),
             ("sensing_sinr_vs_si_power.png", lambda fig: self._draw_si_power_axis(fig.add_subplot(111), for_save=True)),
             ("isac_range_vs_effective_rcs.png", self._draw_rcs_comparison_figure),
+            (
+                "sinr_vs_utcpd_photocurrent.png",
+                lambda fig: self._draw_photocurrent_sinr_figure(
+                    fig,
+                    measurements=self._load_photocurrent_measurements(),
+                    for_save=True,
+                ),
+            ),
         ]
         try:
             saved_names: list[str] = []
@@ -15580,7 +16068,7 @@ class SystemModelValidationPanel:
                 fig.savefig(path, dpi=600, bbox_inches="tight", facecolor="white")
                 fig.clear()
                 saved_names.append(filename)
-            self.status_var.set(f"Saved 4 figures to {output_dir}")
+            self.status_var.set(f"Saved {len(saved_names)} figures to {output_dir}")
             messagebox.showinfo(
                 "Save Figures",
                 "Saved to data folder:\n" + "\n".join(saved_names),
