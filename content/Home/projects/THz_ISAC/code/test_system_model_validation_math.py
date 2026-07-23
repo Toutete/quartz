@@ -1,11 +1,18 @@
 import unittest
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
+from matplotlib.figure import Figure
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from isac_gui import SimConfig, SystemModelValidationPanel, calc_isac_link_budget
+from isac_gui import (
+    DEFAULT_ISAC_SIM_PRESET,
+    SimConfig,
+    SystemModelValidationPanel,
+    calc_isac_link_budget,
+)
 
 
 class _Var:
@@ -75,6 +82,16 @@ def _validation_model():
 
 
 class SystemModelValidationMathTest(unittest.TestCase):
+    def test_requested_simulation_preset_is_packaged_as_the_default(self):
+        self.assertEqual(
+            DEFAULT_ISAC_SIM_PRESET.name,
+            "isac_sim_params_20260724_015432.json",
+        )
+        preset = json.loads(DEFAULT_ISAC_SIM_PRESET.read_text(encoding="utf-8"))
+        self.assertEqual(preset["params"]["effective_rcs_dbsm"], "-8")
+        self.assertEqual(preset["awg"]["modulation_var"], "32QAM")
+        self.assertEqual(preset["awg"]["pilot_rho_var"], "0.20")
+
     def test_default_simulation_uses_measured_direct_effective_rcs(self):
         cfg = SimConfig()
         self.assertEqual(cfg.target_rcs_mode, "direct_effective")
@@ -368,6 +385,44 @@ class SystemModelValidationMathTest(unittest.TestCase):
         self.assertTrue(np.all(sensing_on >= sensing_off))
         self.assertGreater(float(sensing_on[-1]), 13.2)
 
+    def test_photocurrent_figure_places_tx_power_on_bottom_axis(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        fig = Figure()
+        model._draw_photocurrent_sinr_figure(fig, for_save=False)
+        primary = fig.axes[0]
+        self.assertEqual(primary.get_xlabel(), "Equivalent THz Tx power (dBm)")
+        self.assertEqual(
+            primary.child_axes[0].get_xlabel(),
+            r"UTC-PD photocurrent, $I_{\mathrm{ph}}$ (mA)",
+        )
+
+    def test_processing_gain_keeps_rho_as_a_separate_physical_factor(self):
+        model = _validation_model()
+        self.assertAlmostEqual(
+            float(model._pilot_weighted_processing_gain_db(0.20)),
+            26.0 + 10.0 * np.log10(0.20),
+            places=10,
+        )
+
+    def test_packaged_model_matches_detected_photocurrent_scale(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        modeled = float(model._photocurrent_model_curves()["sensing_on_db"][-1])
+        measured = next(
+            float(point["sensing_sinr_db"])
+            for point in model._load_photocurrent_measurements()
+            if point["modulation"] == "16QAM"
+            and float(point["photocurrent_ma"]) == 7.0
+        )
+        self.assertLess(abs(measured - modeled), 2.0)
+
     def test_missing_reference_returns_tx_sweep_shaped_comm_nan(self):
         model = _validation_model()
         model.params["detector_reference_source"] = _Var("")
@@ -410,6 +465,22 @@ class SystemModelValidationMathTest(unittest.TestCase):
         self.assertAlmostEqual(float(result["target_peak_m"]), 1.014, delta=0.002)
         self.assertAlmostEqual(
             float(result["sensing_sinr_db"]), 19.60335, delta=0.05
+        )
+        self.assertTrue(bool(result["target_detected"]))
+
+    def test_1100mm_raw_capture_uses_robust_median_profile_floor(self):
+        model = _validation_model()
+        path = (
+            Path(__file__).resolve().parent
+            / "data"
+            / "captures"
+            / "range_1100mm"
+            / "Data_range_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph7.npz"
+        )
+        result = model._reprocess_photocurrent_capture(path, 1.1, 13.2)
+        self.assertAlmostEqual(float(result["target_peak_m"]), 1.1, delta=0.003)
+        self.assertAlmostEqual(
+            float(result["sensing_sinr_db"]), 17.75696, delta=0.05
         )
         self.assertTrue(bool(result["target_detected"]))
 

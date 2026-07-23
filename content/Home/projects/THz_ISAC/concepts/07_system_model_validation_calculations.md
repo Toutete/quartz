@@ -508,10 +508,11 @@ noise dominates and approaches a \(1\)-dB/dB slope when SI--noise beating
 dominates.
 
 The `Sensing vs Photocurrent` button opens a separate single-panel sensing
-figure, so the existing SI-power figure remains unchanged. Its primary x-axis
-is measured photocurrent and its secondary x-axis is the calibrated equivalent
-THz Tx power. The figure compares with-SI and no-SI model curves with raw-C2
-matched-filter SINR proxies. Communication SINR is intentionally omitted.
+figure, so the existing SI-power figure remains unchanged. Its lower primary
+x-axis is the calibrated equivalent THz Tx power and its upper secondary axis
+is measured photocurrent. The figure compares with-SI and no-SI model curves
+with raw-C2 matched-filter SINR proxies. Communication SINR is intentionally
+omitted.
 
 The measured sensing markers are not copied from the saved C2 summary. The raw
 `rx__C2__sig` waveforms were downconverted, resampled, synchronized, and
@@ -600,7 +601,7 @@ sample curve가 아니라, 논문 link-budget에 해당하는 phase-averaged env
 
 ## 11. 2026-07-24 numerical sanity check
 
-`isac_sim_params_20260720.json`의 direct effective RCS를 강제로 coupled
+고정 packaged detector reference의 direct effective RCS를 강제로 coupled
 model로 덮어쓰지 않고, \(R_0=1\) m, \(P_t=-10\) dBm, isolation 24 dB,
 direct effective RCS \(-6.0\) dBsm, seed 0으로 계산한 결과:
 
@@ -670,3 +671,59 @@ SI--noise beating이 지나치게 크면 SINR/range 개선까지 보장되지는
 - detector reference: 현재 UI의 `SimConfig`와 마지막 실행 config가 같으면
   `Sync Sim`으로 exact reference를 재사용; 다르면 packaged fixed reference를
   표시하고 `Range Sweep`으로 현재 구성에 맞게 재보정
+
+## 14. 1.1 m 측정값과 26-dB gain의 해석
+
+`data/captures/range_1100mm/Data_range_fIF11_fsym15_P-8_fRF280_`
+`DFT-s-OFDM_32QAM_Iph7.npz`에는 서로 다른 기준면의 수치가 함께 있다.
+
+| 산출 경로 | Sensing metric |
+|---|---:|
+| 저장 당시 C2 range profile, peak minus median floor | 20.562 dB |
+| 저장 raw C2를 현재 DSO matched-filter 경로로 재처리, fixed 1.1-m ROI와 median floor | 17.757 dB |
+| 같은 재처리 profile에서 낮은 10-percentile floor 사용 | 25.786 dB |
+| 저장 pre-DSP C2 band SNR | 3.956 dB |
+
+따라서 약 25.8 dB는 재현 가능하지만, profile background의 낮은
+10-percentile을 noise floor로 선택했을 때의 값이다. 이는 typical
+background를 나타내는 median보다 noise를 낮게 잡아 SINR을 약 8 dB 높인다.
+또한 \(25.786-3.956=21.83\) dB는 서로 다른 estimator와 noise reference의
+차이이므로 보편적인 coherent processing gain으로 직접 사용할 수 없다.
+
+현재 GUI의 `G_p,eff`는 논문 식의 coherent processing gain이며 \(\rho\)를
+포함하지 않는다:
+
+\[
+\gamma_{\mathrm{sens,dB}}
+=P_{\mathrm{target,det}}-N_d
++G_{p,\mathrm{eff,dB}}+10\log_{10}\rho.
+\]
+
+\(G_{p,\mathrm{eff}}=26\) dB와 \(\rho=0.2\)이면 full-waveform
+target power에 대한 pilot-weighted gain은
+
+\[
+26+10\log_{10}(0.2)=19.010\ \mathrm{dB}
+\]
+
+이다. 그러므로 “26 dB를 넣었으니 pre-DSP SINR보다 26 dB 높아야 한다”는
+해석은 \(\rho\)를 빠뜨린 것이다. 반대로 21.83 dB를 net pilot-weighted
+gain으로 채택하려면 GUI의 coherent gain에 약
+\(21.83-10\log_{10}(0.2)=28.82\) dB를 넣어야 한다. 다만 위
+10-percentile 의존성 때문에 이를 기본값으로 채택하지 않는다.
+
+고정 \(-6\) dBsm packaged reference에서는
+\(P_{\mathrm{target}}=-38.948\) dBm,
+\(N_d=-38.251\) dBm이므로 1 m operating point는
+
+\[
+-38.948-(-38.251)+19.010=18.314\ \mathrm{dB}
+\]
+
+이고, 1.014 m photocurrent figure에서는 18.065 dB이다. 저장 raw C2의
+7-mA detected point 19.545 dB와 차이는 약 1.48 dB로, RCS 추정 오차와
+서로 다른 profile-floor estimator를 고려하면 같은 규모이다. 기본
+simulation preset은 요청한
+`data/isac_sim_params_20260724_015432.json`을 사용하며, 그 preset의
+effective RCS는 \(-8\) dBsm이므로 \(-6\) dBsm reference보다 sensing
+prediction이 더 낮아지는 것이 정상이다.

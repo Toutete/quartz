@@ -67,6 +67,9 @@ from functions.dsp_functions import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
+DEFAULT_ISAC_SIM_PRESET = (
+    APP_DIR / "data" / "isac_sim_params_20260724_015432.json"
+)
 
 def apply_unified_style(root: tk.Tk) -> None:
         style = ttk.Style(root)
@@ -3834,7 +3837,7 @@ class PhotonicIsacSimPanel:
 
     def _apply_default_sim_preset(self) -> None:
         """Apply the project default preset to the UI without running a simulation."""
-        preset_path = APP_DIR / "data" / "isac_sim_params_20260720.json"
+        preset_path = DEFAULT_ISAC_SIM_PRESET
         if not preset_path.exists():
             return
         try:
@@ -13960,6 +13963,47 @@ class SystemModelValidationPanel:
         """Effective sensing gain; BT_p is retained only as an upper bound."""
         return max(10.0 ** (self._radar_proc_gain_db() / 10.0), 1e-30)
 
+    def _pilot_weighted_processing_gain_lin(
+        self, rho: np.ndarray | float | None = None
+    ) -> np.ndarray:
+        """Return rho*Gp,eff without folding rho into the user-entered gain.
+
+        ``G_p,eff`` is the coherent processing gain of the selected pilot.
+        The pilot receives only the power fraction ``rho`` of the unit-power
+        DFT-s-OFDM waveform, so the net pre/post-detection gain relative to
+        the full-waveform target power is rho*Gp,eff.
+        """
+        rho_value = (
+            self._float("rho", 0.20)
+            if rho is None
+            else np.asarray(rho, dtype=np.float64)
+        )
+        rho_arr = np.clip(np.asarray(rho_value, dtype=np.float64), 1e-12, 1.0)
+        return np.asarray(self._processing_gain_lin() * rho_arr, dtype=np.float64)
+
+    def _pilot_weighted_processing_gain_db(
+        self, rho: np.ndarray | float | None = None
+    ) -> np.ndarray:
+        gain = self._pilot_weighted_processing_gain_lin(rho)
+        return np.asarray(
+            10.0 * np.log10(np.maximum(gain, 1e-300)), dtype=np.float64
+        )
+
+    def _processing_gain_annotation(self, rho: float | None = None) -> str:
+        rho_value = float(
+            np.clip(
+                self._float("rho", 0.20) if rho is None else rho,
+                1e-12,
+                1.0,
+            )
+        )
+        net_db = float(self._pilot_weighted_processing_gain_db(rho_value))
+        return (
+            rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():.1f}$ dB, "
+            rf"$\rho={rho_value:g}$ "
+            f"(pilot-weighted gain={net_db:.1f} dB)"
+        )
+
     def _detector_output_noise_mw(
         self, si_power_scale: np.ndarray | float = 1.0
     ) -> np.ndarray:
@@ -14350,7 +14394,6 @@ class SystemModelValidationPanel:
             missing = np.full(shape, np.nan, dtype=np.float64)
             return missing.copy(), missing
 
-        gp = self._processing_gain_lin()
         ref_range = max(self._float("detector_ref_range_m", self._float("ref_range_m", 1.0)), 1e-9)
         rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-12, 1.0 - 1e-12))
         rho_arr = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
@@ -14389,10 +14432,14 @@ class SystemModelValidationPanel:
         # The detector components contain the complete unit-power waveform.
         # Only rho_ref is the sensing-pilot fraction in the Sec. II model.
         cross_snr_ref = (
-            gp * rho_ref * cross_mw / np.maximum(noise_mw, 1e-30)
+            self._pilot_weighted_processing_gain_lin(rho_ref)
+            * cross_mw
+            / np.maximum(noise_mw, 1e-30)
         )
         self_snr_ref = (
-            gp * rho_ref * self_mw / np.maximum(noise_mw, 1e-30)
+            self._pilot_weighted_processing_gain_lin(rho_ref)
+            * self_mw
+            / np.maximum(noise_mw, 1e-30)
         )
         c4 = (
             cross_snr_ref
@@ -14542,7 +14589,7 @@ class SystemModelValidationPanel:
         add(18, "manual_evm_points", "Measured EVM [GBd: dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
         add(19, "manual_c2_si_on_points", "Measured C2 SI-on [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
         add(20, "ideal_processing_gain_db", "Ideal processing gain BT_p [dB]", "30.10", read_only=True)
-        add(21, "radar_proc_gain_db", "Assumed effective processing gain G_p,eff [dB]", "26.0")
+        add(21, "radar_proc_gain_db", "Coherent gain G_p,eff [dB] (rho separate)", "26.0")
         add(22, "isac_range_ylim_min", "ISAC log y min [m]", "0.1")
         add(23, "isac_range_ylim_max", "ISAC range y max [m]", "50")
         add(24, "rcs_min_dbsm", "Effective RCS min [dBsm]", "-30")
@@ -15087,11 +15134,12 @@ class SystemModelValidationPanel:
         )
         self._add_grouped_sinr_legends(ax_sinr, ax_radar, no_si_valid, lw, for_save)
         gp_eff_db = float(cache.get("effective_processing_gain_db", self._radar_proc_gain_db()))
+        cache_rho = float(cache.get("rho", self._float("rho", 0.20)))
         if np.isfinite(gp_eff_db):
             ax_radar.text(
                 0.03,
                 0.04,
-                rf"$G_{{p,\mathrm{{eff}}}}={gp_eff_db:.1f}$ dB",
+                self._processing_gain_annotation(cache_rho),
                 transform=ax_radar.transAxes,
                 ha="left",
                 va="bottom",
@@ -15423,7 +15471,9 @@ class SystemModelValidationPanel:
         cspr = max(10.0 ** (self._float("cspr_db", 13.0) / 10.0), 1e-30)
         m2 = 1.0 / cspr
         rho = float(np.clip(self._float("rho", 0.20), 1e-12, 1.0 - 1e-12))
-        gp = self._processing_gain_lin()
+        pilot_weighted_gain = float(
+            self._pilot_weighted_processing_gain_lin(rho)
+        )
 
         detector_ref_range = max(
             self._float("detector_ref_range_m", self._float("ref_range_m", 1.0)),
@@ -15481,11 +15531,11 @@ class SystemModelValidationPanel:
             )
             detector_noise_mw = self._detector_output_noise_mw(si_scale)
             cross_sinr = (
-                gp * rho * cross_target_mw
+                pilot_weighted_gain * cross_target_mw
                 / np.maximum(detector_noise_mw, 1e-300)
             )
             self_sinr = (
-                gp * rho * self_target_mw
+                pilot_weighted_gain * self_target_mw
                 / np.maximum(detector_noise_mw, 1e-300)
             )
             full_sinr = cross_sinr + self_sinr
@@ -15665,7 +15715,12 @@ class SystemModelValidationPanel:
         ax.text(
             0.02,
             0.03,
-            rf"$\sigma_{{\mathrm{{eff}}}}={self._float('effective_rcs_dbsm', -6.0):.1f}$ dBsm",
+            (
+                rf"$\sigma_{{\mathrm{{eff}}}}="
+                rf"{self._float('effective_rcs_dbsm', -6.0):.1f}$ dBsm"
+                "\n"
+                + self._processing_gain_annotation()
+            ),
             transform=ax.transAxes,
             ha="left",
             va="bottom",
@@ -15878,20 +15933,20 @@ class SystemModelValidationPanel:
             else measurements
         )
         curves = self._photocurrent_model_curves()
-        current = np.asarray(curves["photocurrent_ma"], dtype=np.float64)
+        tx_power = np.asarray(curves["tx_power_dbm"], dtype=np.float64)
         fig.set_size_inches(7.4, 4.5, forward=True)
         ax_sens = fig.subplots(1, 1)
         linewidth = 2.0 if for_save else 1.7
 
         ax_sens.plot(
-            current,
+            tx_power,
             np.asarray(curves["sensing_on_db"], dtype=np.float64),
             color="#ff0000",
             linewidth=linewidth,
             label="Cached-simulation model, with SI",
         )
         ax_sens.plot(
-            current,
+            tx_power,
             np.asarray(curves["sensing_off_db"], dtype=np.float64),
             color="#008000",
             linestyle="--",
@@ -15908,9 +15963,16 @@ class SystemModelValidationPanel:
             ]
             if not points:
                 continue
-            x = np.asarray(
-                [point["photocurrent_ma"] for point in points], dtype=np.float64
-            )
+            x = np.asarray([
+                float(point.get("tx_power_dbm", float("nan")))
+                if np.isfinite(float(point.get("tx_power_dbm", float("nan"))))
+                else -10.0
+                + 20.0
+                * np.log10(
+                    max(float(point["photocurrent_ma"]), 1e-12) / 7.0
+                )
+                for point in points
+            ], dtype=np.float64)
             sensing = np.asarray(
                 [point["sensing_sinr_db"] for point in points], dtype=np.float64
             )
@@ -15966,15 +16028,15 @@ class SystemModelValidationPanel:
             )
 
         secondary = ax_sens.secondary_xaxis(
-            "top", functions=(current_to_tx, tx_to_current)
+            "top", functions=(tx_to_current, current_to_tx)
         )
-        secondary.set_xlabel("Equivalent THz Tx power (dBm)")
+        secondary.set_xlabel(r"UTC-PD photocurrent, $I_{\mathrm{ph}}$ (mA)")
         ax_sens.set_ylabel("Sensing SINR (dB)")
-        ax_sens.set_xlabel(r"UTC-PD photocurrent, $I_{\mathrm{ph}}$ (mA)")
+        ax_sens.set_xlabel("Equivalent THz Tx power (dBm)")
         ax_sens.set_xlim(
-            float(np.min(current)) - 0.10, float(np.max(current)) + 0.10
+            float(np.min(tx_power)) - 0.10, float(np.max(tx_power)) + 0.10
         )
-        ax_sens.xaxis.set_major_locator(MultipleLocator(0.5))
+        ax_sens.xaxis.set_major_locator(MultipleLocator(1.0))
 
         ax_sens.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
         ax_sens.grid(True, which="minor", color="#e2e8f0", linewidth=0.35, alpha=0.45)
@@ -15995,7 +16057,7 @@ class SystemModelValidationPanel:
             (
                 rf"$R={target_range_m:.3f}$ m, "
                 rf"$\sigma_{{\mathrm{{eff}}}}={float(curves['rcs_dbsm']):.2f}$ dBsm, "
-                rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():.1f}$ dB"
+                + self._processing_gain_annotation(float(curves["rho"]))
             ),
             transform=ax_sens.transAxes,
             ha="left",
@@ -16174,7 +16236,8 @@ class SystemModelValidationPanel:
         tx_dbm = self._float("sweep_tx_power_dbm", 0.0)
         ax.set_title(
             rf"$\rho={rho_v:g}$, $P_{{\mathrm{{t}}}}={tx_dbm:g}$ dBm, "
-            rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():g}$ dB",
+            rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():g}$ dB, "
+            f"pilot-weighted={float(self._pilot_weighted_processing_gain_db(rho_v)):.1f} dB",
             fontsize=12 if for_save else 10,
         )
 
@@ -16586,8 +16649,7 @@ class SystemModelValidationPanel:
         return (
             target
             - self._c2_noise_power_dbm(si_state)
-            + self._radar_proc_gain_db()
-            + 10.0 * np.log10(rho)
+            + self._pilot_weighted_processing_gain_db(rho)
         )
 
     def _c2_power_radar_snr_points(self, si_state: str | None = None) -> list[tuple[float, float]]:
@@ -16639,8 +16701,7 @@ class SystemModelValidationPanel:
         return float(
             self._c2_target_power_ref_dbm()
             - self._c2_noise_power_dbm()
-            + self._radar_proc_gain_db()
-            + 10.0 * np.log10(rho)
+            + self._pilot_weighted_processing_gain_db(rho)
         )
 
     def _snr_curve_from_ref(self, ranges: np.ndarray, ref_snr_db: float, rho: float, kind: str) -> np.ndarray:
@@ -17119,8 +17180,9 @@ class SystemModelValidationPanel:
             out[f"{state}_radar_snr_db"] = (
                 target_power
                 - ref_noise_by_state[state]
-                + ref_pg
-                + 10.0 * np.log10(sweep_rho)
+                + 10.0 * np.log10(
+                    max(10.0 ** (ref_pg / 10.0) * sweep_rho, 1e-300)
+                )
             )
         out["ref_noise_dbm"] = np.asarray([ref_noise_by_state["on"]], dtype=np.float64)
         out["ref_noise_off_dbm"] = np.asarray(
@@ -17198,22 +17260,21 @@ class SystemModelValidationPanel:
                     if len(ref_noise_off_arr)
                     else self._c2_noise_power_dbm("off")
                 )
-                effective_pg = self._radar_proc_gain_db()
                 if "on_c2_target_power_dbm" in sweep and "off_c2_target_power_dbm" in sweep:
                     # Recompute from the cached target-only powers so editing
                     # G_p,eff followed by Redraw has an immediate effect.
-                    rho_db = 10.0 * np.log10(max(rho, 1e-12))
+                    pilot_weighted_gain_db = float(
+                        self._pilot_weighted_processing_gain_db(rho)
+                    )
                     sim_sens_on_snr = (
                         np.asarray(sweep["on_c2_target_power_dbm"], dtype=np.float64)
                         - ref_noise
-                        + effective_pg
-                        + rho_db
+                        + pilot_weighted_gain_db
                     )
                     sim_sens_off_snr = (
                         np.asarray(sweep["off_c2_target_power_dbm"], dtype=np.float64)
                         - ref_noise_off
-                        + effective_pg
-                        + rho_db
+                        + pilot_weighted_gain_db
                     )
                 else:
                     sim_sens_on_snr = sweep["on_radar_snr_db"]
@@ -17294,6 +17355,7 @@ class SystemModelValidationPanel:
                 "c2_on_points": self._c2_power_points("on"),
                 "c2_off_points": self._c2_power_points("off"),
                 "effective_processing_gain_db": float(self._radar_proc_gain_db()),
+                "rho": float(rho),
             }
             for p in active_points:
                 rr = float(p.get("range_m", float("nan")))
@@ -17387,7 +17449,7 @@ class SystemModelValidationPanel:
                 ax_rad.text(
                     0.03,
                     0.04,
-                    rf"$G_{{p,\mathrm{{eff}}}}={gp_eff_db:.1f}$ dB",
+                    self._processing_gain_annotation(rho),
                     transform=ax_rad.transAxes,
                     ha="left",
                     va="bottom",
@@ -17426,6 +17488,9 @@ class SystemModelValidationPanel:
             c2_slope, _ = self._fit_c2_power_slope("on")
             c2_slope_txt = f"{c2_slope:.1f} dB/dec" if np.isfinite(c2_slope) else "N/A"
             theory_gp_db = 10.0 * np.log10(max(self._processing_gain_lin(), 1e-30))
+            pilot_weighted_gain_db = float(
+                self._pilot_weighted_processing_gain_db(rho)
+            )
             self.status_var.set(
                 f"rho={rho:.3f}  R_max^comm={rc[0]:.3g} m  "
                 f"R_max^sens(on/off)={rs_on[0]:.3g}/{rs_off[0]:.3g} m  "
@@ -17434,7 +17499,8 @@ class SystemModelValidationPanel:
                 f"sens_ref(meas/sim)={sens_ref:.2f} dB  "
                 f"ISAC theory: NF={self._float('system_nf_db', 8.0):.2f} dB, "
                 f"target@R0={self._c2_target_power_ref_dbm():.2f} dBm, "
-                f"Nd={self._c2_noise_power_dbm():.2f} dBm, Gp,eff={theory_gp_db:.2f} dB, "
+                f"Nd={self._c2_noise_power_dbm():.2f} dBm, "
+                f"Gp,eff={theory_gp_db:.2f} dB, rho*Gp={pilot_weighted_gain_db:.2f} dB, "
                 f"SI isolation={self._float('si_on_iso_db', 24.0):.0f} dB  "
                 f"TX={self._finite_param('sweep_tx_power_dbm'):.1f} dBm  "
                 f"meas EVM/sensing/C2on/off={n_evm_meas}/{n_radar_meas}/{len(self._c2_power_points('on'))}/{len(self._c2_power_points('off'))}  "
