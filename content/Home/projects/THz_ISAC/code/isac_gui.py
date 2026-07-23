@@ -13960,6 +13960,46 @@ class SystemModelValidationPanel:
         """Effective sensing gain; BT_p is retained only as an upper bound."""
         return max(10.0 ** (self._radar_proc_gain_db() / 10.0), 1e-30)
 
+    def _detector_output_noise_mw(
+        self, si_power_scale: np.ndarray | float = 1.0
+    ) -> np.ndarray:
+        """Interpolate calibrated C2 noise versus SI power.
+
+        The SI-on detector-output reference already contains receiver noise,
+        SI--noise beating, IF-chain noise, and DSO noise.  The SI-off
+        reference supplies the range-independent baseline.  Only their
+        positive difference is scaled linearly with SI power, as required for
+        square-law SI--noise beating.  This keeps every term at the C2 output
+        reference plane and prevents adding an input-RF noise product a
+        second time.
+        """
+        scale = np.maximum(np.asarray(si_power_scale, dtype=np.float64), 0.0)
+        noise_on_dbm = self._c2_noise_power_dbm("on")
+        noise_off_dbm = self._c2_noise_power_dbm("off")
+        noise_on_mw = 10.0 ** (noise_on_dbm / 10.0)
+        noise_off_mw = 10.0 ** (noise_off_dbm / 10.0)
+        # A negative on/off difference can occur from finite Monte-Carlo
+        # scatter.  It is not evidence of negative SI-induced noise, so use
+        # the lower observed value as a conservative constant baseline.
+        baseline_mw = min(noise_on_mw, noise_off_mw)
+        si_excess_ref_mw = max(noise_on_mw - noise_off_mw, 0.0)
+        return np.asarray(
+            baseline_mw + si_excess_ref_mw * scale, dtype=np.float64
+        )
+
+    def _detector_si_power_scale(self) -> float:
+        """Return current SI carrier power relative to the detector reference."""
+        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_ref_dbm = self._float(
+            "detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", tx_dbm)
+        )
+        iso_db = self._theory_isolation_db()
+        iso_ref_db = self._float("detector_ref_iso_db", iso_db)
+        return float(
+            10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
+            * 10.0 ** ((iso_ref_db - iso_db) / 10.0)
+        )
+
     def _noise_power_mw(self) -> float:
         if "system_nf_db" in self.params:
             bandwidth_hz = max(self._float("bandwidth_ghz", 15.0) * 1e9, 1.0)
@@ -14122,7 +14162,11 @@ class SystemModelValidationPanel:
             "alpha": 10.0 ** (-self._theory_isolation_db() / 20.0),
             "cspr": 10.0 ** (self._float("cspr_db", 13.0) / 10.0),
             "gp": self._processing_gain_lin(),
-            "n_mw": 10.0 ** (self._c2_noise_power_dbm() / 10.0),
+            "n_mw": float(
+                self._detector_output_noise_mw(
+                    self._detector_si_power_scale()
+                )
+            ),
         }
 
     def _rmax(self, rho: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -14202,8 +14246,9 @@ class SystemModelValidationPanel:
         # The input thermal/NF model is common, but square-law conversion is
         # not: SI-on contains SI--receiver-noise beating.  Preserve the
         # separately simulated SI-off detector-output noise reference.
-        noise_on_mw = 10.0 ** (self._c2_noise_power_dbm("on") / 10.0)
-        noise_off_mw = 10.0 ** (self._c2_noise_power_dbm("off") / 10.0)
+        si_scale = self._detector_si_power_scale()
+        noise_on_mw = float(self._detector_output_noise_mw(si_scale))
+        noise_off_mw = float(self._detector_output_noise_mw(0.0))
         c8 = c8 * noise_on_mw / max(noise_off_mw, 1e-30)
         return self._solve_sensing_range(np.zeros_like(c8), c8, gamma_threshold)
 
@@ -14268,7 +14313,6 @@ class SystemModelValidationPanel:
             missing = np.full(shape, np.nan, dtype=np.float64)
             return missing.copy(), missing
 
-        noise_mw = 10.0 ** (noise_dbm / 10.0)
         gp = self._processing_gain_lin()
         ref_range = max(self._float("detector_ref_range_m", self._float("ref_range_m", 1.0)), 1e-9)
         rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-12, 1.0 - 1e-12))
@@ -14288,6 +14332,11 @@ class SystemModelValidationPanel:
         iso_db = self._theory_isolation_db()
         iso_ref_db = self._float("detector_ref_iso_db", iso_db)
         cross_iso_scale = 10.0 ** ((iso_ref_db - iso_db) / 10.0)
+        # SI--noise beating is already present in the calibrated detector
+        # noise.  Scale only the positive SI-on minus SI-off component when
+        # transmit power or isolation moves away from the reference.
+        si_power_scale = self._detector_si_power_scale()
+        noise_mw = float(self._detector_output_noise_mw(si_power_scale))
 
         rcs_ref_dbsm = self._float(
             "detector_ref_rcs_dbsm",
@@ -14418,7 +14467,7 @@ class SystemModelValidationPanel:
                 "isac_range_ylim_min", "isac_range_ylim_max",
                 "rcs_min_dbsm", "rcs_max_dbsm", "rcs_points",
                 "si_sweep_min_dbm", "si_sweep_max_dbm", "si_sweep_points",
-                "si_ssbi_leakage_db", "lna_ip1db_dbm",
+                "lna_ip1db_dbm",
                 "si_sinr_ylim_min", "si_sinr_ylim_max",
             }:
                 entry.bind("<Return>", lambda _event: self._refresh_plot())
@@ -14461,10 +14510,9 @@ class SystemModelValidationPanel:
         add(31, "si_sweep_min_dbm", "SI sweep min [dBm]", "-70")
         add(32, "si_sweep_max_dbm", "SI sweep max [dBm]", "-15")
         add(33, "si_sweep_points", "SI sweep points", "301")
-        add(34, "si_ssbi_leakage_db", "SI-SSBI leakage xi [dB]", "0")
-        add(35, "lna_ip1db_dbm", "LNA input P1dB [dBm]", "-20")
-        add(36, "si_sinr_ylim_min", "SI sweep SINR y min [dB]", "-10")
-        add(37, "si_sinr_ylim_max", "SI sweep SINR y max [dB]", "50")
+        add(34, "lna_ip1db_dbm", "LNA input P1dB [dBm]", "-20")
+        add(35, "si_sinr_ylim_min", "SI sweep SINR y min [dB]", "-10")
+        add(36, "si_sinr_ylim_max", "SI sweep SINR y max [dB]", "50")
         hidden("rho_ref", "0.20")
         hidden("symbol_rate_gbaud", "15.0")
         hidden("sim_comm_ref_snr_db", "17.49")
@@ -15257,14 +15305,14 @@ class SystemModelValidationPanel:
         self._style_ieee_axis(ax)
 
     def _si_power_sweep_curves(self) -> dict[str, np.ndarray | float]:
-        """Return the analytical SI-assisted sensing-SINR operating curve.
+        """Return detector-calibrated sensing SINR versus LNA-input SI power.
 
-        P_SI is the SI carrier power at the common LNA/ZBD input.  A common
-        input-referred thermal noise N=kTBF is used.  The useful cross-beat,
-        SI--noise beating, and in-band SI self-SSBI are all expressed as RF
-        power products, so the ideal square-law conversion factor cancels.
-        Compression is not extrapolated; the returned P1dB boundary is based
-        on total SI + echo + noise power at the LNA input.
+        The stored phase-averaged C2 cross/self target components and the
+        SI-on/off detector-noise ablation define the reference point.  The
+        cross beat scales as P_SI*P_echo, the echo self-beat as P_echo^2, and
+        the positive SI-induced detector-noise increment as P_SI.  The
+        uncalibrated SI-SSBI term is deliberately omitted: the Sec. II model
+        states that it is below the noise floor at the operating point.
         """
         p_min = self._float("si_sweep_min_dbm", -70.0)
         p_max = self._float("si_sweep_max_dbm", -15.0)
@@ -15276,69 +15324,144 @@ class SystemModelValidationPanel:
 
         cspr = max(10.0 ** (self._float("cspr_db", 13.0) / 10.0), 1e-30)
         m2 = 1.0 / cspr
-        m4 = m2 ** 2
         rho = float(np.clip(self._float("rho", 0.20), 1e-12, 1.0 - 1e-12))
         gp = self._processing_gain_lin()
-        noise_mw = self._noise_power_mw()
-        xi_ssbi = max(10.0 ** (self._float("si_ssbi_leakage_db", 0.0) / 10.0), 1e-30)
 
-        ref_range = max(self._float("ref_range_m", 1.0), 1e-9)
-        carrier_tx_mw = self._theory_carrier_power_mw()
-        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
-        echo_mw = carrier_tx_mw * sqrt_k ** 2 / ref_range ** 4
-
-        numerator = 2.0 * gp * m2 * rho * p_si_mw * echo_mw
-        thermal_term = noise_mw ** 2
-        si_noise_term = 2.0 * p_si_mw * noise_mw
-        ssbi_term = xi_ssbi * m4 * p_si_mw ** 2
-        full_sinr = numerator / np.maximum(
-            thermal_term + si_noise_term + ssbi_term, 1e-300
+        detector_ref_range = max(
+            self._float("detector_ref_range_m", self._float("ref_range_m", 1.0)),
+            1e-9,
         )
-        thermal_asymptote = numerator / max(thermal_term, 1e-300)
-        si_noise_asymptote = numerator / np.maximum(si_noise_term, 1e-300)
-        ssbi_asymptote = numerator / np.maximum(ssbi_term, 1e-300)
+        plot_range = max(self._float("ref_range_m", detector_ref_range), 1e-9)
+        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_ref_dbm = self._float(
+            "detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", tx_dbm)
+        )
+        tx_echo_scale = 10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -19.10)
+        rcs_ref_dbsm = self._float("detector_ref_rcs_dbsm", rcs_dbsm)
+        rcs_scale = 10.0 ** ((rcs_dbsm - rcs_ref_dbsm) / 10.0)
+        range_scale = (detector_ref_range / plot_range) ** 4
+        cspr_ref_db = self._float("detector_ref_cspr_db", self._float("cspr_db", 13.0))
+        modulation_scale = 10.0 ** (
+            (cspr_ref_db - self._float("cspr_db", cspr_ref_db)) / 10.0
+        )
+        echo_power_scale = tx_echo_scale * rcs_scale * range_scale
+
+        cross_ref_dbm = self._finite_param("c2_cross_power_ref_dbm")
+        self_ref_dbm = self._finite_param("c2_echo_self_power_ref_dbm")
+        references_valid = (
+            self.params.get("detector_reference_source") is not None
+            and self.params["detector_reference_source"].get().strip().lower()
+            == "simulation"
+            and np.isfinite(cross_ref_dbm)
+            and np.isfinite(self_ref_dbm)
+        )
+
+        carrier_tx_mw = self._theory_carrier_power_mw()
+        tx_echo_scale_safe = max(tx_echo_scale, 1e-30)
+        carrier_ref_mw = carrier_tx_mw / tx_echo_scale_safe
+        iso_ref_db = self._float("detector_ref_iso_db", self._theory_isolation_db())
+        si_ref_mw = max(
+            carrier_ref_mw * 10.0 ** (-iso_ref_db / 10.0), 1e-30
+        )
+        si_scale = p_si_mw / si_ref_mw
+
+        if references_valid:
+            cross_ref_mw = 10.0 ** (cross_ref_dbm / 10.0)
+            self_ref_mw = 10.0 ** (self_ref_dbm / 10.0)
+            cross_target_mw = (
+                cross_ref_mw
+                * si_scale
+                * echo_power_scale
+                * modulation_scale
+            )
+            self_target_mw = np.full_like(
+                p_si_mw,
+                self_ref_mw
+                * echo_power_scale ** 2
+                * modulation_scale,
+            )
+            detector_noise_mw = self._detector_output_noise_mw(si_scale)
+            cross_sinr = (
+                gp * rho * cross_target_mw
+                / np.maximum(detector_noise_mw, 1e-300)
+            )
+            self_sinr = (
+                gp * rho * self_target_mw
+                / np.maximum(detector_noise_mw, 1e-300)
+            )
+            full_sinr = cross_sinr + self_sinr
+        else:
+            cross_sinr = np.full_like(p_si_mw, np.nan)
+            self_sinr = np.full_like(p_si_mw, np.nan)
+            full_sinr = np.full_like(p_si_mw, np.nan)
+            detector_noise_mw = np.full_like(p_si_mw, np.nan)
+
+        sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
+        echo_mw = carrier_tx_mw * sqrt_k ** 2 / plot_range ** 4
 
         isolation_db = self._theory_isolation_db()
         current_si_mw = carrier_tx_mw * 10.0 ** (-isolation_db / 10.0)
         current_si_dbm = 10.0 * np.log10(max(current_si_mw, 1e-300))
-        current_sinr = float(
-            np.interp(current_si_dbm, p_si_dbm, 10.0 * np.log10(np.maximum(full_sinr, 1e-300)))
+        full_sinr_db = np.where(
+            np.isfinite(full_sinr),
+            10.0 * np.log10(np.maximum(full_sinr, 1e-300)),
+            np.nan,
+        )
+        current_sinr = (
+            float(np.interp(current_si_dbm, p_si_dbm, full_sinr_db))
+            if np.any(np.isfinite(full_sinr_db))
+            else float("nan")
         )
 
         # P_SI on the x axis is the carrier component.  Account for the
         # modulated sideband power when locating the total-input P1dB limit.
         p1db_total_mw = 10.0 ** (self._float("lna_ip1db_dbm", -20.0) / 10.0)
         echo_total_mw = echo_mw * (1.0 + m2)
-        available_si_total_mw = p1db_total_mw - echo_total_mw - noise_mw
+        input_noise_mw = self._noise_power_mw()
+        available_si_total_mw = p1db_total_mw - echo_total_mw - input_noise_mw
         compression_si_mw = max(available_si_total_mw / (1.0 + m2), 1e-300)
         compression_si_dbm = 10.0 * np.log10(compression_si_mw)
 
-        peak_idx = int(np.nanargmax(full_sinr))
-        thermal_to_beating_dbm = 10.0 * np.log10(max(noise_mw / 2.0, 1e-300))
-        beating_to_ssbi_dbm = 10.0 * np.log10(
-            max(2.0 * noise_mw / (xi_ssbi * m4), 1e-300)
-        )
+        if np.any(np.isfinite(full_sinr)):
+            valid_linear = p_si_dbm <= compression_si_dbm
+            candidate = np.where(valid_linear, full_sinr, np.nan)
+            if not np.any(np.isfinite(candidate)):
+                candidate = full_sinr
+            peak_idx = int(np.nanargmax(candidate))
+            optimum_si_dbm = float(p_si_dbm[peak_idx])
+            optimum_sinr_db = float(full_sinr_db[peak_idx])
+        else:
+            optimum_si_dbm = float("nan")
+            optimum_sinr_db = float("nan")
         return {
             "si_power_dbm": p_si_dbm,
-            "full_sinr_db": 10.0 * np.log10(np.maximum(full_sinr, 1e-300)),
-            "thermal_asymptote_db": 10.0 * np.log10(
-                np.maximum(thermal_asymptote, 1e-300)
+            "full_sinr_db": full_sinr_db,
+            "cross_sinr_db": np.where(
+                np.isfinite(cross_sinr),
+                10.0 * np.log10(np.maximum(cross_sinr, 1e-300)),
+                np.nan,
             ),
-            "si_noise_asymptote_db": 10.0 * np.log10(
-                np.maximum(si_noise_asymptote, 1e-300)
+            "self_sinr_db": np.where(
+                np.isfinite(self_sinr),
+                10.0 * np.log10(np.maximum(self_sinr, 1e-300)),
+                np.nan,
             ),
-            "ssbi_asymptote_db": 10.0 * np.log10(
-                np.maximum(ssbi_asymptote, 1e-300)
+            "detector_noise_dbm": np.where(
+                np.isfinite(detector_noise_mw),
+                10.0 * np.log10(np.maximum(detector_noise_mw, 1e-300)),
+                np.nan,
             ),
             "current_si_dbm": float(current_si_dbm),
             "current_sinr_db": current_sinr,
             "compression_si_dbm": float(compression_si_dbm),
-            "optimum_si_dbm": float(p_si_dbm[peak_idx]),
-            "optimum_sinr_db": float(10.0 * np.log10(max(full_sinr[peak_idx], 1e-300))),
-            "thermal_to_beating_dbm": float(thermal_to_beating_dbm),
-            "beating_to_ssbi_dbm": float(beating_to_ssbi_dbm),
+            "optimum_si_dbm": optimum_si_dbm,
+            "optimum_sinr_db": optimum_sinr_db,
+            "reference_si_dbm": float(10.0 * np.log10(si_ref_mw)),
             "echo_power_dbm": float(10.0 * np.log10(max(echo_mw, 1e-300))),
-            "noise_power_dbm": float(10.0 * np.log10(max(noise_mw, 1e-300))),
+            "input_noise_power_dbm": float(
+                10.0 * np.log10(max(input_noise_mw, 1e-300))
+            ),
         }
 
     def _draw_si_power_axis(self, ax, for_save: bool = False) -> None:
@@ -15348,30 +15471,28 @@ class SystemModelValidationPanel:
         p_si = np.asarray(curves["si_power_dbm"], dtype=np.float64)
         full = np.asarray(curves["full_sinr_db"], dtype=np.float64)
         linewidth = 2.0 if for_save else 1.6
-        ax.plot(p_si, full, color="#ff0000", linewidth=linewidth, label="Full analytical model")
         ax.plot(
             p_si,
-            np.asarray(curves["thermal_asymptote_db"], dtype=np.float64),
+            full,
+            color="#ff0000",
+            linewidth=linewidth,
+            label="Phase-averaged total",
+        )
+        ax.plot(
+            p_si,
+            np.asarray(curves["cross_sinr_db"], dtype=np.float64),
             color="#0000ff",
             linestyle=":",
             linewidth=linewidth * 0.85,
-            label="Thermal-noise limited",
+            label="SI–echo cross-beat",
         )
         ax.plot(
             p_si,
-            np.asarray(curves["si_noise_asymptote_db"], dtype=np.float64),
-            color="#111111",
-            linestyle="--",
-            linewidth=linewidth * 0.85,
-            label="SI-noise limited",
-        )
-        ax.plot(
-            p_si,
-            np.asarray(curves["ssbi_asymptote_db"], dtype=np.float64),
+            np.asarray(curves["self_sinr_db"], dtype=np.float64),
             color="#008000",
             linestyle="-.",
             linewidth=linewidth * 0.85,
-            label="SI-SSBI limited",
+            label="Echo self-beat",
         )
 
         threshold_db = self._float("sens_req_snr_db", 13.2)
@@ -15502,8 +15623,9 @@ class SystemModelValidationPanel:
         )
         gamma_threshold = 10.0 ** (threshold_db / 10.0)
         r_sens_on = self._solve_sensing_range(c4, c8, gamma_threshold)
-        noise_on_mw = 10.0 ** (self._c2_noise_power_dbm("on") / 10.0)
-        noise_off_mw = 10.0 ** (self._c2_noise_power_dbm("off") / 10.0)
+        si_scale = self._detector_si_power_scale()
+        noise_on_mw = float(self._detector_output_noise_mw(si_scale))
+        noise_off_mw = float(self._detector_output_noise_mw(0.0))
         c8_off = c8 * noise_on_mw / max(noise_off_mw, 1e-30)
         r_sens_off = self._solve_sensing_range(
             np.zeros_like(c8_off), c8_off, gamma_threshold

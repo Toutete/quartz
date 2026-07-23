@@ -44,6 +44,52 @@ class _Var:
         self.value = str(value)
 
 
+def _detector_panel() -> sim.SystemModelValidationPanel:
+    """Return a third-tab model with an explicit detector-domain reference."""
+    panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
+    values = {
+        "detector_reference_source": "simulation",
+        "rho": 0.2,
+        "rho_ref": 0.2,
+        "comm_req_snr_db": 15.75,
+        "sens_req_snr_db": 13.2,
+        "sim_comm_ref_snr_db": 19.0,
+        "comm_noise_snr_ref_db": 20.5,
+        "comm_sir_ref_db": 25.0,
+        "comm_detector_ref_range_m": 1.0,
+        "comm_detector_ref_tx_dbm": -10.0,
+        "comm_detector_ref_rho": 0.2,
+        "comm_detector_ref_cspr_db": 13.0,
+        "sweep_tx_power_dbm": -10.0,
+        "theory_tx_ref_dbm": -10.0,
+        "cspr_db": 13.0,
+        "si_on_iso_db": 24.0,
+        "c2_target_power_ref_dbm": -37.23,
+        "c2_cross_power_ref_dbm": -37.43,
+        "c2_echo_self_power_ref_dbm": -50.78,
+        "c2_noise_power_dbm": -40.0,
+        "c2_noise_power_off_dbm": -40.0,
+        "detector_ref_range_m": 1.0,
+        "detector_ref_tx_dbm": -10.0,
+        "detector_ref_iso_db": 24.0,
+        "detector_ref_cspr_db": 13.0,
+        "detector_ref_rcs_dbsm": -4.28,
+        "effective_rcs_dbsm": -4.28,
+        "radar_proc_gain_db": 26.0,
+        "bandwidth_ghz": 15.0,
+        "symbol_rate_gbaud": 15.0,
+        "pilot_symbols": 1024,
+        "sqrt_k": 1e-4,
+        "ac2": 1.0,
+        "gc_db": 0.0,
+        "system_nf_db": 8.0,
+        "noise_temperature_k": 290.0,
+    }
+    panel.params = {key: _Var(value) for key, value in values.items()}
+    panel.meas_points = []
+    return panel
+
+
 class GammaCoupledLinkTest(unittest.TestCase):
     def test_c2_power_slope_fit_used_by_redraw_validation(self):
         panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
@@ -197,52 +243,8 @@ class GammaCoupledLinkTest(unittest.TestCase):
         self.assertAlmostEqual(powers[1] / powers[0], 0.75, places=3)
         self.assertLess(powers[2] / powers[0], 1e-20)
 
-    def test_third_tab_theory_uses_same_gamma(self):
-        keys = (
-            "bandwidth_ghz", "symbol_rate_gbaud", "pilot_symbols", "system_nf_db",
-            "cspr_db", "theory_tx_ref_dbm", "effective_rcs_dbsm", "target_gamma_mag",
-            "comm_accepted_fraction", "target_rcs_sqm", "target_ant_gain_dbi",
-            "target_rcs_mode", "ac2", "ref_range_m", "sqrt_k", "gc_db",
-            "sweep_tx_power_dbm", "si_on_iso_db", "rho_ref", "comm_req_snr_db",
-            "sens_req_snr_db", "radar_proc_gain_db",
-        )
-        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
-        panel.params = {key: _Var() for key in keys}
-        panel.params.update({
-            "ref_range_m": _Var(1.0),
-            "sweep_tx_power_dbm": _Var(-10.0),
-            "si_on_iso_db": _Var(24.0),
-            "rho_ref": _Var(0.2),
-            "comm_req_snr_db": _Var(15.75),
-            "sens_req_snr_db": _Var(13.2),
-        })
-
-        ranges = []
-        for gamma in (0.0, 0.5):
-            cfg = sim.SimConfig(
-                rf_carrier_ghz=280.0,
-                utcpd_target_dbm=-10.0,
-                tx_ant_gain_dbi=32.0,
-                rx_ant_gain_dbi=32.0,
-                omt_il_db=2.2,
-                target_dist_m=1.0,
-                target_rcs_sqm=0.01,
-                target_ant_gain_dbi=32.0,
-                target_gamma_mag=gamma,
-                target_pol_eff=1.0,
-                target_rcs_mode="coupled_antenna",
-                target_effective_rcs_dbsm=None,
-                baud_gbaud=15.0,
-                syms_per_chirp=1024,
-                cspr_db=13.0,
-            )
-            panel._sync_theory_params_from_cfg(cfg)
-            r_comm, r_sens, _ = panel._rmax(np.asarray([0.2]))
-            ranges.append((float(r_comm[0]), float(r_sens[0])))
-
-        self.assertAlmostEqual(ranges[1][0] / ranges[0][0], np.sqrt(0.75), places=7)
-        self.assertGreater(ranges[1][1], ranges[0][1])
-
+    def test_third_tab_effective_rcs_sweep_keeps_comm_gamma_fixed(self):
+        panel = _detector_panel()
         rcs_axis = np.linspace(-30.0, 0.0, 31)
         r_comm, r_sens_si, r_sens_no_si, _r_isac = panel._rmax_vs_effective_rcs(
             rcs_axis, 0.2
@@ -261,23 +263,8 @@ class GammaCoupledLinkTest(unittest.TestCase):
         )
 
     def test_effective_processing_gain_controls_sensing_not_communication_range(self):
-        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
-        panel.params = {
-            "bandwidth_ghz": _Var(15.0),
-            "symbol_rate_gbaud": _Var(15.0),
-            "pilot_symbols": _Var(1024),
-            "radar_proc_gain_db": _Var(30.1029996),
-            "system_nf_db": _Var(8.0),
-            "cspr_db": _Var(13.0),
-            "theory_tx_ref_dbm": _Var(-10.0),
-            "sweep_tx_power_dbm": _Var(0.0),
-            "si_on_iso_db": _Var(24.0),
-            "ac2": _Var(1.0),
-            "sqrt_k": _Var(1e-4),
-            "gc_db": _Var(0.0),
-            "comm_req_snr_db": _Var(15.75),
-            "sens_req_snr_db": _Var(13.2),
-        }
+        panel = _detector_panel()
+        panel.params["radar_proc_gain_db"].set(30.1029996)
         rho = np.asarray([0.2])
         comm_ideal, sens_ideal, _ = panel._rmax(rho)
         panel.params["radar_proc_gain_db"].set(26.0)
@@ -305,9 +292,14 @@ class GammaCoupledLinkTest(unittest.TestCase):
         )
 
         panel.params["radar_proc_gain_db"].set(26.0)
+        # Isolate the data-power law from the separately modelled residual
+        # communication-interference ceiling.
+        panel.params["comm_sir_ref_db"].set(300.0)
         comm_rho, sens_rho, _ = panel._rmax(np.asarray([0.2, 0.4]))
         off_rho = panel._rmax_sensing_without_si(np.asarray([0.2, 0.4]))
-        self.assertAlmostEqual(float(comm_rho[1] / comm_rho[0]), np.sqrt(0.6 / 0.8), places=7)
+        self.assertAlmostEqual(
+            float(comm_rho[1] / comm_rho[0]), (0.6 / 0.8) ** 0.25, places=7
+        )
         self.assertGreaterEqual(float(sens_rho[1] / sens_rho[0]), 2.0 ** 0.125)
         self.assertLessEqual(float(sens_rho[1] / sens_rho[0]), 2.0 ** 0.25)
         self.assertAlmostEqual(float(off_rho[1] / off_rho[0]), 2.0 ** 0.125, places=7)
@@ -331,21 +323,7 @@ class GammaCoupledLinkTest(unittest.TestCase):
         )
 
     def test_sensing_model_adds_cross_and_self_beat_powers(self):
-        panel = sim.SystemModelValidationPanel.__new__(sim.SystemModelValidationPanel)
-        panel.params = {
-            "rho": _Var(0.2),
-            "cspr_db": _Var(13.0),
-            "si_on_iso_db": _Var(24.0),
-            "ac2": _Var(0.1),
-            "sqrt_k": _Var(2e-4),
-            "radar_proc_gain_db": _Var(26.0),
-            "gc_db": _Var(-80.0),
-            "system_nf_db": _Var(8.0),
-            "bandwidth_ghz": _Var(15.0),
-            "noise_temperature_k": _Var(290.0),
-            "sens_req_snr_db": _Var(13.2),
-            "comm_req_snr_db": _Var(15.75),
-        }
+        panel = _detector_panel()
         model = panel._model(np.asarray([1.0, 2.0]))
         sensing = np.asarray(model["snr_sens"], dtype=np.float64)
         cross = np.asarray(model["snr_sens_cross"], dtype=np.float64)
@@ -354,16 +332,17 @@ class GammaCoupledLinkTest(unittest.TestCase):
         self.assertAlmostEqual(float(cross[1] / cross[0]), 1.0 / 16.0, places=12)
         self.assertAlmostEqual(float(self_beat[1] / self_beat[0]), 1.0 / 256.0, places=12)
 
-        ac2 = 0.1
-        alpha = 10.0 ** (-24.0 / 20.0)
-        p_si = ac2 * alpha ** 2
-        p_echo = ac2 * (2e-4) ** 2
+        cross_mw = 10.0 ** (
+            panel._float("c2_cross_power_ref_dbm", -300.0) / 10.0
+        )
+        self_mw = 10.0 ** (
+            panel._float("c2_echo_self_power_ref_dbm", -300.0) / 10.0
+        )
+        noise_mw = 10.0 ** (
+            panel._float("c2_noise_power_dbm", -300.0) / 10.0
+        )
         expected = (
-            10.0 ** (26.0 / 10.0)
-            * 2.0
-            * 0.2
-            * (p_si * p_echo + p_echo ** 2)
-            / (10.0 ** (13.0 / 10.0) * panel._noise_power_mw())
+            10.0 ** (26.0 / 10.0) * 0.2 * (cross_mw + self_mw) / noise_mw
         )
         self.assertAlmostEqual(float(sensing[0]), expected, places=12)
 

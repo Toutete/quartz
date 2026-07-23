@@ -359,48 +359,84 @@ Measurement와 Theoretical SNR만 포함된다.
 
 ## 9. Sensing SINR versus SI power
 
-This panel is an analytical diagnostic at the reference target range. The
-x-axis is the SI carrier power at the common LNA/ZBD input. With the common
-input-referred receiver noise
+This panel is a detector-calibrated analytical diagnostic at the reference
+target range. The x-axis is the SI carrier power at the common LNA/ZBD input.
+The same full-waveform reference used by the effective-RCS range figure
+provides four C2-output quantities:
 
 \[
-N=kTBF,
+P_{\mathrm{cross},0},\quad
+P_{\mathrm{self},0},\quad
+N_{\mathrm{on},0},\quad
+N_{\mathrm{off},0}.
 \]
 
-the cross-beat sensing SINR is
+They are respectively the phase-averaged SI--echo cross-beat power, echo
+self-beat power, SI-on detector noise, and SI-off detector noise. For
+\(s=P_{\mathrm{SI}}/P_{\mathrm{SI},0}\), the calibrated square-law scaling is
 
 \[
-\gamma_{\mathrm{sens}}(P_{\mathrm{SI}})
-=
-\frac{
-2G_{p,\mathrm{eff}}m^2\rho P_{\mathrm{SI}}P_{\mathrm{ec}}
-}{
-N^2+2P_{\mathrm{SI}}N
-+\xi_{\mathrm{SI}}m^4P_{\mathrm{SI}}^2
-}.
+P_{\mathrm{cross}}(s)=P_{\mathrm{cross},0}\,s\,qM_c,
+\qquad
+P_{\mathrm{self}}=P_{\mathrm{self},0}\,q^2M_c ,
 \]
 
-The three denominator terms produce the expected asymptotes:
-
-- thermal-noise limited: \(\gamma\propto P_{\mathrm{SI}}\);
-- SI--noise limited: \(\gamma\) approaches a constant;
-- SI-SSBI limited: \(\gamma\propto P_{\mathrm{SI}}^{-1}\).
-
-Here \(\xi_{\mathrm{SI}}\) is the in-band leakage factor after the sensing
-filter. It is not a universal constant. The GUI exposes it in dB, and a paper
-result must state whether it was obtained by simulation ablation,
-measurement, or a stated sensitivity assumption.
-
-The LNA \(P_{1\mathrm{dB}}\) line is evaluated using total input power, not
-the SI carrier alone:
+where
 
 \[
-P_{\mathrm{SI,tot}}+P_{\mathrm{ec,tot}}+N=P_{1\mathrm{dB}}.
+q=
+\frac{P_t}{P_{t,0}}
+\times\frac{\sigma_{\mathrm{eff}}}{\sigma_{\mathrm{eff},0}}
+\left(\frac{R_0}{R}\right)^4,
+\qquad
+M_c=10^{(\mathrm{CSPR}_0-\mathrm{CSPR})/10}.
 \]
 
-The shaded region beyond that line is outside the linear model and is not
-used as a predicted SINR. The operating-point marker is obtained from the
-current transmitted carrier power and OMT isolation.
+The SI-induced part of the C2-output noise is obtained from the SI-on/off
+simulation ablation rather than recomputed at the RF-input reference plane:
+
+\[
+N_{\mathrm{C2}}(s)
+=N_{\mathrm{base},0}
++\max(N_{\mathrm{on},0}-N_{\mathrm{off},0},0)s.
+\]
+
+Here \(N_{\mathrm{base},0}=\min(N_{\mathrm{on},0},N_{\mathrm{off},0})\);
+the minimum prevents finite Monte-Carlo scatter from being interpreted as a
+negative SI-induced noise contribution. For the packaged reference,
+\(N_{\mathrm{on},0}>N_{\mathrm{off},0}\), so the baseline is exactly the
+SI-off ablation.
+
+\[
+\gamma_{\mathrm{sens}}(s)
+=G_{p,\mathrm{eff}}\rho
+\frac{P_{\mathrm{cross}}(s)+P_{\mathrm{self}}}
+{N_{\mathrm{C2}}(s)} .
+\]
+
+This expression preserves the expected physics: the cross-beat contribution
+is linear in SI power, the echo self-beat remains at finite SI-independent
+power, and SI--noise beating can produce a high-SI plateau. The previous
+implementation instead combined these detector-output powers with
+\(N^2+2P_{\mathrm{SI}}N\) formed from an input-referred RF noise value. It
+therefore counted SI--noise beating twice and mixed incompatible reference
+planes.
+
+The leakage-generated SI-SSBI term is not included in the default prediction.
+Section II states that it is below the noise floor at the operating point, so
+setting an unmeasured leakage coefficient to unity is neither a calibration
+nor a physically justified penalty. It may be added later only with a
+simulation ablation or measured in-band residual that fixes its coefficient.
+
+The LNA \(P_{1\mathrm{dB}}\) line is still evaluated at the RF-input plane
+using total SI, sideband, echo, and input-noise power. The shaded region beyond
+that line is outside the linear model. For the packaged reference
+\((-10~\mathrm{dBm},1~\mathrm{m},-4.28~\mathrm{dBsm})\), both the SI-power
+figure and the effective-RCS calculation now give \(20.10\) dB. Analytical
+propagation gives \(18.38\) dB at \(1.1\) m, above the \(13.2\)-dB detection
+requirement. The saved \(1.1\)-m C2 range profile gives \(20.56\) dB, so the
+corrected model is conservative by about \(2.18\) dB at that measured point
+rather than being tens of decibels inconsistent with it.
 
 ### 9.1 Previous C2 raw-band diagnostic
 

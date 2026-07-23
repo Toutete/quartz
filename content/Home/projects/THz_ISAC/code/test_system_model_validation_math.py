@@ -55,14 +55,15 @@ def _validation_model():
         "symbol_rate_gbaud": 15.0,
         "pilot_symbols": 1024,
         "sqrt_k": 1e-4,
-        "ac2": 1.0,
+        # -10-dBm total THz power with 13-dB DSB CSPR leaves this carrier
+        # component at the detector-reference configuration.
+        "ac2": 0.0952273278966,
         "gc_db": 0.0,
         "system_nf_db": 8.0,
         "noise_temperature_k": 290.0,
         "si_sweep_min_dbm": -70.0,
         "si_sweep_max_dbm": -15.0,
         "si_sweep_points": 301,
-        "si_ssbi_leakage_db": 0.0,
         "lna_ip1db_dbm": -20.0,
         "si_sinr_ylim_min": -10.0,
         "si_sinr_ylim_max": 50.0,
@@ -248,25 +249,97 @@ class SystemModelValidationMathTest(unittest.TestCase):
         self.assertAlmostEqual(points[1][1], 20.0)
         self.assertAlmostEqual(points[2][1], 18.2)
 
-    def test_si_power_sweep_has_expected_asymptotic_slopes(self):
+    def test_si_power_sweep_component_scaling_uses_one_reference_plane(self):
         model = _validation_model()
         curves = model._si_power_sweep_curves()
         x = np.asarray(curves["si_power_dbm"], dtype=np.float64)
-        thermal = np.asarray(curves["thermal_asymptote_db"], dtype=np.float64)
-        beating = np.asarray(curves["si_noise_asymptote_db"], dtype=np.float64)
-        ssbi = np.asarray(curves["ssbi_asymptote_db"], dtype=np.float64)
+        cross = np.asarray(curves["cross_sinr_db"], dtype=np.float64)
+        echo_self = np.asarray(curves["self_sinr_db"], dtype=np.float64)
         lo = int(np.argmin(np.abs(x + 60.0)))
         hi = int(np.argmin(np.abs(x + 40.0)))
         delta_x = x[hi] - x[lo]
-        self.assertAlmostEqual(thermal[hi] - thermal[lo], delta_x, places=10)
-        self.assertAlmostEqual(beating[hi] - beating[lo], 0.0, places=10)
-        self.assertAlmostEqual(ssbi[hi] - ssbi[lo], -delta_x, places=10)
+        # With equal SI-on/off detector noise in this fixture, cross-beat
+        # power is linear in P_SI and echo self-beat is SI independent.
+        self.assertAlmostEqual(cross[hi] - cross[lo], delta_x, places=10)
+        self.assertAlmostEqual(echo_self[hi] - echo_self[lo], 0.0, places=10)
+
+    def test_si_sweep_operating_point_matches_rcs_detector_model(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        curves = model._si_power_sweep_curves()
+        c4, c8 = model._detector_domain_sensing_coefficients(0.20, -4.28)
+        expected_db = 10.0 * np.log10(float(c4) + float(c8))
+        self.assertAlmostEqual(
+            float(curves["current_sinr_db"]), expected_db, places=3
+        )
+        # The calibrated point must remain above the measured-system
+        # detection requirement beyond 1 m.
+        at_1p1_db = 10.0 * np.log10(
+            float(c4) / 1.1 ** 4 + float(c8) / 1.1 ** 8
+        )
+        self.assertGreater(at_1p1_db, model._float("sens_req_snr_db", 13.2))
+
+    def test_si_sweep_and_rcs_model_stay_consistent_when_parameters_change(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        cases = [
+            (-20.0, 24.0, -20.0, 0.02),
+            (-10.0, 30.0, -4.28, 0.20),
+            (0.0, 20.0, 0.0, 0.40),
+        ]
+        for tx_dbm, iso_db, rcs_dbsm, rho in cases:
+            model.params["sweep_tx_power_dbm"] = _Var(tx_dbm)
+            model.params["si_on_iso_db"] = _Var(iso_db)
+            model.params["effective_rcs_dbsm"] = _Var(rcs_dbsm)
+            model.params["rho"] = _Var(rho)
+            curves = model._si_power_sweep_curves()
+            c4, c8 = model._detector_domain_sensing_coefficients(rho, rcs_dbsm)
+            expected_db = 10.0 * np.log10(float(c4) + float(c8))
+            self.assertAlmostEqual(
+                float(curves["current_sinr_db"]), expected_db, places=3
+            )
+
+    def test_si_noise_ablation_is_not_added_twice(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        noise_off = float(model._detector_output_noise_mw(0.0))
+        noise_ref = float(model._detector_output_noise_mw(1.0))
+        expected_off = 10.0 ** (
+            model._float("c2_noise_power_off_dbm", -300.0) / 10.0
+        )
+        expected_on = 10.0 ** (
+            model._float("c2_noise_power_dbm", -300.0) / 10.0
+        )
+        self.assertAlmostEqual(noise_off / expected_off, 1.0, places=10)
+        self.assertAlmostEqual(noise_ref / expected_on, 1.0, places=10)
+
+    def test_low_tx_with_si_range_remains_above_no_si_range(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        self.assertTrue(
+            model._load_packaged_detector_reference(self._packaged_reference_cfg())
+        )
+        model.params["sweep_tx_power_dbm"] = _Var(-20.0)
+        curves = model._rmax_vs_effective_rcs(np.asarray([-4.28]), 0.20)
+        self.assertGreaterEqual(float(curves[1][0]), float(curves[2][0]))
 
     def test_si_operating_point_and_compression_use_lna_input_plane(self):
         model = _validation_model()
         curves = model._si_power_sweep_curves()
-        # ac2=1 mW and 24-dB isolation gives -24 dBm carrier SI.
-        self.assertAlmostEqual(float(curves["current_si_dbm"]), -24.0, places=10)
+        # -10.212384-dBm carrier power and 24-dB isolation gives the actual
+        # packaged-reference SI carrier at the common LNA/ZBD input.
+        self.assertAlmostEqual(
+            float(curves["current_si_dbm"]), -34.2123840191, places=9
+        )
         # Sideband, echo, and noise consume some headroom, so the carrier-only
         # SI boundary must lie below the total-input -20-dBm P1dB.
         self.assertLess(float(curves["compression_si_dbm"]), -20.0)
