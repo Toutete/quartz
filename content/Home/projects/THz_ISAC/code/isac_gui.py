@@ -2138,10 +2138,10 @@ class SimConfig:
     target_ant_gain_dbi: float = 32.0
     target_gamma_mag: float = 0.1
     target_pol_eff: float = 1.0
-    target_rcs_mode: str = "coupled_antenna"
+    target_rcs_mode: str = "direct_effective"
     # Optional measured/scenario-level RCS override. In coupled-antenna mode
     # this is None and sigma_eff is derived from structural + antenna modes.
-    target_effective_rcs_dbsm: float | None = None
+    target_effective_rcs_dbsm: float | None = -6.0
     target_dist_m: float = 1.0  # Default 1m
     # Deterministic by default so repeated GUI runs are directly comparable.
     # Set to None explicitly when a Monte-Carlo noise realization is required.
@@ -4158,12 +4158,12 @@ class PhotonicIsacSimPanel:
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
         add_p(26, "omt_iso_db",   "OMT Isolation [dB]",     "24")
         add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "1.9")
-        self.effective_rcs_entry = add_p(28, "effective_rcs_dbsm", "Effective RCS override [dBsm]", "-19.10")
+        self.effective_rcs_entry = add_p(28, "effective_rcs_dbsm", "Effective RCS override [dBsm]", "-6.0")
         add_p(29, "mzm_phi_bias_deg", "MZM Bias phi [deg]", "45.0")
         add_p(35, "mzm_eo_bw_ghz", "MZM EO BW [GHz]", "30.0")
         add_p(36, "awg_dac_bits", "AWG DAC ENOB [bits]", "8.0")
         ttk.Label(grp, text="Target RCS model").grid(row=37, column=0, sticky="w", pady=2)
-        self.params["target_rcs_mode"] = tk.StringVar(value="Coupled antenna")
+        self.params["target_rcs_mode"] = tk.StringVar(value="Direct effective RCS")
         self.params["target_rcs_mode"].trace_add("write", self._update_table)
         ttk.Combobox(
             grp,
@@ -4251,7 +4251,7 @@ class PhotonicIsacSimPanel:
             rx_gain = tx_gain
             rcs_mode = self.params["target_rcs_mode"].get().strip()
             effective_rcs_dbsm = (
-                self._param_float("effective_rcs_dbsm", -19.10)
+                self._param_float("effective_rcs_dbsm", -6.0)
                 if rcs_mode.lower().startswith("direct")
                 else None
             )
@@ -4405,7 +4405,7 @@ class PhotonicIsacSimPanel:
         rcs_mode_label = self.params["target_rcs_mode"].get().strip()
         rcs_mode = "direct_effective" if rcs_mode_label.lower().startswith("direct") else "coupled_antenna"
         effective_rcs_override = (
-            self._param_float("effective_rcs_dbsm", -19.10)
+            self._param_float("effective_rcs_dbsm", -6.0)
             if rcs_mode == "direct_effective"
             else None
         )
@@ -14065,7 +14065,13 @@ class SystemModelValidationPanel:
         source_var = self.params.get("detector_reference_source")
         source = source_var.get().strip().lower() if source_var is not None else ""
         if source != "simulation":
-            return np.full(np.broadcast(r, rho_arr).shape, np.nan, dtype=np.float64)
+            tx_shape_value = (
+                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                if tx_power_dbm is None
+                else np.asarray(tx_power_dbm, dtype=np.float64)
+            )
+            shape = np.broadcast_arrays(r, rho_arr, tx_shape_value)[0].shape
+            return np.full(shape, np.nan, dtype=np.float64)
         ref_sinr_db = self._float(
             "sim_comm_ref_snr_db", self._float("comm_ref_snr_db", 17.49)
         )
@@ -14165,7 +14171,7 @@ class SystemModelValidationPanel:
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         snr_comm = self._comm_sinr_from_reference(r, rho_v)
         c4, c8 = self._detector_domain_sensing_coefficients(
-            rho_v, self._float("effective_rcs_dbsm", -19.10)
+            rho_v, self._float("effective_rcs_dbsm", -6.0)
         )
         # The exact phase-averaged ZBD target power contains both the
         # SI--echo cross-beat and echo self-beat.  Dropping C8 is valid only
@@ -14244,7 +14250,7 @@ class SystemModelValidationPanel:
             noise_snr_at_ref / required_noise_snr, 0.0
         ) ** 0.25
         c4, c8 = self._detector_domain_sensing_coefficients(
-            rho, self._float("effective_rcs_dbsm", -19.10)
+            rho, self._float("effective_rcs_dbsm", -6.0)
         )
         r_sens = self._solve_sensing_range(c4, c8, g_sens)
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
@@ -14259,7 +14265,7 @@ class SystemModelValidationPanel:
         )
         gamma_threshold = 10.0 ** (threshold_db / 10.0)
         _c4, c8 = self._detector_domain_sensing_coefficients(
-            rho, self._float("effective_rcs_dbsm", -19.10)
+            rho, self._float("effective_rcs_dbsm", -6.0)
         )
         # The input thermal/NF model is common, but square-law conversion is
         # not: SI-on contains SI--receiver-noise beating.  Preserve the
@@ -14375,7 +14381,7 @@ class SystemModelValidationPanel:
 
         rcs_ref_dbsm = self._float(
             "detector_ref_rcs_dbsm",
-            self._float("effective_rcs_dbsm", -19.10),
+            self._float("effective_rcs_dbsm", -6.0),
         )
         rcs_power_scale = 10.0 ** ((rcs - rcs_ref_dbsm) / 10.0)
         common_scale = rho_scale * tx_scale * modulation_scale
@@ -14581,7 +14587,7 @@ class SystemModelValidationPanel:
         hidden("gc_db", "0")
         hidden("cspr_db", "13")
         hidden("theory_tx_ref_dbm", "-10")
-        hidden("effective_rcs_dbsm", "-19.10")
+        hidden("effective_rcs_dbsm", "-6.0")
         hidden("photocurrent_target_range_m", "1.014")
 
         btns = ttk.Frame(ctrl)
@@ -14599,7 +14605,7 @@ class SystemModelValidationPanel:
         photocurrent_btns.grid(row=40, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(
             photocurrent_btns,
-            text="Photocurrent SINR",
+            text="Sensing vs Photocurrent",
             command=self._show_photocurrent_sinr,
         ).pack(side=tk.LEFT)
 
@@ -14647,7 +14653,13 @@ class SystemModelValidationPanel:
             if self.photonic_source is not None and hasattr(self.photonic_source, "_cfg_from_ui"):
                 cfg = self.photonic_source._cfg_from_ui()
                 self._sync_theory_params_from_cfg(cfg)
-                self._load_packaged_detector_reference(cfg)
+                if not self._load_packaged_detector_reference(cfg):
+                    # The third tab remains usable before a new Range Sweep.
+                    # This fallback is explicitly a fixed packaged detector
+                    # reference; a subsequent physical simulation replaces it.
+                    self._load_packaged_detector_reference(
+                        cfg, require_config_match=False
+                    )
         except Exception:
             pass
         self._refresh_plot()
@@ -14677,23 +14689,32 @@ class SystemModelValidationPanel:
                     return False
         return True
 
-    def _load_packaged_detector_reference(self, cfg: SimConfig) -> bool:
+    def _load_packaged_detector_reference(
+        self,
+        cfg: SimConfig,
+        require_config_match: bool = True,
+    ) -> bool:
         """Load the default physical-simulation reference without rerunning it.
 
         The cache is accepted only when every stored configuration field
         matches the current first-tab SimConfig. It therefore restores the
         initial paper traces without allowing a stale reference after a model
-        parameter change.
+        parameter change.  When ``require_config_match`` is false, the same
+        stored detector reference is used as an explicitly fixed calibration
+        anchor so Redraw remains available before a new Range Sweep.
         """
-        path = APP_DIR / "isac_validation_reference_20260723.json"
+        path = APP_DIR / "isac_validation_reference_20260724.json"
         if not path.exists():
             return False
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if payload.get("model_version") != "detector-reference-v2-20260723":
+            if payload.get("model_version") != "detector-reference-v3-20260724":
                 return False
-            if not self._reference_config_matches(cfg, dict(payload.get("config", {}))):
+            config_matches = self._reference_config_matches(
+                cfg, dict(payload.get("config", {}))
+            )
+            if require_config_match and not config_matches:
                 return False
             reference = dict(payload.get("reference", {}))
             required = {
@@ -14713,7 +14734,14 @@ class SystemModelValidationPanel:
                     self.params[key].set(f"{float(value):.12g}")
             self.params["detector_reference_source"].set("simulation")
             self.status_var.set(
-                f"Loaded validated reference: {path.name}"
+                (
+                    f"Loaded validated reference: {path.name}"
+                    if config_matches
+                    else (
+                        f"Loaded fixed packaged detector reference: {path.name}; "
+                        "Range Sweep recalibrates it for the current configuration."
+                    )
+                )
             )
             return True
         except Exception:
@@ -15354,6 +15382,26 @@ class SystemModelValidationPanel:
             self._style_paper_legend(legend, 11 if for_save else 9)
         self._style_ieee_axis(ax)
 
+    def _si_carrier_dbm_to_total_tx_dbm(
+        self, si_power_dbm: np.ndarray | float
+    ) -> np.ndarray:
+        """Map SI carrier power to total THz Tx power at fixed isolation/CSPR."""
+        cspr = max(10.0 ** (self._float("cspr_db", 13.0) / 10.0), 1e-30)
+        sideband_correction_db = 10.0 * np.log10(1.0 + 1.0 / cspr)
+        return np.asarray(si_power_dbm, dtype=np.float64) + (
+            self._theory_isolation_db() + sideband_correction_db
+        )
+
+    def _total_tx_dbm_to_si_carrier_dbm(
+        self, tx_power_dbm: np.ndarray | float
+    ) -> np.ndarray:
+        """Inverse of :meth:`_si_carrier_dbm_to_total_tx_dbm`."""
+        cspr = max(10.0 ** (self._float("cspr_db", 13.0) / 10.0), 1e-30)
+        sideband_correction_db = 10.0 * np.log10(1.0 + 1.0 / cspr)
+        return np.asarray(tx_power_dbm, dtype=np.float64) - (
+            self._theory_isolation_db() + sideband_correction_db
+        )
+
     def _si_power_sweep_curves(self) -> dict[str, np.ndarray | float]:
         """Return detector-calibrated sensing SINR versus LNA-input SI power.
 
@@ -15387,7 +15435,7 @@ class SystemModelValidationPanel:
             "detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", tx_dbm)
         )
         tx_echo_scale = 10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
-        rcs_dbsm = self._float("effective_rcs_dbsm", -19.10)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -6.0)
         rcs_ref_dbsm = self._float("detector_ref_rcs_dbsm", rcs_dbsm)
         rcs_scale = 10.0 ** ((rcs_dbsm - rcs_ref_dbsm) / 10.0)
         range_scale = (detector_ref_range / plot_range) ** 4
@@ -15593,6 +15641,17 @@ class SystemModelValidationPanel:
             ax.set_ylim(y_min, y_max)
         ax.set_xlabel(r"SI power at LNA input, $P_{\mathrm{SI}}$ (dBm)")
         ax.set_ylabel("Sensing SINR (dB)")
+        secondary = ax.secondary_xaxis(
+            "top",
+            functions=(
+                self._si_carrier_dbm_to_total_tx_dbm,
+                self._total_tx_dbm_to_si_carrier_dbm,
+            ),
+        )
+        secondary.set_xlabel(
+            rf"Equivalent total THz $P_t$ (dBm), isolation={self._theory_isolation_db():g} dB"
+        )
+        secondary.tick_params(direction="in", labelsize=9 if for_save else 7.5)
         ax.xaxis.set_major_locator(MultipleLocator(10.0))
         ax.xaxis.set_minor_locator(AutoMinorLocator(2))
         ax.yaxis.set_minor_locator(AutoMinorLocator(2))
@@ -15603,6 +15662,16 @@ class SystemModelValidationPanel:
         if not for_save or bool(self.save_legend_var.get()):
             legend = ax.legend(loc="best", fontsize=10.5 if for_save else 8.5, frameon=True)
             self._style_paper_legend(legend, 10.5 if for_save else 8.5)
+        ax.text(
+            0.02,
+            0.03,
+            rf"$\sigma_{{\mathrm{{eff}}}}={self._float('effective_rcs_dbsm', -6.0):.1f}$ dBsm",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9 if for_save else 7.5,
+            color="#333333",
+        )
         self._style_ieee_axis(ax)
 
     @staticmethod
@@ -15721,31 +15790,31 @@ class SystemModelValidationPanel:
         target_range_m: float | None = None,
         sensing_threshold_db: float | None = None,
     ) -> list[dict[str, float | str]]:
+        """Load the stored one-time raw-DSO reprocessing results.
+
+        The GUI deliberately does not rerun the expensive matched-filter DSP
+        when this plot is opened.  ``force`` and the range/threshold arguments
+        are retained for API compatibility with older callers but no longer
+        trigger raw waveform processing.
+        """
         cached = getattr(self, "_photocurrent_measurements_cache", None)
-        if cached is not None and not force:
+        if cached is not None:
             return list(cached)
-        capture_dir = APP_DIR / "data" / "captures" / "photocurrent"
-        target_range = max(
-            self._float("photocurrent_target_range_m", 1.014)
-            if target_range_m is None
-            else float(target_range_m),
-            1e-6,
-        )
-        threshold_db = (
-            self._float("sens_req_snr_db", 13.2)
-            if sensing_threshold_db is None
-            else float(sensing_threshold_db)
-        )
-        measurements: list[dict[str, float | str]] = []
-        for path in sorted(capture_dir.glob("Data_*.npz")):
-            try:
-                measurements.append(
-                    self._reprocess_photocurrent_capture(
-                        path, target_range, threshold_db
-                    )
-                )
-            except Exception:
-                continue
+        cache_path = APP_DIR / "photocurrent_sensing_reference_20260724.json"
+        if not cache_path.exists():
+            raise FileNotFoundError(
+                f"Stored photocurrent sensing results are missing: {cache_path.name}"
+            )
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("model_version") != "raw-dso-fixed-roi-v1-20260724":
+            raise ValueError(
+                f"Unsupported photocurrent result format: {cache_path.name}"
+            )
+        measurements = [
+            dict(point) for point in payload.get("measurements", [])
+            if isinstance(point, dict)
+        ]
         measurements.sort(
             key=lambda point: (
                 str(point.get("modulation", "")),
@@ -15756,18 +15825,15 @@ class SystemModelValidationPanel:
         return measurements
 
     def _photocurrent_model_curves(self) -> dict[str, np.ndarray | float]:
-        """Return fixed-range SINR curves for a realizable photocurrent sweep."""
+        """Analytically scale a cached simulation reference over photocurrent."""
         current_ma = np.linspace(4.5, 7.0, 201)
         tx_power_dbm = -10.0 + 20.0 * np.log10(current_ma / 7.0)
         target_range_m = max(
             self._float("photocurrent_target_range_m", 1.014), 1e-6
         )
         rho = float(np.clip(self._float("rho", 0.20), 1e-9, 1.0 - 1e-9))
-        rcs_dbsm = self._float("effective_rcs_dbsm", -4.28)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -6.0)
 
-        comm_sinr = self._comm_sinr_from_reference(
-            target_range_m, rho, tx_power_dbm=tx_power_dbm
-        )
         c4, c8 = self._detector_domain_sensing_coefficients(
             rho,
             rcs_dbsm,
@@ -15789,8 +15855,6 @@ class SystemModelValidationPanel:
         return {
             "photocurrent_ma": current_ma,
             "tx_power_dbm": tx_power_dbm,
-            "comm_sinr_db": 10.0
-            * np.log10(np.maximum(np.asarray(comm_sinr), 1e-300)),
             "sensing_on_db": 10.0
             * np.log10(np.maximum(sensing_on, 1e-300)),
             "sensing_off_db": 10.0
@@ -15815,24 +15879,16 @@ class SystemModelValidationPanel:
         )
         curves = self._photocurrent_model_curves()
         current = np.asarray(curves["photocurrent_ma"], dtype=np.float64)
-        fig.set_size_inches(7.4, 6.0, forward=True)
-        axes = np.asarray(fig.subplots(2, 1, sharex=True), dtype=object)
-        ax_comm, ax_sens = axes
+        fig.set_size_inches(7.4, 4.5, forward=True)
+        ax_sens = fig.subplots(1, 1)
         linewidth = 2.0 if for_save else 1.7
 
-        ax_comm.plot(
-            current,
-            np.asarray(curves["comm_sinr_db"], dtype=np.float64),
-            color="#0000ff",
-            linewidth=linewidth,
-            label="Simulation",
-        )
         ax_sens.plot(
             current,
             np.asarray(curves["sensing_on_db"], dtype=np.float64),
             color="#ff0000",
             linewidth=linewidth,
-            label="Simulation, with SI",
+            label="Cached-simulation model, with SI",
         )
         ax_sens.plot(
             current,
@@ -15840,7 +15896,7 @@ class SystemModelValidationPanel:
             color="#008000",
             linestyle="--",
             linewidth=linewidth,
-            label="Simulation, without SI",
+            label="Cached-simulation model, without SI",
         )
 
         marker_by_mod = {"32QAM": "s", "16QAM": "^"}
@@ -15855,27 +15911,12 @@ class SystemModelValidationPanel:
             x = np.asarray(
                 [point["photocurrent_ma"] for point in points], dtype=np.float64
             )
-            comm = np.asarray(
-                [point["comm_sinr_db"] for point in points], dtype=np.float64
-            )
             sensing = np.asarray(
                 [point["sensing_sinr_db"] for point in points], dtype=np.float64
             )
             marker = marker_by_mod[modulation]
-            ax_comm.scatter(
-                x,
-                comm,
-                marker=marker,
-                s=50 if for_save else 42,
-                facecolors="none",
-                edgecolors="#0000aa",
-                linewidths=1.3,
-                zorder=5,
-                label=f"Measured −EVM, {modulation}",
-            )
-            detected = np.asarray(
-                [bool(point.get("target_detected", False)) for point in points],
-                dtype=bool,
+            detected = np.isfinite(sensing) & (
+                sensing >= self._float("sens_req_snr_db", 13.2)
             )
             if np.any(~detected):
                 ax_sens.scatter(
@@ -15906,15 +15947,7 @@ class SystemModelValidationPanel:
                     ),
                 )
 
-        comm_threshold = self._float("comm_req_snr_db", 15.75)
         sensing_threshold = self._float("sens_req_snr_db", 13.2)
-        ax_comm.axhline(
-            comm_threshold,
-            color="#666666",
-            linestyle=(0, (2, 2)),
-            linewidth=1.0,
-            label=rf"Required {comm_threshold:.1f} dB",
-        )
         ax_sens.axhline(
             sensing_threshold,
             color="#666666",
@@ -15932,11 +15965,10 @@ class SystemModelValidationPanel:
                 (np.asarray(tx_value, dtype=np.float64) + 10.0) / 20.0
             )
 
-        secondary = ax_comm.secondary_xaxis(
+        secondary = ax_sens.secondary_xaxis(
             "top", functions=(current_to_tx, tx_to_current)
         )
         secondary.set_xlabel("Equivalent THz Tx power (dBm)")
-        ax_comm.set_ylabel("Communication SINR (dB)")
         ax_sens.set_ylabel("Sensing SINR (dB)")
         ax_sens.set_xlabel(r"UTC-PD photocurrent, $I_{\mathrm{ph}}$ (mA)")
         ax_sens.set_xlim(
@@ -15944,18 +15976,17 @@ class SystemModelValidationPanel:
         )
         ax_sens.xaxis.set_major_locator(MultipleLocator(0.5))
 
-        for ax in axes:
-            ax.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
-            ax.grid(True, which="minor", color="#e2e8f0", linewidth=0.35, alpha=0.45)
-            ax.yaxis.set_minor_locator(AutoMinorLocator(2))
-            legend = ax.legend(
-                loc="center left",
-                fontsize=9.5 if for_save else 8.0,
-                frameon=True,
-                bbox_to_anchor=(1.01, 0.5),
-            )
-            self._style_paper_legend(legend, 9.5 if for_save else 8.0)
-            self._style_ieee_axis(ax)
+        ax_sens.grid(True, which="major", color="#cbd5e1", linewidth=0.55, alpha=0.75)
+        ax_sens.grid(True, which="minor", color="#e2e8f0", linewidth=0.35, alpha=0.45)
+        ax_sens.yaxis.set_minor_locator(AutoMinorLocator(2))
+        legend = ax_sens.legend(
+            loc="center left",
+            fontsize=9.5 if for_save else 8.0,
+            frameon=True,
+            bbox_to_anchor=(1.01, 0.5),
+        )
+        self._style_paper_legend(legend, 9.5 if for_save else 8.0)
+        self._style_ieee_axis(ax_sens)
         ax_sens.xaxis.set_minor_locator(AutoMinorLocator(2))
         target_range_m = float(curves["target_range_m"])
         ax_sens.text(
@@ -15978,9 +16009,9 @@ class SystemModelValidationPanel:
         self, measurements: list[dict[str, float | str]]
     ) -> None:
         win = tk.Toplevel(self.parent)
-        win.title("SINR vs UTC-PD Photocurrent")
-        win.geometry("980x820")
-        fig = Figure(figsize=(7.4, 6.6), dpi=100)
+        win.title("Sensing SINR vs UTC-PD Photocurrent")
+        win.geometry("980x650")
+        fig = Figure(figsize=(7.4, 4.5), dpi=100)
         self._draw_photocurrent_sinr_figure(
             fig, measurements=measurements, for_save=False
         )
@@ -15989,51 +16020,18 @@ class SystemModelValidationPanel:
         canvas.draw_idle()
 
     def _show_photocurrent_sinr(self) -> None:
-        cached = getattr(self, "_photocurrent_measurements_cache", None)
-        if cached is not None:
-            self._open_photocurrent_sinr_window(
-                list(cached)
+        try:
+            measurements = self._load_photocurrent_measurements()
+            self.status_var.set(
+                f"Photocurrent plot: loaded {len(measurements)} stored raw-DSO results; "
+                "no waveform reprocessing was run."
             )
-            return
-        if self._photocurrent_processing:
-            return
-        self._photocurrent_processing = True
-        target_range_m = max(
-            self._float("photocurrent_target_range_m", 1.014), 1e-6
-        )
-        sensing_threshold_db = self._float("sens_req_snr_db", 13.2)
-        self.status_var.set(
-            f"Reprocessing raw C2 photocurrent captures at the fixed "
-            f"{target_range_m:.3f}-m ROI..."
-        )
-
-        def worker():
-            try:
-                measurements = self._load_photocurrent_measurements(
-                    force=True,
-                    target_range_m=target_range_m,
-                    sensing_threshold_db=sensing_threshold_db,
-                )
-
-                def finish():
-                    self._photocurrent_processing = False
-                    self.status_var.set(
-                        f"Photocurrent plot: {len(measurements)} raw captures reprocessed."
-                    )
-                    self._open_photocurrent_sinr_window(measurements)
-
-                self.parent.after(0, finish)
-            except Exception as exc:
-                def fail(message=str(exc)):
-                    self._photocurrent_processing = False
-                    self.status_var.set(f"Photocurrent processing failed: {message}")
-                    messagebox.showerror(
-                        "Photocurrent SINR", message, parent=self.parent
-                    )
-
-                self.parent.after(0, fail)
-
-        threading.Thread(target=worker, daemon=True).start()
+            self._open_photocurrent_sinr_window(measurements)
+        except Exception as exc:
+            self.status_var.set(f"Photocurrent result load failed: {exc}")
+            messagebox.showerror(
+                "Sensing vs Photocurrent", str(exc), parent=self.parent
+            )
 
     def _save_all_figures(self) -> None:
         if not self._evm_radar_plot_cache:
@@ -16050,7 +16048,7 @@ class SystemModelValidationPanel:
             ("sensing_sinr_vs_si_power.png", lambda fig: self._draw_si_power_axis(fig.add_subplot(111), for_save=True)),
             ("isac_range_vs_effective_rcs.png", self._draw_rcs_comparison_figure),
             (
-                "sinr_vs_utcpd_photocurrent.png",
+                "sensing_sinr_vs_utcpd_photocurrent.png",
                 lambda fig: self._draw_photocurrent_sinr_figure(
                     fig,
                     measurements=self._load_photocurrent_measurements(),
@@ -16824,12 +16822,17 @@ class SystemModelValidationPanel:
             else:
                 packaged_reference_loaded = self._load_packaged_detector_reference(cfg)
                 if not packaged_reference_loaded:
+                    packaged_reference_loaded = self._load_packaged_detector_reference(
+                        cfg, require_config_match=False
+                    )
+                if not packaged_reference_loaded:
                     self.params["detector_reference_source"].set("")
             suffix = (
                 " Current simulation reference synchronized."
                 if reference_is_current
                 else (
-                    " Validated packaged reference synchronized."
+                    " Fixed packaged simulation reference synchronized; "
+                    "Range Sweep recalibrates the current configuration."
                     if packaged_reference_loaded
                     else " Parameters changed since the last simulation; run Range Sweep."
                 )
@@ -17407,7 +17410,7 @@ class SystemModelValidationPanel:
             self.fig.tight_layout()
             self.canvas.draw_idle()
             rc, rs_on, rs_off, rj_on = self._rmax_vs_effective_rcs(
-                np.asarray([self._float("effective_rcs_dbsm", -19.10)]),
+                np.asarray([self._float("effective_rcs_dbsm", -6.0)]),
                 rho,
             )
             n_evm_meas = sum(

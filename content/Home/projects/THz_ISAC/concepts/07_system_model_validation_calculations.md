@@ -2,7 +2,7 @@
 
 이 문서는 `isac_gui.py`의 세 번째 탭인 **System Model Validation**에서
 사용하는 계산, 기준면, 거리 법칙, processing gain, 임계값 및 논문용 그림
-생성 경로를 정리한다. 기준 코드는 2026-07-23 점검본이다.
+생성 경로를 정리한다. 기준 코드는 2026-07-24 점검본이다.
 
 ## 1. 검증 범위
 
@@ -30,14 +30,14 @@ one-way target range**이다. C2 delay에는 자동으로 \(\tau=2R/c\)가 적�
    noise와 중복 합산하지 않도록 했다.
 5. SI-on/off가 같은 input NF를 사용하더라도 square-law 이후 noise가 달라지는
    점을 반영해 detector-output noise reference를 각각 저장한다.
-6. 기본 JSON의 direct effective RCS \(-4.28\) dBsm을 시작 시
-   \(-19.10\) dBsm coupled model로 덮어쓰던 코드를 제거했다.
-7. 현재 simulation과 일치하는 detector reference가 없으면 legacy 기본
-   숫자로 논문 곡선을 그리지 않고 NaN으로 무효화한다.
-8. GUI 초기 화면은
-   `isac_validation_reference_20260723.json`의 재현 가능한 physical-simulation
-   reference를 사용한다. 저장된 config fingerprint가 현재 `SimConfig`와
-   완전히 일치할 때만 로드하며, 불일치하면 `Range Sweep`을 요구한다.
+6. 기본 표적을 measured/scenario-level direct effective RCS
+   \(-6.0\) dBsm으로 통일하고 coupled-antenna 값으로 다시 덮어쓰지 않는다.
+7. 현재 simulation reference가 없을 때 임의의 legacy 숫자를 조합하지 않고
+   `isac_validation_reference_20260724.json`의 고정 physical-simulation
+   detector reference를 명시적인 calibration anchor로 사용한다.
+8. 저장된 config fingerprint가 현재 `SimConfig`와 일치하면 exact cached
+   reference로 사용한다. 불일치해도 `Redraw`용 fixed reference는 표시하되,
+   현재 구성으로 `Range Sweep`을 실행하면 그 reference를 새 결과로 교체한다.
 
 ## 2. THz link budget
 
@@ -430,13 +430,36 @@ simulation ablation or measured in-band residual that fixes its coefficient.
 
 The LNA \(P_{1\mathrm{dB}}\) line is still evaluated at the RF-input plane
 using total SI, sideband, echo, and input-noise power. The shaded region beyond
-that line is outside the linear model. For the packaged reference
-\((-10~\mathrm{dBm},1~\mathrm{m},-4.28~\mathrm{dBsm})\), both the SI-power
-figure and the effective-RCS calculation now give \(20.10\) dB. Analytical
-propagation gives \(18.38\) dB at \(1.1\) m, above the \(13.2\)-dB detection
-requirement. The saved \(1.1\)-m C2 range profile gives \(20.56\) dB, so the
-corrected model is conservative by about \(2.18\) dB at that measured point
-rather than being tens of decibels inconsistent with it.
+that line is outside the linear model. The primary lower x-axis is SI carrier
+power at the LNA input. A secondary upper x-axis shows the equivalent *total*
+THz transmit power at the selected fixed isolation:
+
+\[
+P_{t,\mathrm{dBm}}
+=P_{\mathrm{SI,carrier,dBm}}+L_{\mathrm{iso,dB}}
++10\log_{10}(1+1/\mathrm{CSPR}).
+\]
+
+The sideband correction is needed because the lower axis is carrier-only,
+whereas the upper axis is total transmitted THz power.
+
+The default direct effective RCS is now \(-6\) dBsm. At 280 GHz, a 32-dBi
+antenna has the full-reflection antenna-mode upper bound
+
+\[
+\sigma_{\mathrm{ant,max}}
+=\frac{\lambda^2G^2}{4\pi}
+\simeq 0.229~\mathrm{m^2}
+\simeq -6.4~\mathrm{dBsm}.
+\]
+
+Thus a measured boresight effective RCS near \(-6\) dBsm is physically
+plausible once structural and antenna-mode scattering are combined. It is used
+as a direct scenario-level RCS and no additional \(|\Gamma|^2\) factor is
+applied. For the fixed packaged reference
+\((-10~\mathrm{dBm},1~\mathrm{m},-6~\mathrm{dBsm})\), the effective-gain
+operating-point sensing SINR is about \(18.3\) dB, above the \(13.2\)-dB
+detection requirement.
 
 ### 9.1 Realizable UTC-PD photocurrent sweep
 
@@ -451,6 +474,13 @@ P_t(I_{\mathrm{ph}})
 P_{t,\mathrm{dBm}}
 =-10+20\log_{10}\left(\frac{I_{\mathrm{ph}}}{7~\mathrm{mA}}\right).
 \]
+
+The plotted model curve is not a new full waveform simulation at every
+photocurrent. One phase-averaged physical simulation supplies the detector
+cross-beat, self-beat, SI-on noise, and SI-off noise reference powers. The GUI
+then applies the following analytical power laws at 201 display points. A new
+`Range Sweep` replaces the stored detector reference with a simulation of the
+current first-tab configuration.
 
 At fixed isolation, target range, RCS, CSPR, and \(\rho\), both the SI carrier
 and echo RF powers scale with \(q=P_t/P_{t,0}\). Therefore the detector-output
@@ -477,28 +507,27 @@ noise. Thus sensing SINR has a \(2\)-dB/dB low-power slope when the baseline
 noise dominates and approaches a \(1\)-dB/dB slope when SI--noise beating
 dominates.
 
-The `Photocurrent SINR` button opens a separate two-panel figure so the
-existing SI-power figure remains unchanged. Its primary x-axis is measured
-photocurrent and its secondary x-axis is the calibrated equivalent THz Tx
-power. The top panel compares communication simulation with measured
-\(-\mathrm{EVM}_{\mathrm{dB}}\). The bottom panel compares with-SI and no-SI
-sensing simulations with raw-C2 matched-filter SINR proxies.
+The `Sensing vs Photocurrent` button opens a separate single-panel sensing
+figure, so the existing SI-power figure remains unchanged. Its primary x-axis
+is measured photocurrent and its secondary x-axis is the calibrated equivalent
+THz Tx power. The figure compares with-SI and no-SI model curves with raw-C2
+matched-filter SINR proxies. Communication SINR is intentionally omitted.
 
-The measured sensing markers are not copied from the saved C2 summary. Every
-`rx__C2__sig` waveform in `data/captures/photocurrent` is downconverted,
-resampled, synchronized, and matched-filtered again using its embedded
-`tx__*` reference. All captures use the same \(1.014\)-m target ROI; this
-prevents a weak target from being replaced by the \(0.05\)-m zero-guard edge.
-The plotted proxy is the selected target-bin profile level relative to the
-median out-of-guard profile background. Filled sensing markers exceed the
-13.2-dB threshold; open markers are non-detections/low-confidence ROI peaks.
+The measured sensing markers are not copied from the saved C2 summary. The raw
+`rx__C2__sig` waveforms were downconverted, resampled, synchronized, and
+matched-filtered once using their embedded `tx__*` references. All captures
+used the same \(1.014\)-m target ROI; this prevents a weak target from being
+replaced by the \(0.05\)-m zero-guard edge. Those one-time results are stored
+in `photocurrent_sensing_reference_20260724.json`. Opening the GUI figure only
+loads that file; it does not rerun raw waveform processing. The plotted proxy
+is the selected target-bin profile level relative to the median out-of-guard
+profile background. Filled sensing markers exceed the current threshold; open
+markers are non-detections/low-confidence ROI peaks.
 
 The resulting comparison should be interpreted as follows:
 
-- communication measurements approach the detector-reference simulation
-  smoothly as photocurrent increases;
-- at 6.5 and 7 mA, the 16QAM raw-C2 values are 19.60 and 19.55 dB, versus
-  phase-averaged simulations of 18.65 and 19.84 dB;
+- at 6.5 and 7 mA, the 16QAM raw-C2 values are 19.60 and 19.55 dB and are
+  consistent in scale with the phase-averaged detector-reference model;
 - the remaining raw-C2 points, including the 32QAM series, lie around
   3--6 dB and are not monotonic with photocurrent.
 
@@ -569,26 +598,26 @@ RCS로부터 \(|\Gamma|\)를 역추정해 C1에 다시 적용하지 않는다.
 sample curve가 아니라, 논문 link-budget에 해당하는 phase-averaged envelope이다.
 이를 단순히 모든 distance의 raw simulation output이라고 표현하면 안 된다.
 
-## 11. 2026-07-23 numerical sanity check
+## 11. 2026-07-24 numerical sanity check
 
 `isac_sim_params_20260720.json`의 direct effective RCS를 강제로 coupled
 model로 덮어쓰지 않고, \(R_0=1\) m, \(P_t=-10\) dBm, isolation 24 dB,
-direct effective RCS \(-4.28\) dBsm, seed 0으로 계산한 결과:
+direct effective RCS \(-6.0\) dBsm, seed 0으로 계산한 결과:
 
 - EVM-equivalent communication SINR: 약 17.84 dB
 - C1 physical detector-noise SNR: 약 18.81 dB
 - residual-interference SIR: 약 24.81 dB
-- C2 phase-averaged target: 약 \(-37.2\) dBm
+- C2 phase-averaged target: 약 \(-38.95\) dBm
 - C2 SI-on detector-noise residual: 약 \(-38.24\) dBm
 - C2 SI-off detector-noise residual: 약 \(-38.97\) dBm
-- SI--echo cross term: 약 \(-37.4\) dBm
-- echo self-beat: 약 \(-50.8\) dBm
-- SI-assisted target gain over self-beat: 약 13.6 dB
+- SI--echo cross term: 약 \(-39.08\) dBm
+- echo self-beat: 약 \(-54.24\) dBm
+- SI-assisted target gain over self-beat: 약 15.3 dB
 
 \(\rho=0.2,\ G_{p,\mathrm{eff}}=26\) dB 및 13.2-dB threshold를 적용한
 동일 seed sanity check에서는 \(R_{\max}^{\mathrm{comm}}\approx1.15\) m,
-\(R_{\max}^{\mathrm{sens,on}}\approx1.47\) m,
-\(R_{\max}^{\mathrm{sens,off}}\approx0.84\) m이므로
+\(R_{\max}^{\mathrm{sens,on}}\approx1.34\) m,
+\(R_{\max}^{\mathrm{sens,off}}\approx0.76\) m이므로
 \(R_{\max}^{\mathrm{ISAC}}\approx1.15\) m이다. 이는 1 m 이상에서 수행한
 range detection과 모순되지 않는다. 이 operating point에서는 SI-on range가
 SI-off range보다 크다. 일반적으로 target power는 SI-on이 작아질 수 없지만,
@@ -614,9 +643,10 @@ SI--noise beating이 지나치게 크면 SINR/range 개선까지 보장되지는
    가정한 unsaturated what-if upper bound이다.
 2. MZM은 third-order Taylor model이고 UTC-PD power는 saturation 이전의
    \(P_{\mathrm{THz}}\propto I_{\mathrm{ph}}^2\) calibration이다.
-3. analytical range scaling은 한 operating point에서 detector reference를
-   고정한다. \(P_t\), isolation 또는 receiver gain을 바꾸면 signal--noise
-   beating도 바뀌므로 반드시 `Range Sweep`으로 reference를 다시 생성해야 한다.
+3. analytical range/power scaling은 한 operating point에서 detector
+   reference를 고정한다. \(P_t\)와 isolation sweep에는 저장된 SI-on/off
+   detector noise 차이를 보간해 SI--noise beating을 반영하지만, 넓은 동작
+   범위나 receiver gain/IF-chain 변경에는 `Range Sweep` 재보정이 필요하다.
 4. sensing bound는 single-target LOS, stationary clutter, phase-averaged
    cross term 및 range-independent residual background를 가정한다.
 5. 26 dB effective processing gain은 ideal 30.10 dB보다 낮춘 assumed
@@ -637,5 +667,6 @@ SI--noise beating이 지나치게 크면 SINR/range 개선까지 보장되지는
 - SI-on: cross+self, SI-off: self only
 - ISAC range: communication과 SI-on sensing range의 minimum
 - threshold: communication 15.75 dB, sensing 13.2 dB
-- detector reference: 현재 UI의 `SimConfig`와 마지막 실행 config가 같을 때만
-  `Sync Sim`으로 재사용; 다르면 `Range Sweep` 전까지 range bound를 무효화
+- detector reference: 현재 UI의 `SimConfig`와 마지막 실행 config가 같으면
+  `Sync Sim`으로 exact reference를 재사용; 다르면 packaged fixed reference를
+  표시하고 `Range Sweep`으로 현재 구성에 맞게 재보정

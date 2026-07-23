@@ -98,7 +98,7 @@ def build_base_cfg(data: dict) -> sim.SimConfig:
         target_gamma_mag=pf("target_gamma_mag", 0.1) if has_rcs_mode else 0.0,
         target_pol_eff=pf("target_pol_eff", 1.0),
         target_rcs_mode=rcs_mode,
-        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -19.10) if rcs_mode == "direct_effective" else None,
+        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -6.0) if rcs_mode == "direct_effective" else None,
         target_dist_m=max(pf("target_dist_m", 1.0), 0.1),
         awg_dac_bits=pf("awg_dac_bits", 8.0),
         syms_per_chirp=max(8, int(float(a.get("chirp_len_var", 1024)))),

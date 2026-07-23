@@ -48,8 +48,8 @@ def _validation_model():
         "detector_ref_tx_dbm": -10.0,
         "detector_ref_iso_db": 24.0,
         "detector_ref_cspr_db": 13.0,
-        "detector_ref_rcs_dbsm": -4.28,
-        "effective_rcs_dbsm": -4.28,
+        "detector_ref_rcs_dbsm": -6.0,
+        "effective_rcs_dbsm": -6.0,
         "radar_proc_gain_db": 26.0,
         "bandwidth_ghz": 15.0,
         "symbol_rate_gbaud": 15.0,
@@ -75,6 +75,11 @@ def _validation_model():
 
 
 class SystemModelValidationMathTest(unittest.TestCase):
+    def test_default_simulation_uses_measured_direct_effective_rcs(self):
+        cfg = SimConfig()
+        self.assertEqual(cfg.target_rcs_mode, "direct_effective")
+        self.assertAlmostEqual(float(cfg.target_effective_rcs_dbsm), -6.0)
+
     @staticmethod
     def _packaged_reference_cfg():
         return SimConfig(
@@ -115,7 +120,7 @@ class SystemModelValidationMathTest(unittest.TestCase):
             tx_ant_gain_dbi=32.0,
             rx_ant_gain_dbi=32.0,
             target_rcs_mode="direct_effective",
-            target_effective_rcs_dbsm=-4.28,
+            target_effective_rcs_dbsm=-6.0,
             target_dist_m=1.0,
             syms_per_chirp=1024,
             pilot_rho=0.2,
@@ -152,7 +157,7 @@ class SystemModelValidationMathTest(unittest.TestCase):
             target_ant_gain_dbi=32.0,
             target_gamma_mag=0.0,
             target_pol_eff=1.0,
-            effective_rcs_dbsm=-4.28,
+            effective_rcs_dbsm=-6.0,
         )
 
     def test_link_budget_obeys_one_way_and_monostatic_range_laws(self):
@@ -271,10 +276,14 @@ class SystemModelValidationMathTest(unittest.TestCase):
             model._load_packaged_detector_reference(self._packaged_reference_cfg())
         )
         curves = model._si_power_sweep_curves()
-        c4, c8 = model._detector_domain_sensing_coefficients(0.20, -4.28)
+        c4, c8 = model._detector_domain_sensing_coefficients(0.20, -6.0)
         expected_db = 10.0 * np.log10(float(c4) + float(c8))
         self.assertAlmostEqual(
             float(curves["current_sinr_db"]), expected_db, places=3
+        )
+        self.assertGreater(
+            float(curves["current_sinr_db"]),
+            model._float("sens_req_snr_db", 13.2),
         )
         # The calibrated point must remain above the measured-system
         # detection requirement beyond 1 m.
@@ -282,6 +291,20 @@ class SystemModelValidationMathTest(unittest.TestCase):
             float(c4) / 1.1 ** 4 + float(c8) / 1.1 ** 8
         )
         self.assertGreater(at_1p1_db, model._float("sens_req_snr_db", 13.2))
+
+    def test_packaged_reference_can_supply_pre_sweep_redraw_anchor(self):
+        model = _validation_model()
+        model.status_var = _Var("")
+        cfg = self._packaged_reference_cfg()
+        cfg.c2_cable_loss_db = 22.0
+        self.assertFalse(model._load_packaged_detector_reference(cfg))
+        self.assertTrue(
+            model._load_packaged_detector_reference(
+                cfg, require_config_match=False
+            )
+        )
+        curves = model._si_power_sweep_curves()
+        self.assertTrue(np.all(np.isfinite(curves["full_sinr_db"])))
 
     def test_si_sweep_and_rcs_model_stay_consistent_when_parameters_change(self):
         model = _validation_model()
@@ -345,6 +368,35 @@ class SystemModelValidationMathTest(unittest.TestCase):
         self.assertTrue(np.all(sensing_on >= sensing_off))
         self.assertGreater(float(sensing_on[-1]), 13.2)
 
+    def test_missing_reference_returns_tx_sweep_shaped_comm_nan(self):
+        model = _validation_model()
+        model.params["detector_reference_source"] = _Var("")
+        tx_power = np.linspace(-14.0, -10.0, 201)
+        comm = model._comm_sinr_from_reference(
+            1.0, 0.20, tx_power_dbm=tx_power
+        )
+        self.assertEqual(comm.shape, tx_power.shape)
+        self.assertTrue(np.all(np.isnan(comm)))
+
+    def test_stored_photocurrent_results_load_without_raw_reprocessing(self):
+        model = _validation_model()
+        measurements = model._load_photocurrent_measurements()
+        self.assertEqual(len(measurements), 10)
+        point = next(
+            p for p in measurements
+            if p["modulation"] == "16QAM"
+            and float(p["photocurrent_ma"]) == 6.5
+        )
+        self.assertAlmostEqual(float(point["sensing_sinr_db"]), 19.60335, places=5)
+
+    def test_si_secondary_axis_maps_operating_point_to_total_tx_power(self):
+        model = _validation_model()
+        curves = model._si_power_sweep_curves()
+        mapped_tx = model._si_carrier_dbm_to_total_tx_dbm(
+            float(curves["current_si_dbm"])
+        )
+        self.assertAlmostEqual(float(mapped_tx), -10.0, places=9)
+
     def test_raw_photocurrent_capture_reprocessing_finds_known_target(self):
         model = _validation_model()
         path = (
@@ -368,7 +420,7 @@ class SystemModelValidationMathTest(unittest.TestCase):
             model._load_packaged_detector_reference(self._packaged_reference_cfg())
         )
         model.params["sweep_tx_power_dbm"] = _Var(-20.0)
-        curves = model._rmax_vs_effective_rcs(np.asarray([-4.28]), 0.20)
+        curves = model._rmax_vs_effective_rcs(np.asarray([-6.0]), 0.20)
         self.assertGreaterEqual(float(curves[1][0]), float(curves[2][0]))
 
     def test_si_operating_point_and_compression_use_lna_input_plane(self):

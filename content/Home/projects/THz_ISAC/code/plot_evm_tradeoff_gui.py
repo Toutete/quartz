@@ -316,7 +316,7 @@ def build_sim_cfg(data: dict, modulation: str | None = None):
         target_gamma_mag=pf("target_gamma_mag", 0.1) if has_rcs_mode else 0.0,
         target_pol_eff=pf("target_pol_eff", 1.0),
         target_rcs_mode=rcs_mode,
-        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -19.10) if rcs_mode == "direct_effective" else None,
+        target_effective_rcs_dbsm=pf("effective_rcs_dbsm", -6.0) if rcs_mode == "direct_effective" else None,
         target_dist_m=max(pf("target_dist_m", 1.0), 0.1),
         syms_per_chirp=max(8, int(float(a.get("chirp_len_var", 1024)))),
         pilot_rho=float(np.clip(float(a.get("pilot_rho_var", 0.20)), 0.0, 0.95)),

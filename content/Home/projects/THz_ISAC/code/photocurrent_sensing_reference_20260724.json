@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "model_version": "raw-dso-fixed-roi-v1-20260724",
+  "description": "One-time reprocessing of the saved raw C2 DSO waveforms with the embedded TX reference and a fixed 1.014-m target ROI. The GUI reads these values and does not rerun the waveform DSP.",
+  "target_range_m": 1.014,
+  "detection_threshold_db": 13.2,
+  "measurements": [
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph5.npz",
+      "modulation": "16QAM",
+      "photocurrent_ma": 5.0,
+      "tx_power_dbm": -12.9225607136,
+      "sensing_sinr_db": 6.1179,
+      "target_peak_m": 1.0463,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph5.5.npz",
+      "modulation": "16QAM",
+      "photocurrent_ma": 5.5,
+      "tx_power_dbm": -12.095150104,
+      "sensing_sinr_db": 4.3330,
+      "target_peak_m": 1.0159,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph6.npz",
+      "modulation": "16QAM",
+      "photocurrent_ma": 6.0,
+      "tx_power_dbm": -11.3389357926,
+      "sensing_sinr_db": 5.2480,
+      "target_peak_m": 1.0146,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph6.5.npz",
+      "modulation": "16QAM",
+      "photocurrent_ma": 6.5,
+      "tx_power_dbm": -10.6442831891,
+      "sensing_sinr_db": 19.60335,
+      "target_peak_m": 1.0140,
+      "target_detected": true,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_16QAM_Iph7.npz",
+      "modulation": "16QAM",
+      "photocurrent_ma": 7.0,
+      "tx_power_dbm": -10.0,
+      "sensing_sinr_db": 19.5450,
+      "target_peak_m": 1.0150,
+      "target_detected": true,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph4.5.npz",
+      "modulation": "32QAM",
+      "photocurrent_ma": 4.5,
+      "tx_power_dbm": -13.8377481974,
+      "sensing_sinr_db": 4.3980,
+      "target_peak_m": 1.0504,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph5.npz",
+      "modulation": "32QAM",
+      "photocurrent_ma": 5.0,
+      "tx_power_dbm": -12.9225607136,
+      "sensing_sinr_db": 5.0760,
+      "target_peak_m": 1.0152,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph5.5.npz",
+      "modulation": "32QAM",
+      "photocurrent_ma": 5.5,
+      "tx_power_dbm": -12.095150104,
+      "sensing_sinr_db": 4.5250,
+      "target_peak_m": 1.0554,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph6.npz",
+      "modulation": "32QAM",
+      "photocurrent_ma": 6.0,
+      "tx_power_dbm": -11.3389357926,
+      "sensing_sinr_db": 4.6230,
+      "target_peak_m": 1.0458,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    },
+    {
+      "capture": "Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph6.5.npz",
+      "modulation": "32QAM",
+      "photocurrent_ma": 6.5,
+      "tx_power_dbm": -10.6442831891,
+      "sensing_sinr_db": 3.4700,
+      "target_peak_m": 1.0028,
+      "target_detected": false,
+      "source": "stored raw C2 DSO matched-filter result, fixed target ROI"
+    }
+  ]
+}

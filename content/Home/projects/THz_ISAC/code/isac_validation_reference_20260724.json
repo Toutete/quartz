@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "model_version": "detector-reference-v2-20260723",
+  "model_version": "detector-reference-v3-20260724",
+  "description": "Fixed physical-simulation detector reference for analytical range, SI-power, Tx-power, and effective-RCS scaling. The reference RCS is the measured/scenario-level direct effective RCS and already includes all reflection mechanisms.",
   "config": {
     "fs_gsps": 120.0,
     "baud_gbaud": 15.0,
@@ -39,7 +40,7 @@
     "tx_ant_gain_dbi": 32.0,
     "rx_ant_gain_dbi": 32.0,
     "target_rcs_mode": "direct_effective",
-    "target_effective_rcs_dbsm": -4.28,
+    "target_effective_rcs_dbsm": -6.0,
     "target_dist_m": 1.0,
     "syms_per_chirp": 1024,
     "pilot_rho": 0.2,
@@ -52,22 +53,22 @@
     "sim_comm_ref_snr_db": 17.81425099135817,
     "comm_noise_snr_ref_db": 18.809876075841238,
     "comm_sir_ref_db": 24.699442166993258,
-    "c2_target_power_ref_dbm": -37.16599674461748,
+    "c2_target_power_ref_dbm": -38.94795683845955,
     "c2_noise_power_dbm": -38.25124918240784,
     "c2_noise_power_off_dbm": -38.961965508528735,
-    "c2_cross_power_ref_dbm": -37.358314505694835,
-    "c2_echo_self_power_ref_dbm": -50.79944995136917,
-    "c2_no_si_power_ref_dbm": -50.79944995136917,
+    "c2_cross_power_ref_dbm": -39.078314505694835,
+    "c2_echo_self_power_ref_dbm": -54.23944995136917,
+    "c2_no_si_power_ref_dbm": -54.23944995136917,
     "detector_ref_range_m": 1.0,
     "detector_ref_tx_dbm": -10.0,
     "detector_ref_iso_db": 24.0,
     "detector_ref_cspr_db": 13.0,
-    "detector_ref_rcs_dbsm": -4.28,
+    "detector_ref_rcs_dbsm": -6.0,
     "comm_detector_ref_range_m": 1.0,
     "comm_detector_ref_tx_dbm": -10.0,
     "comm_detector_ref_rho": 0.2,
     "comm_detector_ref_cspr_db": 13.0,
     "rho_ref": 0.2,
-    "effective_rcs_dbsm": -4.28
+    "effective_rcs_dbsm": -6.0
   }
 }
