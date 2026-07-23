@@ -62,7 +62,7 @@ from read_range_data import metric_map, to_float, unpack
 
 C = 3e8
 PAPER_BOX_ASPECT = 0.8  # height / width, i.e. 5:4 landscape plot box
-SIM_CACHE_MODEL_VERSION = "evm-tradeoff-v4-gamma-coupled-20260722"
+SIM_CACHE_MODEL_VERSION = "evm-tradeoff-v5-if-noise-reference-20260723"
 
 
 def load_measured_table() -> dict[str, dict[str, np.ndarray]]:

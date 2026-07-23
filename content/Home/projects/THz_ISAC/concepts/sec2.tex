@@ -253,20 +253,22 @@ frequency reference.
 Applying~\eqref{eq:vout_decomp} to the one-way field~\eqref{eq:rc}, the
 desired data power and the in-band SSBI power are
 \begin{equation}
-P_{\mathrm{sig}}=2\mathcal R^2\beta_c^4A_c^4m^2(1-\rho),\qquad
-P_{\mathrm{SSBI}}=\mathcal R^2\beta_c^4A_c^4m^4\xi,
+P_{\mathrm{sig}}=2\kappa_cP_{\mathrm{rx},c}^2m^2(1-\rho),\qquad
+P_{\mathrm{SSBI}}=\kappa_cP_{\mathrm{rx},c}^2m^4\xi,
 \label{eq:psig_pssbi}
 \end{equation}
 where $\xi=\mathbb E\big[\big||s(t)|^2\ast h_{\mathrm{BPF}}(t)\big|^2\big]$
 is the fraction of the self-beat spectrum leaking into the passband, set
 by the waveform and minimized by the DFT-s-OFDM choice of
-Sec.~\ref{sec:tx_signal}. With $N_c$ the receiver noise power and
-$P_{\mathrm{rx}}\triangleq\mathcal R^2\beta_c^4A_c^4=\mathcal
-R^2A_c^4G_c^2/R^4$, the communication signal-to-interference-plus-noise
-ratio, denoted SINR, is
+Sec.~\ref{sec:tx_signal}. Here $P_{\mathrm{rx},c}=P_tG_c/R^2$ is the
+one-way RF power at the C1 detector input, while $\kappa_c$ converts its
+square to output-domain power and includes the LNA, ZBD, IF chain, and
+analysis filter. With $N_c$ at the same detector-output reference plane,
+the communication signal-to-interference-plus-noise ratio is
 \begin{equation}
 \mathrm{SINR}_{\mathrm{comm}}(m,\rho,R)
-=\frac{2P_{\mathrm{rx}}\,m^2(1-\rho)}{N_c+P_{\mathrm{rx}}\,m^4\xi}.
+=frac{2\kappa_cP_{\mathrm{rx},c}^2m^2(1-\rho)}
+{N_c+\kappa_cP_{\mathrm{rx},c}^2m^4\xi}.
 \label{eq:sinr_comm}
 \end{equation}
 The required $\mathrm{SINR}_{\mathrm{comm}}=\gamma_c$, equivalently a
@@ -277,7 +279,8 @@ $R_{\max}^{\mathrm{comm}}(m,\rho)$.
 Lowering CSPR increases the desired term as $m^2$ but increases SSBI as
 $m^4$, whereas an excessively high CSPR makes the link noise limited.
 For the simplified SINR in~\eqref{eq:sinr_comm}, its stationary point
-satisfies $P_{\mathrm{rx}}m_{\mathrm{opt}}^4\xi=N_c$, i.e., the in-band
+satisfies $\kappa_cP_{\mathrm{rx},c}^2m_{\mathrm{opt}}^4\xi=N_c$, i.e.,
+the in-band
 SSBI and receiver-noise terms are equal. The maximizing CSPR is therefore
 not universal: it depends on the noise
 level, received power, waveform-dependent leakage factor $\xi$, and
@@ -295,35 +298,52 @@ is instead the SI--echo cross-beat of~\eqref{eq:yt}, so the SI acts as a
 homodyne local oscillator in the numerator.  Let $P_{\mathrm{SI}}$ and
 $P_{\mathrm{ec}}(R)$ denote the SI and echo RF powers at the common ZBD
 reference plane. After pilot correlation with effective processing gain
-$G_{p,\mathrm{eff}}=\eta_pT_pB$,
+$G_{p,\mathrm{eff}}=\eta_pT_pB$, let $\kappa_d$ denote the conversion
+from an RF power product to detector-output signal power, including the
+LNA, ZBD responsivity, load, IF chain, and analysis filter. Let
+$N_{d,\mathrm{on}}$ and $N_{d,\mathrm{off}}$ be the noise powers at the
+same detector-output reference plane. Their input thermal-noise model is
+common, but the former retains physical SI--noise beating,
 \begin{equation}
 \mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}(m,\rho,R)
-=G_{p,\mathrm{eff}}\frac{2m^2\rho
+=G_{p,\mathrm{eff}}\frac{2m^2\rho\kappa_d
 \left[P_{\mathrm{SI}}P_{\mathrm{ec}}(R)+P_{\mathrm{ec}}^2(R)\right]}
-{P_0N},
+{N_{d,\mathrm{on}}},
 \label{eq:sinr_sens}
 \end{equation}
-where $P_0=1$~mW is the power-normalization reference used by the
-numerical model and $N=kTBF$ is the equivalent input-referred noise
-power.  Equivalently, the code evaluates every power numerically in mW;
-the explicit $P_0$ prevents a dimensionally invalid power-squared over
-power expression. The leakage-generated SSBI is
+The numerical model obtains the two detector-output target components
+and $N_d$ from one deterministic physical-simulation point, including
+the complete ZBD receiver, and then applies the analytical
+$R^{-4}/R^{-8}$ and RCS scaling. This is a simulation reference-plane
+conversion rather than a fit to a measured range point. The extracted
+target components represent the complete unit-power waveform; the
+sensing-pilot fraction $\rho$ in~\eqref{eq:sinr_sens} is subsequently
+applied exactly once. The
+leakage-generated SSBI is
 range-independent and of order $m^4$; at the reported operating point it
 is below the noise floor and is omitted from this sensing bound. Without
 the SI reference, the echo is detected only through its own self-beat,
 \begin{equation}
 \mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/o\ SI}}(m,\rho,R)
-=G_{p,\mathrm{eff}}\frac{2m^2\rho P_{\mathrm{ec}}^2(R)}
-{P_0N}.
+=G_{p,\mathrm{eff}}\frac{2m^2\rho\kappa_dP_{\mathrm{ec}}^2(R)}
+{N_{d,\mathrm{off}}}.
 \label{eq:sinr_sens_nosi}
 \end{equation}
 Consequently, the exact phase-averaged with-SI to without-SI ratio is
-$1+P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ in the noise-limited regime.
+\[
+\frac{\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}}
+{\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/o\ SI}}}
+=\frac{N_{d,\mathrm{off}}}{N_{d,\mathrm{on}}}
+\left[1+\frac{P_{\mathrm{SI}}}{P_{\mathrm{ec}}(R)}\right].
+\]
+The bracketed target-power gain is
+$1+P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$.
 The commonly quoted $P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ result drops the
 self-beat from the with-SI numerator and is only the
 $P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$ approximation. Retaining both positive
-power terms guarantees that adding the SI reference cannot reduce the
-phase-averaged sensing bound.
+target-power terms prevents an artificial coherent null; an SINR gain
+still requires the target-power gain to exceed the SI-induced increase
+in detector-output noise.
 
 The ideal coherent time--bandwidth gain $G_{p,\mathrm{ideal}}=BT_p$ is
 retained only as an upper bound. For a fixed $N_p$-symbol pilot,
@@ -341,10 +361,13 @@ reference-mismatch, and implementation loss; weighting and discarded
 bins are already represented in $N_{\mathrm{eff}}$ and are not counted
 again. Because this is an assumed operating value rather than a directly
 measured universal gain, we use $24$--$28$~dB as a sensitivity interval.
-The communication and sensing bounds use the same input-referred
-thermal-noise model $N=kTBF$, with a common equivalent
-receiver noise figure $F$ obtained from the simulated LNA/IF-amplifier
-Friis cascade and without ZBD-NEP or quantization noise.
+The communication model uses the equivalent input-referred thermal
+noise obtained from the common receiver noise figure. For both branches,
+that noise and the ZBD/IF contributions are propagated to their respective
+detector-output reference planes by the same physical receiver simulation.
+The C2 noise reference retains signal--noise beating but excludes the
+deterministic SI and target components. Quantization noise is omitted from
+the reported bound.
 
 Under a distance-independent post-detection noise floor, the exact
 SI-assisted ZBD output SINR is the sum of an $R^{-4}$ SI--echo term and an
@@ -373,19 +396,60 @@ $P_{\mathrm{SI}}=P_t\alpha_0^2$, and
 $P_{\mathrm{rx},c}(R)=P_tG_c/R^2$, where $G_c$ already contains the
 one-way Friis coefficient, insertion losses, and the load-acceptance
 factor $1-|\Gamma|^2$. Define
-$C=2\rho m^2G_{p,\mathrm{eff}}/(P_0N)$,
-$A_4=CP_{\mathrm{SI}}P_tK$, and $A_8=C(P_tK)^2$. The noise-limited
-range bounds implemented in the GUI are then
+$C_q=2\rho m^2G_{p,\mathrm{eff}}\kappa_d/N_{d,q}$ for
+$q\in\{\mathrm{on},\mathrm{off}\}$,
+$A_4=C_{\mathrm{on}}P_{\mathrm{SI}}P_tK$,
+$A_{8,\mathrm{on}}=C_{\mathrm{on}}(P_tK)^2$, and
+$A_{8,\mathrm{off}}=C_{\mathrm{off}}(P_tK)^2$. The common input noise
+figure is identical in both cases, but $N_{d,\mathrm{on}}$ retains the
+physical SI--receiver-noise beating created by square-law detection.
+At the communication reference point, the waveform simulation supplies
+the EVM-equivalent SINR $\gamma_{c,0}=1/\mathrm{EVM}_0^2$ and the physical
+detector-output noise SNR $\gamma_{N,0}$.  The residual-interference SIR is
+obtained without double counting as
+\begin{equation}
+\frac{1}{\gamma_{I,0}}=
+\max\left(\frac{1}{\gamma_{c,0}}-\frac{1}{\gamma_{N,0}},0\right).
+\label{eq:comm_sir_reference}
+\end{equation}
+For $q_d=(1-\rho)/(1-\rho_0)$,
+$q_P=(P_t/P_{t,0})^2$, and $q_m=m^2/m_0^2$, the implementation evaluates
+\begin{align}
+\gamma_N(R)&=\gamma_{N,0}q_dq_Pq_m
+\left(\frac{R_0}{R}\right)^4,\notag\\
+\gamma_I&=\gamma_{I,0}\frac{q_d}{q_m},\notag\\
+\frac{1}{\gamma_c(R)}&=\frac{1}{\gamma_N(R)}
++\frac{1}{\gamma_I}.
+\label{eq:comm_reference_scaling}
+\end{align}
+Thus, for $\gamma_I>\gamma_c$, define
+$\gamma_{N,\mathrm{req}}=(\gamma_c^{-1}-\gamma_I^{-1})^{-1}$.
+The range bounds implemented in the GUI are
 \begin{align}
 R_{\max}^{\mathrm{comm}}
-&=\left[\frac{(1-\rho)m^2P_tG_c}{N\gamma_c}\right]^{1/2},\notag\\
+&=R_0\left[
+\frac{\gamma_{N,0}q_dq_Pq_m}{\gamma_{N,\mathrm{req}}}
+\right]^{1/4},\notag\\
 R_{\max}^{\mathrm{sens,w/\ SI}}
-&=\left[\frac{A_4+\sqrt{A_4^2+4\gamma_{\mathrm{th}}A_8}}
+&=\left[\frac{A_4+\sqrt{A_4^2+
+4\gamma_{\mathrm{th}}A_{8,\mathrm{on}}}}
 {2\gamma_{\mathrm{th}}}\right]^{1/4},\notag\\
 R_{\max}^{\mathrm{sens,w/o\ SI}}
-&=\left[\frac{A_8}{\gamma_{\mathrm{th}}}\right]^{1/8}.
+&=\left[\frac{A_{8,\mathrm{off}}}{\gamma_{\mathrm{th}}}\right]^{1/8}.
 \label{eq:range_bounds}
 \end{align}
+If $\gamma_I\leq\gamma_c$, no communication range satisfies the requested
+SINR in this residual-interference model. The reference $\gamma_{c,0}$ is
+generated by the waveform simulation at $(R_0,\rho_0,P_{t,0},m_0)$ and
+therefore includes the implemented synchronization, one-tap FDE, and
+residual SSBI. The physical $\gamma_{N,0}$ is calculated independently
+from the deterministic C1 output and the receiver-noise residual. This
+separation prevents receiver noise and DSP residuals from being counted
+twice.
+The analytical curves do not include LNA, ZBD, or ADC compression.
+Consequently, a post-UTC-PD THz-PA setting above the measured
+$-10$-dBm operating point is an unsaturated what-if bound and must be
+checked separately against hardware compression limits.
 Thus effective RCS appears only through $K\propto\sigma_{\mathrm{eff}}$:
 both sensing ranges scale as $\sigma_{\mathrm{eff}}^{1/4}$. The exact
 with-SI sensitivity to a common SINR gain transitions between an
