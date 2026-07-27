@@ -10,466 +10,459 @@
 \usepackage{makecell}
 
 \begin{document}
-\section{Proposed SI-Referenced Full-Duplex ISAC System}
+% ============================
+\section{Proposed Self-Interference-Assisted Monostatic Full-Duplex ISAC System}
 \label{sec:system_model}
 
-We consider a photonic terahertz (THz) full-duplex integrated sensing
-and communication (ISAC) system in which a single aperture
-simultaneously delivers data over a one-way line-of-sight communication
-link and senses a target in a monostatic configuration. The transmit and
-echo paths are separated by circular-polarization duplexing through an
-orthomode transducer (OMT); the finite OMT isolation produces a residual
-self-interference (SI) leakage. Rather than suppressing this leakage, as
-in conventional full-duplex sensing, the proposed receiver reuses it as a
-self-homodyne reference for range estimation, which is the central idea
-of this work and is detailed in Sec.~\ref{sec:cfr}. The architecture is
-shown in Fig.~\ref{fig:concept}. The communication and sensing links
-share the transmitted waveform but use physically distinct receivers,
-and are analyzed separately in
-Secs.~\ref{sec:comm_branch}--\ref{sec:sens_branch} after a common
-transmit and detection model.
+Fig.~\ref{fig:concept} shows the proposed monostatic full-duplex THz
+ISAC system. The free-running photonic transmitter and the sensing
+receiver share a single aperture through a circular-polarization
+duplexer. The transmitted ISAC signal reflected from the communication
+receiver, which serves as the sensing target, returns through the same
+duplexer to the sensing receiver.
+
+The difficulty of monostatic operation is that a portion of the strong
+transmit signal leaks through the duplexer into the sensing receiver as
+self-interference (SI), which is conventionally suppressed. The proposed
+system instead uses it as a reference for direct square-law detection,
+so that both links are realized with free-running lasers and envelope
+detectors alone, without a local oscillator. Direct detection is
+inherently phase-insensitive, but with subcarrier intensity modulation
+its beat against the reference recovers the phase needed for both
+communication and ranging.
+
+Reusing the SI in this way serves two roles. As a strong,
+range-independent reference it homodynes the weak echo, relaxing the
+sensing output from an $R^{-8}$ to an $R^{-4}$ dependence; and as a
+zero-delay reference plane it normalizes the estimated channel response,
+removing the common gain and phase of the free-running source and
+yielding an absolute, drift-immune range.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig/fig2.png}
+\caption{Proposed self-interference-assisted monostatic full-duplex
+THz ISAC system. LD: laser diode; MZM: Mach--Zehnder modulator; UTC-PD: uni-travelling-carrier
+photodiode; LNA: low-noise amplifier; SLD: square-law detector; DSP:
+digital signal processing; RHCP/LHCP: right-/left-hand circular
+polarization.}
+\label{fig:concept}
+\end{figure}
 
 \subsection{Transmit Signal Model}
 \label{sec:tx_signal}
 
-Two free-running lasers are combined and photomixed in a
-uni-travelling-carrier photodiode (UTC-PD), whose output is a THz-band
-voltage proportional to the instantaneous optical intensity beat. One
-optical branch is intensity-modulated by a Mach--Zehnder modulator
-(MZM). The transmitted THz voltage is
+The transmitted THz waveform, normalized so that the carrier has unit
+amplitude, is
 \begin{equation}
-V_{\mathrm{THz}}(t)=A_c\big[1+m\,s(t)\big]\,
-e^{j\left(2\pi f_c t+\Delta\theta(t)\right)},
-\label{eq:vthz}
+x(t)=\big[1+m\,s(t)\big]\,
+e^{j\left(2\pi (f_c+\delta\!f)t+\Delta\theta(t)\right)},
+\label{eq:xt}
 \end{equation}
-where $A_c$ is the carrier amplitude, $m$ the modulation index, $s(t)$
-the baseband symbol stream. Here $f_c$ is the beat frequency. Because
-the two lasers are free-running, both a fast common phase noise
-$\Delta\theta(t)$ and a slow drift of $f_c$ are present; neither is
-locked to any reference. This is the key impairment the receiver must
-tolerate.
-
-Throughout this section, $A_c$ is a normalized carrier coefficient and
-does not contain a second factor of the transmitted power $P_t$. For
-compactness, the factor $\sqrt{P_t}$ is absorbed into the received-field
-coefficients defined below. This convention is equivalent to the
-implementation: \texttt{isac\_gui.py} first normalizes the generated
-photomixed waveform to $P_t$ and subsequently applies only dimensionless
-SI and propagation coefficients. Hence, $P_t$ is applied exactly once.
+where $m$ is the modulation index, $s(t)$ the real, unit-power
+subcarrier signal carrying the symbol stream at the IF $f_{\mathrm{IF}}$,
+and $f_c$ the beat frequency of the two lasers; the
+transmitted power $P_t$ is carried by the link coefficients defined
+below. Free-running operation introduces two impairments: the fast
+common phase noise $\Delta\theta(t)$, and the slow carrier drift
+$\delta\!f$, constant within one capture but unknown and varying across
+captures. The carrier-to-sideband power ratio (CSPR) is $1/m^2$, whose choice
+trades the desired beat term against nonlinear distortion in the
+modulator and the photomixer. We adopt a conservative operating point,
+$\mathrm{CSPR}=13$~dB and $m=0.22$, for the range analysis that
+follows.
 
 \subsubsection{Waveform}
-The free-running beat drift in~\eqref{eq:vthz} precludes time-domain
-matched filtering, whose correlation peak fades as the carrier drifts;
-range must instead be estimated from the channel frequency response
-(CFR), which is drift-immune as shown in Sec.~\ref{sec:cfr}. The
-waveform is therefore drawn from the orthogonal frequency-division
-multiplexing (OFDM) family, which pairs naturally with per-subcarrier
-CFR estimation and frequency-domain equalization. After synchronization,
-one complex equalization coefficient is applied to each active frequency
-bin, i.e., $\widehat X[k]=Y[k]/\widehat H[k]$, before IDFT despreading.
-This conventional one-tap FDE is distinct from the optional symbol-domain
-scalar gain/phase correction used only before EVM evaluation. Within this family, the
-transmit power at THz frequencies is strongly constrained by the
-peak-to-average power ratio (PAPR): the saturated output power of power
-amplifiers falls rapidly with carrier frequency, so a lower PAPR is
-essential to raise the average transmit power \cite{Han2023}. We
-therefore adopt discrete Fourier transform-spread OFDM (DFT-s-OFDM)
-over cyclic-prefix OFDM (CP-OFDM). As a single-carrier waveform,
-DFT-s-OFDM exhibits a PAPR about $2$~dB lower than multi-carrier
-CP-OFDM \cite{Han2023}, while retaining the same CFR compatibility;
-the $2$~dB reduction translates directly into a $2$~dB higher average
-transmit power under the same peak-power limit, a significant gain on a
-power-scarce THz link.
-
-To keep the system model independent of implementation-specific optical
-filtering reference planes, the carrier-to-signal power ratio (CSPR) is
-defined directly for the effective transmitted THz waveform as
-\begin{equation}
-\mathrm{CSPR}=\frac{P_c}{P_s}=\frac{1}{m^2}.
-\label{eq:effective_cspr}
-\end{equation}
-The measured operating value $\mathrm{CSPR}=13$~dB therefore gives
-$m=10^{-13/20}=0.2239$. This same effective modulation index is used
-consistently in the transmitted-signal, ZBD, SSBI, and SINR equations.
-The experimental optical filtering arrangement is described separately
-with the hardware setup and is absorbed here into the calibrated CSPR
-and transmitted power $P_t$.
+The carrier drift precludes time-domain matched filtering, whose
+correlation peak fades as $\delta\!f$ wanders; range must instead be
+estimated from the channel frequency response (CFR), which is
+drift-immune as shown below. The waveform is therefore drawn from the
+orthogonal frequency-division multiplexing (OFDM) family, which pairs
+naturally with per-subcarrier CFR estimation and frequency-domain
+equalization. At THz frequencies the saturated output power of
+amplifiers falls rapidly with carrier frequency, making a low
+peak-to-average power ratio (PAPR) essential, and single-carrier
+DFT-spread OFDM (DFT-s-OFDM) is accordingly regarded as a stronger THz
+candidate than cyclic-prefix OFDM \cite{Han2023}. Its lower PAPR raises the
+average transmit power attainable under the same peak-power limit.
 
 \subsubsection{Power Allocation}
-The waveform carries a deterministic sensing pilot and the communication
-payload,
+The waveform superimposes a deterministic sensing pilot and the
+communication payload \cite{lyu_exploring_2025},
 \begin{equation}
 s(t)=\sqrt{\rho}\,p(t)+\sqrt{1-\rho}\,d(t),\qquad
 \mathbb E\big[|s(t)|^2\big]=1,
 \label{eq:st}
 \end{equation}
-where $p(t)$ is a unit-power constant-modulus Zadoff--Chu pilot, $d(t)$
-the unit-power data symbols, and $\rho\in[0,1]$ the sensing-communication
-power-split ratio. Both functions are thus carried by a single shared
-waveform, preserving full temporal overlap of communication and sensing.
-The power split $\rho$ is nearly independent of the peak-to-average power
-ratio and hence does not affect the back-off; it instead trades the two
-links' maximum ranges, as quantified in Sec.~\ref{sec:isac_range}.
-
-\subsection{Received Signal Model}
-\label{sec:rx_signal}
-
-At the sensing port of the OMT, the transmit leakage $V_{\mathrm{SI}}$,
-of delay approximately zero, superimposes on the target echo
-$V_{\mathrm{ec}}$, of round-trip delay $\tau=2R/c$,
-\begin{align}
-V_{\mathrm{SI}}(t)&=\alpha\,V_{\mathrm{THz}}(t),\qquad
-V_{\mathrm{ec}}(t)=\beta\,V_{\mathrm{THz}}(t-\tau),\label{eq:vsi_vec}\\
-V_{\mathrm{rx}}(t)&=V_{\mathrm{SI}}(t)+V_{\mathrm{ec}}(t),\label{eq:vrx}
-\end{align}
-where $\alpha=\sqrt{P_t}\alpha_0$, with
-$\alpha_0=10^{-\mathrm{ISO}/20}$ denoting the dimensionless OMT
-leakage coefficient, and $\beta=\sqrt{K}/R^2$ is the echo amplitude,
-with
-$K=P_tG_tG_r\lambda^2\sigma_{\mathrm{eff}}/(4\pi)^3$. In practice
-$\alpha\gg\beta$, so $V_{\mathrm{rx}}$ is SI-dominated. A THz low-noise
-amplifier (LNA) precedes the detector; the OMT isolation is designed so
-that the SI power stays below the LNA input $1$-dB compression point,
-$P_{\mathrm{SI}}<\mathrm{IP}_{1\mathrm{dB}}$, keeping the front end
-linear.
-
-For the communication link there is no self-interference, and the
-received field at the remote receiver is
-\begin{equation}
-V_{\mathrm{rx},c}(t)=\beta_c\,V_{\mathrm{THz}}(t-\tau_c),
-\label{eq:rc}
-\end{equation}
-where $\beta_c^2=\eta_L P_tG_c/R^2$ is the one-way received-field coefficient
-under the normalized-$A_c$ convention, $\eta_L=1-|\Gamma|^2$ is the
-fraction of incident power accepted by the target communication antenna,
-and $\tau_c$ the
-propagation delay. The remote communication receiver also serves as the
-reflecting target for the sensing link.
-For this antenna target, the link-budget RCS is modeled as
-\begin{equation}
-\sigma_{\mathrm{eff}}\simeq\sigma_{\mathrm{str}}+
-\frac{\lambda^2G_{\mathrm{tar}}^2}{4\pi}|\Gamma|^2\eta_{\mathrm{pol}},
-\label{eq:gamma_rcs}
-\end{equation}
-where the sum is an incoherent-power approximation used when the relative
-phase of structural- and antenna-mode scattering is unavailable.  The same
-$\Gamma$ is used in $\eta_L$ and in the antenna-mode term, preventing the
-communication and sensing branches from independently assuming perfect
-absorption and maximum reradiation.  For a measured or generic target, a
-direct $\sigma_{\mathrm{eff}}$ can replace~\eqref{eq:gamma_rcs}; it is then a
-scenario parameter and is not inverted to infer load mismatch.
-
-\subsection{Square-Law Detection}
-\label{sec:squarelaw}
-
-Both links use a square-law envelope detector, a zero-bias Schottky
-diode (ZBD), with output
-$V_{\mathrm{SLD}}(t)=\mathcal R\,|V_{\mathrm{in}}(t)|^2$. As a
-single-port passive rectifier the ZBD needs no local oscillator, and the
-carrier phase together with the common laser phase noise cancels in the
-squaring. For a generic input
-$\gamma A_c[1+m\,s(t-\tau)]e^{j(2\pi f_c(t-\tau)+\Delta\theta)}$ with
-$\gamma\in\{\alpha,\beta,\beta_c\}$, the output separates by power of
-$m$,
-\begin{equation}
-V_{\mathrm{SLD}}(t)=\mathcal R\gamma^2A_c^2\Big[1
-+2m\,\mathrm{Re}\{s(t-\tau)\}+m^2|s(t-\tau)|^2\Big],
-\label{eq:vout_decomp}
-\end{equation}
-comprising a direct-current term, a linear intermediate-frequency term
-of order $m$, and a signal-signal beat interference term of order $m^2$,
-denoted SSBI. A direct-current block removes the flat term, which for the
-sensing link also absorbs the time-invariant carrier-carrier product,
-and an intermediate-frequency bandpass retains the linear term. The SSBI
-arises from the detector squaring the sideband against itself; it spreads
-over twice the signal bandwidth, and the portion re-entering the passband
-cannot be filtered out and acts as co-channel interference.
-
-Applying~\eqref{eq:vout_decomp} to the SI-plus-echo input
-$V_{\mathrm{rx}}$ and keeping the SI-echo cross term, which carries the
-range, gives the sensing intermediate-frequency signal
-\begin{align}
-V_{\mathrm{SLD}}(t)\big|_{\mathrm{IF}}=\mathcal R A_c^2 m\big[
-&\alpha\,s(t)\notag\\
-&+\beta\,e^{j2\pi f_c\tau}s(t-\tau)\big]+n(t),
-\label{eq:yt}
-\end{align}
-the SI-borne copy at zero delay plus the echo-borne copy at delay $\tau$.
-
-\subsection{SI-Referenced Range Estimation}
-\label{sec:cfr}
-
-This subsection describes the core of the proposed system: the SI
-leakage, normally an impairment, serves as the self-homodyne reference
-that makes free-running square-law ranging possible.
-
-Dividing the intermediate-frequency spectrum of~\eqref{eq:yt} by the
-known transmit spectrum $S(f)$ yields the CFR
-\begin{align}
-H(f)&=\alpha'+\beta'\,e^{-j2\pi(f+f_c)\tau},\notag\\
-\alpha'&=\mathcal R A_c^2 m\alpha,\qquad
-\beta'=\mathcal R A_c^2 m\beta,
-\label{eq:cfr}
-\end{align}
-a frequency-flat SI term plus a delay-carrying echo term. Estimating the
-flat component as the amplitude-weighted mean
-$H_{\mathrm{SI}}=\sum_f w(f)H(f)/\sum_f w(f)\approx\alpha'$ and
-normalizing removes the common carrier amplitude, modulation index, and
-per-capture laser phase in a single step,
-\begin{equation}
-\tilde H(f)=\frac{H(f)}{H_{\mathrm{SI}}}-1
-=\frac{\beta}{\alpha}\,e^{-j2\pi(f+f_c)\tau}.
-\label{eq:sinorm}
-\end{equation}
-The range is obtained from the inverse discrete Fourier transform of the
-residual,
-\begin{equation}
-P(\tau')=\Big|\sum_f w(f)\,\tilde H'(f)\,e^{j2\pi f\tau'}\Big|,\qquad
-\hat R=\frac{c}{2}\hat\tau,
-\label{eq:idft}
-\end{equation}
-where $\tilde H'$ is the direct-current-removed residual and $\hat\tau$
-the location of the peak of $P(\tau')$. Because the SI is estimated and
-removed before profiling, the range profile is free of an SI peak or its
-sidelobes. Moreover, the free-running beat drift $f_c$ enters
-\eqref{eq:cfr} only as a common phase that cancels in the ratio
-\eqref{eq:sinorm}, so the estimate is immune to carrier drift; a single
-capture suffices, preserving moving targets.
-
-This carrier-drift immunity is why CFR, and not time-domain matched
-filtering, is essential here. The single square-law detector yields a
-real, single-quadrature waveform, for which time-domain matched
-filtering against a fixed template measures only the projection of the
-per-capture phase $2\pi f_c\tau$ onto the template, so the correlation
-peak fades from capture to capture as $f_c$ drifts. The frequency-domain
-response of the same real signal is complex at every bin, and the drift
-enters only as the common phase removed in \eqref{eq:sinorm}, so the
-range estimate is recovered without any local oscillator or optical
-frequency reference.
-
-\subsection{Communication Branch}
-\label{sec:comm_branch}
-
-Applying~\eqref{eq:vout_decomp} to the one-way field~\eqref{eq:rc}, the
-desired data power and the in-band SSBI power are
-\begin{equation}
-P_{\mathrm{sig}}=2\kappa_cP_{\mathrm{rx},c}^2m^2(1-\rho),\qquad
-P_{\mathrm{SSBI}}=\kappa_cP_{\mathrm{rx},c}^2m^4\xi,
-\label{eq:psig_pssbi}
-\end{equation}
-where $\xi=\mathbb E\big[\big||s(t)|^2\ast h_{\mathrm{BPF}}(t)\big|^2\big]$
-is the fraction of the self-beat spectrum leaking into the passband, set
-by the waveform and minimized by the DFT-s-OFDM choice of
-Sec.~\ref{sec:tx_signal}. Here $P_{\mathrm{rx},c}=P_tG_c/R^2$ is the
-one-way RF power at the C1 detector input, while $\kappa_c$ converts its
-square to output-domain power and includes the LNA, ZBD, IF chain, and
-analysis filter. With $N_c$ at the same detector-output reference plane,
-the communication signal-to-interference-plus-noise ratio is
-\begin{equation}
-\mathrm{SINR}_{\mathrm{comm}}(m,\rho,R)
-=frac{2\kappa_cP_{\mathrm{rx},c}^2m^2(1-\rho)}
-{N_c+\kappa_cP_{\mathrm{rx},c}^2m^4\xi}.
-\label{eq:sinr_comm}
-\end{equation}
-The required $\mathrm{SINR}_{\mathrm{comm}}=\gamma_c$, equivalently a
-target error-vector magnitude for a given pre-forward-error-correction
-bit-error rate, defines the maximum communication range
-$R_{\max}^{\mathrm{comm}}(m,\rho)$.
-
-Lowering CSPR increases the desired term as $m^2$ but increases SSBI as
-$m^4$, whereas an excessively high CSPR makes the link noise limited.
-For the simplified SINR in~\eqref{eq:sinr_comm}, its stationary point
-satisfies $\kappa_cP_{\mathrm{rx},c}^2m_{\mathrm{opt}}^4\xi=N_c$, i.e.,
-the in-band
-SSBI and receiver-noise terms are equal. The maximizing CSPR is therefore
-not universal: it depends on the noise
-level, received power, waveform-dependent leakage factor $\xi$, and
-constellation moments. We use the calibrated effective value of
-$13$~dB as the fixed operating point for the reported experiment and
-simulation, rather than claiming it as a system-independent optimum.
+where $p(t)$ is a unit-power constant-modulus pilot of $N_p$ symbols,
+$d(t)$ the unit-power data symbols, and $\rho\in[0,1]$ the
+power-allocation ratio. Both functions occupy the same time-frequency
+resources, and $\rho$ trades the two links' maximum ranges.
 
 \subsection{Sensing Branch}
 \label{sec:sens_branch}
 
-In a coherent receiver driven by an independent local oscillator the SI
-would enter the SINR denominator as interference and, with
-$\alpha\gg\beta$, bury the echo. In the square-law ZBD the ranging term
-is instead the SI--echo cross-beat of~\eqref{eq:yt}, so the SI acts as a
-homodyne local oscillator in the numerator.  Let $P_{\mathrm{SI}}$ and
-$P_{\mathrm{ec}}(R)$ denote the SI and echo RF powers at the common ZBD
-reference plane. After pilot correlation with effective processing gain
-$G_{p,\mathrm{eff}}=\eta_pT_pB$, let $\kappa_d$ denote the conversion
-from an RF power product to detector-output signal power, including the
-LNA, ZBD responsivity, load, IF chain, and analysis filter. Let
-$N_{d,\mathrm{on}}$ and $N_{d,\mathrm{off}}$ be the noise powers at the
-same detector-output reference plane. Their input thermal-noise model is
-common, but the former retains physical SI--noise beating,
+At the sensing port of the duplexer, which feeds the LNA input, the transmit
+leakage superimposes on the target echo of round-trip delay
+$\tau=2R/c$,
 \begin{equation}
-\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}(m,\rho,R)
-=G_{p,\mathrm{eff}}\frac{2m^2\rho\kappa_d
-\left[P_{\mathrm{SI}}P_{\mathrm{ec}}(R)+P_{\mathrm{ec}}^2(R)\right]}
-{N_{d,\mathrm{on}}},
+r(t)=\sqrt{P_{\mathrm{SI}}}\;x(t)+\sqrt{P_{\mathrm{ec}}(R)}\;x(t-\tau)
++n(t),
+\label{eq:rt}
+\end{equation}
+where $n(t)$ is the input-referred receiver noise of power $N$.
+The leakage power $P_{\mathrm{SI}}=P_t\,10^{-\mathrm{ISO}/10}$ is fixed
+by the duplexer isolation and is independent of range, whereas the echo
+power follows the radar equation \cite{sturm_waveform_2011},
+\begin{equation}
+P_{\mathrm{ec}}(\sigma_{\mathrm{eff}},R)
+=\frac{P_tG_tG_r\lambda^2\sigma_{\mathrm{eff}}}{(4\pi)^3R^4},
+\label{eq:pec}
+\end{equation}
+where $\sigma_{\mathrm{eff}}$ is the effective radar cross-section in
+the observation direction, which absorbs the residual antenna mismatch,
+the aspect-angle dependence, and the structural scattering of the
+target. The power-allocation ratio $\rho$ does not enter here: it
+divides the modulation sidebands of~\eqref{eq:st}, not the carrier that
+dominates $P_t$, and therefore appears later in the SINR rather than in
+the link budget. The duplexer isolation is chosen so that
+$P_{\mathrm{SI}}<\mathrm{IP}_{1\mathrm{dB}}$ at the LNA input, which
+sets the operating region of the front end.
+
+\subsubsection{Square-Law Detection}
+The amplified signal is rectified by a square-law detector (SLD),
+implemented as a zero-bias Schottky diode, with output proportional to
+its squared magnitude. Squaring the transmit waveform
+of~\eqref{eq:xt} gives $|x|^2=1+2m\,s+m^2s^2$: DC blocking removes the
+constant, the order-$m$ term is the wanted IF signal, and the
+order-$m^2$ term is signal--signal beat interference (SSBI). The SSBI
+spreads from DC over about twice the signal bandwidth, so only a
+fraction $\kappa\le1$ of its power falls in the IF passband and
+survives the subsequent processing. We carry this fraction explicitly
+and write the in-band SSBI power as $\kappa m^4P^2$ for a path of power
+$P$; the value in Table~\ref{tab:simulation_parameters} is a
+conservative upper bound. Squaring~\eqref{eq:rt} and
+grouping the products by role,
+\begin{align}
+|r(t)|^{2}=&\underbrace{2\sqrt{P_{\mathrm{SI}}P_{\mathrm{ec}}}\,
+\mathrm{Re}\{x(t)x^{*}(t-\tau)\}}_{\text{SI--echo cross-beat}}
++\underbrace{P_{\mathrm{ec}}\,|x(t-\tau)|^{2}}_{\text{echo self-beat}}
+\notag\\
+&+\underbrace{P_{\mathrm{SI}}\,|x(t)|^{2}}_{\text{SI self-beat}}
++\mathcal N(t),
+\label{eq:sq_expand}
+\end{align}
+where the noise term collects the beat of the leakage against the
+receiver noise and the noise against itself,
+\begin{equation}
+\mathcal N(t)=2\sqrt{P_{\mathrm{SI}}}\,\mathrm{Re}\{x(t)n^*(t)\}
++|n(t)|^2.
+\label{eq:noise}
+\end{equation}
+The first two terms of~\eqref{eq:sq_expand} carry the delay $\tau$ and
+form the ranging signal. The SI--echo cross-beat arises only when the
+leakage is present; without it, only the echo self-beat remains.
+
+Every term in~\eqref{eq:sq_expand} is a product of a field with its own
+conjugate, so the carrier phase and the phase noise $\Delta\theta(t)$
+cancel and no local oscillator is required. Only the cross-beat retains
+the delay-differential phase
+$\Delta\phi_\tau=\Delta\theta(t)-\Delta\theta(t-\tau)$, whose effect is
+small at short range: from
+$\mathrm{var}(\Delta\phi_\tau)\simeq2\pi\Delta\nu\tau$, a linewidth
+$\Delta\nu=15$~kHz and $\tau=13.3$~ns at $R=2$~m give
+$\sigma_{\Delta\phi}\approx0.035$~rad.
+
+Retaining the terms proportional to $m$, and at zero delay only the SI
+self-beat, the sensing IF signal is
+\begin{align}
+y(t)=2m\big[&P_{\mathrm{SI}}\,s(t)\notag\\
+&+\big(\sqrt{P_{\mathrm{SI}}P_{\mathrm{ec}}}\,e^{-j2\pi f_c\tau}
++P_{\mathrm{ec}}\big)s(t-\tau)\big]+n_{\mathrm{d}}(t),
+\label{eq:yt}
+\end{align}
+the sum of an SI-borne copy at zero delay and an echo-borne copy at
+delay $\tau$. The echo-borne amplitude comprises the cross-beat and the
+echo self-beat, whose powers become the
+$P_{\mathrm{SI}}P_{\mathrm{ec}}$ and $P_{\mathrm{ec}}^2$ terms of the
+sensing SINR.
+
+The detector-output noise $n_{\mathrm{d}}(t)$ has two parts: a floor
+$N_{\mathrm{d},0}$ independent of the leakage, collecting the
+noise--noise beat of~\eqref{eq:noise} together with the noise added
+after detection by the diode and the IF amplifier, and the
+leakage--noise beat, giving
+$N_{\mathrm{d}}=N_{\mathrm{d},0}+2P_{\mathrm{SI}}N$. The leakage
+therefore strengthens the sensing signal and raises the noise at the
+same time. All powers are referred to the LNA input over the same noise
+bandwidth, so this expression and the SINRs below are written in
+equivalent input-referred power products rather than actual detector
+output powers.
+
+\subsubsection{SI-Referenced Range Estimation}
+Fourier transforming~\eqref{eq:yt} and dividing by the known transmit
+spectrum $S(f)$ yields the channel frequency response (CFR)
+\begin{equation}
+H(f)=A(f)e^{j\varphi}\Big[\sqrt{P_{\mathrm{SI}}}
++\sqrt{P_{\mathrm{ec}}}\;e^{-j2\pi(f+f_c)\tau}\Big],
+\label{eq:cfr}
+\end{equation}
+where $A(f)e^{j\varphi}$ is common to both paths and collects the IF
+channel response together with the phase left by the free-running
+source, namely the per-capture offset due to the drift $\delta\!f$ and
+the residual $\Delta\phi_\tau$.
+
+The SI contribution is frequency-flat, whereas the echo oscillates with
+period $1/\tau$, so averaging $H(f)$ across the band isolates the SI
+path as $H_{\mathrm{SI}}(f)\approx
+A(f)e^{j\varphi}\sqrt{P_{\mathrm{SI}}}$. Dividing by it gives the
+normalized CFR
+\begin{equation}
+\tilde H(f)=\frac{H(f)}{H_{\mathrm{SI}}(f)}-1
+=\sqrt{\frac{P_{\mathrm{ec}}}{P_{\mathrm{SI}}}}\;
+e^{-j2\pi(f+f_c)\tau},
+\label{eq:sinorm}
+\end{equation}
+which is the second role of the SI. For a single line-of-sight target
+$\tilde H(f)$ is a pure linear phase, and the delay and range follow
+from its slope,
+\begin{equation}
+\hat\tau=-\frac{1}{2\pi}\frac{\mathrm{d}\angle\tilde H(f)}{\mathrm{d}f},
+\qquad \hat R=\frac{c}{2}\hat\tau.
+\label{eq:slope}
+\end{equation}
+
+The normalization is what makes~\eqref{eq:slope} usable. Neither part
+of $A(f)e^{j\varphi}$ is known in advance, and each corrupts the
+estimate in its own way: the group delay of $\angle A(f)$ adds directly
+to the measured slope and biases the range, while the source phase
+changes from capture to capture. Dividing by $H_{\mathrm{SI}}$ removes
+both, since they are common to the two paths, leaving a slope that is
+the target delay alone, measured against the zero-delay SI path. The
+drift survives only as a constant phase and does not affect the slope.
+The range is therefore absolute and repeatable across captures without
+external calibration.
+
+For multiple targets the full range profile follows from an inverse
+discrete Fourier transform of $\tilde H(f)$, and a target-free
+reference capture may be subtracted to suppress static clutter
+\cite{sturm_waveform_2011}.
+
+\subsubsection{Sensing SINR}
+Collecting from~\eqref{eq:sq_expand}--\eqref{eq:noise} the terms that
+survive DC blocking and IF filtering, and applying the coherent
+processing gain $G_p=N_p$ of the pilot correlation, the sensing
+signal-to-interference-plus-noise ratio (SINR) is
+\begin{equation}
+\gamma_{\mathrm{sens}}=\rho\,G_p\,
+\frac{2m^2\big[P_{\mathrm{SI}}P_{\mathrm{ec}}+P_{\mathrm{ec}}^2\big]}
+{\underbrace{N_{\mathrm{d},0}}_{\text{detector floor}}
++\underbrace{2P_{\mathrm{SI}}N}_{\text{SI--noise}}
++\underbrace{\kappa m^4P_{\mathrm{SI}}^2}_{\text{SSBI}}},
 \label{eq:sinr_sens}
 \end{equation}
-The numerical model obtains the two detector-output target components
-and $N_d$ from one deterministic physical-simulation point, including
-the complete ZBD receiver, and then applies the analytical
-$R^{-4}/R^{-8}$ and RCS scaling. This is a simulation reference-plane
-conversion rather than a fit to a measured range point. The extracted
-target components represent the complete unit-power waveform; the
-sensing-pilot fraction $\rho$ in~\eqref{eq:sinr_sens} is subsequently
-applied exactly once. The
-leakage-generated SSBI is
-range-independent and of order $m^4$; at the reported operating point it
-is below the noise floor and is omitted from this sensing bound. Without
-the SI reference, the echo is detected only through its own self-beat,
+where $\rho$ enters as the pilot fraction of the modulation. The
+$P_{\mathrm{SI}}P_{\mathrm{ec}}$ and $P_{\mathrm{ec}}^2$ terms of the
+numerator are the cross-beat and the echo self-beat; the denominator
+holds the detector-output floor, the SI--noise beat,
+and the leakage SSBI.
+
+The leakage strengthens the ranging signal through the cross-beat
+$P_{\mathrm{SI}}P_{\mathrm{ec}}$, which scales as $R^{-4}$. The
+SI--noise beat grows in proportion to the leakage, as the ranging term
+does, and therefore saturates the SINR rather than reducing it, whereas
+the SSBI grows as $P_{\mathrm{SI}}^2$ and eventually reverses the gain.
+
+Setting $P_{\mathrm{SI}}=0$ leaves the echo detected through its own
+self-beat alone against the fixed floor,
 \begin{equation}
-\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/o\ SI}}(m,\rho,R)
-=G_{p,\mathrm{eff}}\frac{2m^2\rho\kappa_dP_{\mathrm{ec}}^2(R)}
-{N_{d,\mathrm{off}}}.
-\label{eq:sinr_sens_nosi}
+\gamma_{\mathrm{sens}}^{\mathrm{w/o\,SI}}
+=\rho G_p\,\frac{2m^2P_{\mathrm{ec}}^2}{N_{\mathrm{d},0}}
+\;\propto\;R^{-8},
+\label{eq:sinr_nosi}
 \end{equation}
-Consequently, the exact phase-averaged with-SI to without-SI ratio is
-\[
-\frac{\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/\ SI}}}
-{\mathrm{SINR}_{\mathrm{sens}}^{\mathrm{w/o\ SI}}}
-=\frac{N_{d,\mathrm{off}}}{N_{d,\mathrm{on}}}
-\left[1+\frac{P_{\mathrm{SI}}}{P_{\mathrm{ec}}(R)}\right].
-\]
-The bracketed target-power gain is
-$1+P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$.
-The commonly quoted $P_{\mathrm{SI}}/P_{\mathrm{ec}}(R)$ result drops the
-self-beat from the with-SI numerator and is only the
-$P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$ approximation. Retaining both positive
-target-power terms prevents an artificial coherent null; an SINR gain
-still requires the target-power gain to exceed the SI-induced increase
-in detector-output noise.
+where the echo SSBI is omitted because $P_{\mathrm{ec}}$ is small. The
+maximum sensing range $R_{\max}^{\mathrm{sens}}$ is the distance at
+which $\gamma_{\mathrm{sens}}=\gamma_{\mathrm{th}}$.
 
-The ideal coherent time--bandwidth gain $G_{p,\mathrm{ideal}}=BT_p$ is
-retained only as an upper bound. For a fixed $N_p$-symbol pilot,
-$T_p=N_p/R_s$ and hence $G_{p,\mathrm{ideal}}=N_pB/R_s$; when
-$B\simeq R_s$, the gain is approximately $N_p$ and equals $30.10$~dB
-for $N_p=1024$. In the saved C2 capture, 908 CFR bins survive the mask and
-their nonuniform weights give the equivalent count
-$N_{\mathrm{eff}}=(\sum_k w_k)^2/\sum_k w_k^2=526.5$, or $27.21$~dB.
-We therefore use a conservative assumed value
-$G_{p,\mathrm{eff}}=26.0$~dB for both the sensing-SINR and ISAC-range
-results. It is $4.10$~dB below the ideal bound and $1.21$~dB below the
-weighted-bin bound, corresponding to $\eta_p=10^{-4.10/10}=0.389$.
-The residual margin represents synchronization, phase-coherence,
-reference-mismatch, and implementation loss; weighting and discarded
-bins are already represented in $N_{\mathrm{eff}}$ and are not counted
-again. Because this is an assumed operating value rather than a directly
-measured universal gain, we use $24$--$28$~dB as a sensitivity interval.
-The communication model uses the equivalent input-referred thermal
-noise obtained from the common receiver noise figure. For both branches,
-that noise and the ZBD/IF contributions are propagated to their respective
-detector-output reference planes by the same physical receiver simulation.
-The C2 noise reference retains signal--noise beating but excludes the
-deterministic SI and target components. Quantization noise is omitted from
-the reported bound.
+\subsection{Communication Branch}
+\label{sec:comm_branch}
 
-Under a distance-independent post-detection noise floor, the exact
-SI-assisted ZBD output SINR is the sum of an $R^{-4}$ SI--echo term and an
-$R^{-8}$ echo-self-beat term. At long range, where
-$P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$, the former dominates and gives the
-usual homodyne $R^{-4}$ range-extension law. Without the SI reference only
-the $R^{-8}$ self-beat remains. The $R^{-8}$ figure is specific to
-square-law self-detection in the output domain, not the conventional
-$R^{-4}$ radar signal-to-noise ratio defined at the RF input; the
- measured sensing SINR reported here is defined in the ZBD output domain.
-The gain grows with the SI strength $\alpha$, but only until the front
-end reaches $\mathrm{IP}_{1\mathrm{dB}}$; if $m$ is increased beyond the
-reported operating region, the omitted leakage-generated SSBI must also
-be reinstated. The maximum sensing range
-$R_{\max}^{\mathrm{sens}}(m,\rho)$ solves
-$\mathrm{SINR}_{\mathrm{sens}}=\gamma_{th}$, with $\gamma_{th}$ set by a
-target detection operating point, for example $P_d=0.9$ at
-$P_{fa}=10^{-6}$ for a single-look, non-fluctuating target.
+The one-way received signal at the remote receiver is
+$r_c(t)=\sqrt{P_{\mathrm{rx}}(R)}\,x(t-\tau_c)$, with the received
+power given by the free-space propagation law \cite{skolnik_introduction_1980},
+\begin{equation}
+P_{\mathrm{rx}}(R)=\frac{P_tG_tG_c\lambda^2}{(4\pi)^2R^2},
+\label{eq:prx}
+\end{equation}
+and the same square-law detection applies. The received carrier now
+plays the part the leakage plays in the sensing branch: it is the
+reference the payload beats against, and it beats against the receiver
+noise in the same way. There is no cross-beat, since there is only one
+path, so
+\begin{equation}
+\gamma_{\mathrm{comm}}
+=\frac{m^2(1-\rho)P_{\mathrm{rx}}^2}
+{N_{\mathrm{d},0}+2P_{\mathrm{rx}}N+\kappa m^4P_{\mathrm{rx}}^2},
+\label{eq:sinr_comm}
+\end{equation}
+which is~\eqref{eq:sinr_sens} with the leakage replaced by the received
+carrier. The desired term scales as $P_{\mathrm{rx}}^2\propto R^{-4}$,
+matching the SI-homodyned sensing branch. At the ranges of interest the
+carrier--noise beat dominates the denominator, while the SSBI imposes a
+ceiling $(1-\rho)/\kappa m^2$ that lies well above $\gamma_c$ for the
+values of Table~\ref{tab:simulation_parameters}. The maximum
+communication range $R_{\max}^{\mathrm{comm}}$ is the distance at which
+$\gamma_{\mathrm{comm}}=\gamma_c$.
 
-\subsection{ISAC Range}
+\subsection{ISAC Range Analysis}
 \label{sec:isac_range}
 
-For the deterministic range plot, define
-$P_{\mathrm{ec}}(R)=P_tK/R^4$,
-$P_{\mathrm{SI}}=P_t\alpha_0^2$, and
-$P_{\mathrm{rx},c}(R)=P_tG_c/R^2$, where $G_c$ already contains the
-one-way Friis coefficient, insertion losses, and the load-acceptance
-factor $1-|\Gamma|^2$. Define
-$C_q=2\rho m^2G_{p,\mathrm{eff}}\kappa_d/N_{d,q}$ for
-$q\in\{\mathrm{on},\mathrm{off}\}$,
-$A_4=C_{\mathrm{on}}P_{\mathrm{SI}}P_tK$,
-$A_{8,\mathrm{on}}=C_{\mathrm{on}}(P_tK)^2$, and
-$A_{8,\mathrm{off}}=C_{\mathrm{off}}(P_tK)^2$. The common input noise
-figure is identical in both cases, but $N_{d,\mathrm{on}}$ retains the
-physical SI--receiver-noise beating created by square-law detection.
-At the communication reference point, the waveform simulation supplies
-the EVM-equivalent SINR $\gamma_{c,0}=1/\mathrm{EVM}_0^2$ and the physical
-detector-output noise SNR $\gamma_{N,0}$.  The residual-interference SIR is
-obtained without double counting as
+A radar link and a communication link of the same platform reach
+different distances, since one is governed by the two-way radar
+equation and the other by the one-way propagation law, and their
+respective maximum ranges must therefore be evaluated separately
+\cite{sturm_waveform_2011}. A joint system delivers both functions
+only where both are satisfied, so we define the ISAC range as
 \begin{equation}
-\frac{1}{\gamma_{I,0}}=
-\max\left(\frac{1}{\gamma_{c,0}}-\frac{1}{\gamma_{N,0}},0\right).
-\label{eq:comm_sir_reference}
-\end{equation}
-For $q_d=(1-\rho)/(1-\rho_0)$,
-$q_P=(P_t/P_{t,0})^2$, and $q_m=m^2/m_0^2$, the implementation evaluates
-\begin{align}
-\gamma_N(R)&=\gamma_{N,0}q_dq_Pq_m
-\left(\frac{R_0}{R}\right)^4,\notag\\
-\gamma_I&=\gamma_{I,0}\frac{q_d}{q_m},\notag\\
-\frac{1}{\gamma_c(R)}&=\frac{1}{\gamma_N(R)}
-+\frac{1}{\gamma_I}.
-\label{eq:comm_reference_scaling}
-\end{align}
-Thus, for $\gamma_I>\gamma_c$, define
-$\gamma_{N,\mathrm{req}}=(\gamma_c^{-1}-\gamma_I^{-1})^{-1}$.
-The range bounds implemented in the GUI are
-\begin{align}
-R_{\max}^{\mathrm{comm}}
-&=R_0\left[
-\frac{\gamma_{N,0}q_dq_Pq_m}{\gamma_{N,\mathrm{req}}}
-\right]^{1/4},\notag\\
-R_{\max}^{\mathrm{sens,w/\ SI}}
-&=\left[\frac{A_4+\sqrt{A_4^2+
-4\gamma_{\mathrm{th}}A_{8,\mathrm{on}}}}
-{2\gamma_{\mathrm{th}}}\right]^{1/4},\notag\\
-R_{\max}^{\mathrm{sens,w/o\ SI}}
-&=\left[\frac{A_{8,\mathrm{off}}}{\gamma_{\mathrm{th}}}\right]^{1/8}.
-\label{eq:range_bounds}
-\end{align}
-If $\gamma_I\leq\gamma_c$, no communication range satisfies the requested
-SINR in this residual-interference model. The reference $\gamma_{c,0}$ is
-generated by the waveform simulation at $(R_0,\rho_0,P_{t,0},m_0)$ and
-therefore includes the implemented synchronization, one-tap FDE, and
-residual SSBI. The physical $\gamma_{N,0}$ is calculated independently
-from the deterministic C1 output and the receiver-noise residual. This
-separation prevents receiver noise and DSP residuals from being counted
-twice.
-The analytical curves do not include LNA, ZBD, or ADC compression.
-Consequently, a post-UTC-PD THz-PA setting above the measured
-$-10$-dBm operating point is an unsaturated what-if bound and must be
-checked separately against hardware compression limits.
-Thus effective RCS appears only through $K\propto\sigma_{\mathrm{eff}}$:
-both sensing ranges scale as $\sigma_{\mathrm{eff}}^{1/4}$. The exact
-with-SI sensitivity to a common SINR gain transitions between an
-eighth-root self-beat limit and a fourth-root cross-beat limit. The
-communication curve remains
-constant on an effective-RCS sweep because $|\Gamma|$ is held fixed and
-is not inferred back from the scenario-level RCS.
-
-The ISAC range is
-\begin{equation}
-R_{\max}(m,\rho)=\min\big(R_{\max}^{\mathrm{comm}}(m,\rho),\,
-R_{\max}^{\mathrm{sens}}(m,\rho)\big),
+R_{\max}=\min\big(R_{\max}^{\mathrm{comm}},\,
+R_{\max}^{\mathrm{sens}}\big).
 \label{eq:rmax}
 \end{equation}
-with $R_{\max}^{\mathrm{comm}}$ increasing in $1-\rho$ and
-$R_{\max}^{\mathrm{sens}}$ in $\rho$. Since THz communication is
-free-space-path-loss limited, the communication link is typically the
-binding constraint; the operating point minimizes $\rho$ subject to
-$R_{\max}^{\mathrm{sens}}(m,\rho)\ge R_{\mathrm{req}}$, a
-communication-centric allocation in which the homodyne gain lets a small
-sensing power fraction still meet the ranging requirement.
+The two thresholds behind it are of different nature. The
+communication threshold $\gamma_c$ is a demodulation requirement: the
+SINR at which the recovered constellation reaches the target error
+rate, here $32$-QAM at the $20\%$-overhead SD-FEC threshold of
+$\mathrm{BER}=2\times10^{-2}$, giving $\gamma_c=15.75$~dB. The sensing
+threshold $\gamma_{\mathrm{th}}$ is a detection requirement: the SINR
+at which the range-profile peak, after the coherent processing gain
+$G_p$, is declared a target at a prescribed detection and false-alarm
+probability, here $P_{\mathrm{d}}=0.9$ at $P_{\mathrm{fa}}=10^{-6}$,
+giving $\gamma_{\mathrm{th}}=13.20$~dB from the Marcum
+$Q$-function. Both are evaluated with the parameters of
+Table~\ref{tab:simulation_parameters}.
+
+Fig.~\ref{fig:isac_range} evaluates~\eqref{eq:rmax} against
+$\sigma_{\mathrm{eff}}$ at $B=20$~GHz, whose $7.5$-mm range resolution
+follows from $c/2B$. The communication range does not depend on the
+target and is flat, whereas the sensing range grows with
+$\sigma_{\mathrm{eff}}$. Both sensing curves scale as
+$\sigma_{\mathrm{eff}}^{1/4}$, since $\gamma_{\mathrm{sens}}$ is
+proportional to $\sigma_{\mathrm{eff}}R^{-4}$ with the leakage and to
+$\sigma_{\mathrm{eff}}^2R^{-8}$ without it, so admitting the leakage
+shifts the sensing range up by a constant factor.
+Fig.~\ref{fig:isac_range}(a), with $\rho=0.2$, is
+communication-centric: the maximum communication range is $1.1$~m, and
+for a strong target the sensing range already exceeds it.
+Fig.~\ref{fig:isac_range}(b), with $\rho=0.8$, is sensing-centric: the
+maximum communication range falls to $0.8$~m, but a weak,
+low-$\sigma_{\mathrm{eff}}$ target remains detectable.
+
+\begin{figure}[!t]
+\centering
+\subfloat[$\rho=0.2$]{\includegraphics[width=0.48\columnwidth]{fig/fig3(a).png}}
+\hfil
+\subfloat[$\rho=0.8$]{\includegraphics[width=0.48\columnwidth]{fig/fig3(b).png}}
+\caption{ISAC range versus effective radar cross-section for
+(a)~$\rho=0.2$ and (b)~$\rho=0.8$. Both sensing curves scale as
+$\sigma_{\mathrm{eff}}^{1/4}$; admitting the leakage shifts the sensing
+range up by a constant factor.}
+\label{fig:isac_range}
+\end{figure}
+
+Fig.~\ref{fig:sinr_si} shows the sensing SINR
+of~\eqref{eq:sinr_sens} as a function of the leakage power at
+$R=1.1$~m, and separates into three regions.
+
+Where the leakage does not exceed the echo, the echo self-beat
+dominates and the SINR approaches the leakage-free floor
+of~\eqref{eq:sinr_nosi}, which lies below $\gamma_{\mathrm{th}}$: with
+no leakage to homodyne the echo, the sensing threshold is not met.
+
+Once $P_{\mathrm{SI}}$ exceeds $P_{\mathrm{ec}}$ the cross-beat takes
+over. With only the fixed floor in the denominator,
+\begin{equation}
+\gamma_{\mathrm{sens}}\simeq
+\rho G_p\,\frac{2m^2P_{\mathrm{SI}}P_{\mathrm{ec}}}{N_{\mathrm{d},0}},
+\label{eq:sinr_window}
+\end{equation}
+the dashed line in Fig.~\ref{fig:sinr_si}, along which the SINR would
+rise one for one with the leakage and gain the full
+$P_{\mathrm{SI}}/P_{\mathrm{ec}}=17$~dB at the operating point.
+
+The rise is curtailed from two directions. The SI--noise beat overtakes
+the floor first and, growing at the same rate as the ranging term,
+flattens the curve; the SSBI follows and, growing twice as fast, bends
+it back down. The realized gain at the operating point is $12.5$~dB
+rather than the ideal $17$~dB. The shaded
+band marks the leakage powers for which the sensing threshold is met
+without compressing the front end, and the isolation of
+Table~\ref{tab:simulation_parameters} places the operating point inside
+it. What matters is not that a single optimum exists, but that the gain
+is available across a broad and easily met range of isolation.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig/fig4.png}
+\caption{Sensing SINR versus self-interference power at the
+communication limit of $1.1$~m. The shaded band marks the leakage
+powers for which the sensing threshold is met without compressing the
+front end.}
+\label{fig:sinr_si}
+\end{figure}
+
+In summary, subcarrier intensity modulation enables simultaneous
+communication and sensing with a single free-running photonic
+transmitter and two square-law receivers, without a local oscillator.
+Reusing the duplexer leakage as both a self-homodyne and a zero-delay
+reference relaxes the sensing SINR from $R^{-8}$ to $R^{-4}$ and yields
+absolute, drift-immune ranging through normalized CFR estimation. The
+duplexer isolation is therefore a parameter to place within the
+operating window of Fig.~\ref{fig:sinr_si} rather than one to maximize.
+
+\begin{table}[t]
+\caption{System parameters for ISAC range analysis}
+\label{tab:simulation_parameters}
+\centering
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{@{}llr@{}}
+\toprule
+Parameter & Symbol & Value \\
+\midrule
+THz carrier frequency & $f_c$ & $280$ GHz \\
+Intermediate frequency & $f_{\mathrm{IF}}$ & $11$ GHz \\
+Waveform / modulation & -- & DFT-s-OFDM / 32-QAM \\
+Bandwidth (symbol rate) & $B$ & $20$ GHz \\
+Data rate & $R_b$ & $100$ Gb/s \\
+Range resolution & $\Delta R=c/2B$ & $7.5$ mm \\
+Pilot length & $N_p$ & $1024$ symbols \\
+Processing gain & $G_p=N_p$ & $30.10$ dB \\
+Power-allocation ratio & $\rho$ & $0.20$ \\
+Modulation index & $m$ & $0.22$ \\
+Effective in-band SSBI fraction$^{\S}$ & $\kappa$ & $0.069$ \\
+Laser linewidth & $\Delta\nu$ & $15$ kHz \\
+Transmitted THz power & $P_t$ & $-10$ dBm \\
+Tx/Rx antenna gains & $G_t,G_r$ & $33$ dBi \\
+Duplexer isolation & $\mathrm{ISO}$ & $25$ dB \\
+SI power at LNA input & $P_{\mathrm{SI}}$ & $-35$ dBm \\
+Echo power at $R_{\max}$ & $P_{\mathrm{ec}}$ & $-52$ dBm \\
+LNA compression point & $\mathrm{IP}_{1\mathrm{dB}}$ & $-20$ dBm \\
+Effective RCS$^{\P}$ & $\sigma_{\mathrm{eff}}$ & $-8$ dBsm \\
+System noise figure & $F$ & $8$ dB \\
+Noise power & $N$ & $-63.0$ dBm \\
+Detector-output noise floor & $N_{\mathrm{d},0}$ & $-97.5$ dB(mW$^2$) \\
+Required comm.\ SINR$^{\dagger}$ & $\gamma_c$ & $15.75$ dB \\
+Required sensing SINR$^{\ddagger}$ & $\gamma_{\mathrm{th}}$ & $13.20$ dB \\
+ISAC range & $R_{\max}$ & $1.1$ m \\
+\bottomrule
+\multicolumn{3}{@{}l}{\footnotesize $^{\P}$Nominal value; swept in Fig.~\ref{fig:isac_range}.} \\
+\multicolumn{3}{@{}l}{\footnotesize $^{\S}$Conservative upper bound, obtained by assigning the whole measured non-AWGN excess to SSBI.} \\
+\multicolumn{3}{@{}l}{\footnotesize $^{\dagger}$32-QAM at the $20\%$-overhead SD-FEC threshold, $\mathrm{BER}=2\times10^{-2}$.} \\
+\multicolumn{3}{@{}l}{\footnotesize $^{\ddagger}P_{\mathrm{d}}=0.9$ at $P_{\mathrm{fa}}=10^{-6}$.} \\
+\end{tabular}
+\end{table}
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
 
 \end{document}
