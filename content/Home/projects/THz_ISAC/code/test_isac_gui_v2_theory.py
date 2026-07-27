@@ -93,19 +93,25 @@ class ClosedFormTheoryTests(unittest.TestCase):
         model.params = {
             "manual_c2_si_on_points": _Var("1000:-38, 1200:-42"),
             "bandpower_est_offset_db": _Var(1.5),
+            "si_on_iso_db": _Var(25.0),
         }
         model.meas_points = []
         model.runtime = {}
         model._c2_power_curve_dbm = lambda ranges, _state: np.full_like(
             np.asarray(ranges, dtype=np.float64), -40.0
         )
-        model._model = lambda ranges: {
-            "snr_sens": np.full_like(
-                np.asarray(ranges, dtype=np.float64), 100.0
+        model._c2_target_power_curve_dbm = lambda ranges, _state: np.full_like(
+            np.asarray(ranges, dtype=np.float64), -50.0
+        )
+        model._sensing_sinr_from_target_power_dbm = (
+            lambda target, _state: np.full_like(
+                np.asarray(target, dtype=np.float64), 20.0
             )
-        }
+        )
 
         before = model._c2_power_radar_snr_points("on")
+        model.params["si_on_iso_db"].set(35.0)
+        after_isolation_change = model._c2_power_radar_snr_points("on")
         model.params["manual_c2_si_on_points"].set(
             "1000:-30, 1200:-42"
         )
@@ -113,8 +119,38 @@ class ClosedFormTheoryTests(unittest.TestCase):
 
         self.assertAlmostEqual(before[0][1], 23.5)
         self.assertAlmostEqual(before[1][1], 19.5)
+        self.assertEqual(before, after_isolation_change)
         self.assertAlmostEqual(after[0][1], 31.5)
         self.assertAlmostEqual(after[1][1], before[1][1])
+
+    def test_direct_and_band_power_sinr_can_share_the_same_range(self):
+        model = object.__new__(SystemModelValidationPanel)
+        model.params = {"bandpower_est_offset_db": _Var(0.0)}
+        model._active_measurements = lambda: [
+            {
+                "range_m": 1.1,
+                "c2_si_state": "on",
+                "snr_sens_db": 21.0,
+                "c2_inband_power_dbm": -39.0,
+            }
+        ]
+        model._c2_power_curve_dbm = lambda ranges, _state: np.full_like(
+            np.asarray(ranges, dtype=np.float64), -40.0
+        )
+        model._c2_target_power_curve_dbm = lambda ranges, _state: np.full_like(
+            np.asarray(ranges, dtype=np.float64), -50.0
+        )
+        model._sensing_sinr_from_target_power_dbm = (
+            lambda target, _state: np.full_like(
+                np.asarray(target, dtype=np.float64), 18.0
+            )
+        )
+
+        points = model._c2_power_radar_snr_points("on")
+
+        self.assertEqual(len(points), 2)
+        self.assertEqual([point[0] for point in points], [1.1, 1.1])
+        self.assertEqual([point[1] for point in points], [19.0, 21.0])
 
     def test_si_figure_has_no_shading_linear_guide_or_operating_point(self):
         model = _theory_model()

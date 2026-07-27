@@ -3120,7 +3120,11 @@ def run_isac_sim(cfg: SimConfig):
     v_lna_sig = v_lna_in * lna_gain_lin
     dso_analog_bw_hz = min(max(float(cfg.dso_bandwidth_ghz) * 1e9, 1.0), 0.5 * fs)
     if_chain_bw_hz = min(30e9, dso_analog_bw_hz, 0.5 * fs)
-    rf_noise_bw_hz = dso_analog_bw_hz
+    # The complex THz-envelope noise must cover both positive and negative IF
+    # offsets accepted by the detector.  Using the DSO bandwidth as the total
+    # two-sided RF bandwidth created an artificial cutoff at +20 GHz in the
+    # displayed 0--25 GHz C1 spectrum for a 40-GHz DSO setting.
+    rf_noise_bw_hz = min(2.0 * if_chain_bw_hz, fs)
     if_noise_bw_hz = if_chain_bw_hz
     additive_noise_enable = bool(getattr(cfg, "additive_noise_enable", True))
     n_in_dbm = -174.0 + 10 * np.log10(rf_noise_bw_hz) + cfg.lna_nf_db
@@ -3360,6 +3364,8 @@ def run_isac_sim(cfg: SimConfig):
     si_cfr_profile_db = np.zeros(0, dtype=np.float64)
     si_cfr_peak_m = float("nan")
     si_cfr_coherence = float("nan")
+    si_cfr_contrast_db = float("nan")
+    si_cfr_pslr_db = float("nan")
     try:
         n_cfr = min(len(radar_input), len(ref_sig))
         if n_cfr >= 64 and len(range_axis) >= 8:
@@ -3402,6 +3408,47 @@ def run_isac_sim(cfg: SimConfig):
                 else:
                     si_cfr_peak_m = float(si_cfr["peak_m"])
                 si_cfr_coherence = float(si_cfr["coherence"])
+                if len(si_cfr_range_axis) > 8 and np.isfinite(si_cfr_peak_m):
+                    finite_cfr = (
+                        np.isfinite(si_cfr_range_axis)
+                        & np.isfinite(si_cfr_profile_db)
+                    )
+                    peak_candidates = finite_cfr & (
+                        np.abs(si_cfr_range_axis - si_cfr_peak_m) <= target_window_m
+                    )
+                    if np.any(peak_candidates):
+                        candidate_indices = np.flatnonzero(peak_candidates)
+                        cfr_peak_idx = int(
+                            candidate_indices[
+                                int(np.argmax(si_cfr_profile_db[peak_candidates]))
+                            ]
+                        )
+                        dr_cfr_m = float(
+                            np.median(np.diff(si_cfr_range_axis))
+                        )
+                        range_res_m = 3e8 / (
+                            2.0 * max(float(occupied_bw_hz), 1.0)
+                        )
+                        guard_m = max(0.05, 2.0 * range_res_m, 2.0 * dr_cfr_m)
+                        floor_bins = (
+                            finite_cfr
+                            & (si_cfr_range_axis > guard_m)
+                            & (
+                                np.abs(
+                                    si_cfr_range_axis
+                                    - si_cfr_range_axis[cfr_peak_idx]
+                                )
+                                > guard_m
+                            )
+                        )
+                        if np.any(floor_bins):
+                            cfr_peak_db = float(si_cfr_profile_db[cfr_peak_idx])
+                            si_cfr_contrast_db = cfr_peak_db - float(
+                                np.median(si_cfr_profile_db[floor_bins])
+                            )
+                            si_cfr_pslr_db = cfr_peak_db - float(
+                                np.max(si_cfr_profile_db[floor_bins])
+                            )
     except Exception:
         pass
     pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(baud_rate, 1.0)
@@ -3413,8 +3460,8 @@ def run_isac_sim(cfg: SimConfig):
     )
     rho_sensing = float(np.clip(cfg.pilot_rho, 1e-12, 1.0))
     pilot_weighted_proc_gain_db = proc_gain_db + 10.0 * np.log10(rho_sensing)
-    range_profile_contrast_db = float("nan")
-    pslr_db = float("nan")
+    matched_filter_contrast_db = float("nan")
+    matched_filter_pslr_db = float("nan")
     selected_range_m = float("nan")
     self_interference_range_m = float("nan")
     zero_guard_m = float("nan")
@@ -3453,8 +3500,8 @@ def run_isac_sim(cfg: SimConfig):
         if np.any(side):
             side_max = float(np.max(range_profile_db[side]))
             noise_med = float(np.median(range_profile_db[side]))
-            pslr_db = float(range_profile_db[pk] - side_max)
-            range_profile_contrast_db = float(range_profile_db[pk] - noise_med)
+            matched_filter_pslr_db = float(range_profile_db[pk] - side_max)
+            matched_filter_contrast_db = float(range_profile_db[pk] - noise_med)
 
     # 8. Remote Comm Receiver (1-way Comm Path + DSP)
     #
@@ -3627,7 +3674,7 @@ def run_isac_sim(cfg: SimConfig):
         residual_ceiling = 10.0 ** (
             float(getattr(cfg, "sensing_residual_ceiling_db", 40.0)) / 10.0
         )
-        radar_snr_db = 10.0 * np.log10(
+        predicted_radar_snr_db = 10.0 * np.log10(
             1.0
             / (
                 1.0 / max(raw_radar_snr, 1e-300)
@@ -3635,7 +3682,22 @@ def run_isac_sim(cfg: SimConfig):
             )
         )
     else:
-        radar_snr_db = float("nan")
+        predicted_radar_snr_db = float("nan")
+
+    # The detector-domain equation is a prediction.  The displayed normalized
+    # CFR has its own realized target-to-floor metric, which includes waveform,
+    # window, CFR-estimation, and sidelobe effects.  Keep both values explicit.
+    radar_snr_db = (
+        float(si_cfr_contrast_db)
+        if np.isfinite(si_cfr_contrast_db)
+        else float(predicted_radar_snr_db)
+    )
+    range_profile_contrast_db = radar_snr_db
+    pslr_db = (
+        float(si_cfr_pslr_db)
+        if np.isfinite(si_cfr_pslr_db)
+        else float(matched_filter_pslr_db)
+    )
 
     # 9. Demodulation (Remote Comm)
     lo_if = np.exp(-1j * 2 * np.pi * f_if * t)
@@ -3890,16 +3952,21 @@ def run_isac_sim(cfg: SimConfig):
         "si_cfr_range_profile_db": si_cfr_profile_db,
         "si_cfr_peak_m": si_cfr_peak_m,
         "si_cfr_coherence": si_cfr_coherence,
+        "si_cfr_contrast_db": si_cfr_contrast_db,
+        "si_cfr_pslr_db": si_cfr_pslr_db,
         "c1_band_metrics": c1_band_metrics, "c2_band_metrics": c2_band_metrics,
         "c1_receiver_metrics": c1_receiver_metrics,
         "c2_coherent_band_metrics": c2_coherent_band_metrics,
         "c2_raw_band_metrics": c2_raw_band_metrics,
         "radar_snr_db": radar_snr_db,
+        "radar_snr_predicted_db": predicted_radar_snr_db,
         "radar_snr_raw_db": raw_radar_snr_db,
         "sensing_residual_ceiling_db": float(
             getattr(cfg, "sensing_residual_ceiling_db", 40.0)
         ),
         "range_profile_contrast_db": range_profile_contrast_db,
+        "matched_filter_contrast_db": matched_filter_contrast_db,
+        "matched_filter_pslr_db": matched_filter_pslr_db,
         "pslr_db": pslr_db,
         "processing_gain_db": proc_gain_db,
         "ideal_processing_gain_db": ideal_proc_gain_db,
@@ -4197,8 +4264,9 @@ class PhotonicIsacSimPanel:
             "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Density", values=("N/A", "dBm/Hz")),
             "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
             "comm_snr":  self.table.insert("", "end", text="Comm SNR (EVM)",    values=("N/A", "dB")),
-            "radar_snr": self.table.insert("", "end", text="C2 Sensing SINR", values=("N/A", "dB")),
-            "range_contrast": self.table.insert("", "end", text="C2 Range-profile Contrast", values=("N/A", "dB")),
+            "radar_snr": self.table.insert("", "end", text="C2 CFR Sensing SINR", values=("N/A", "dB")),
+            "radar_snr_model": self.table.insert("", "end", text="C2 Detector-model SINR", values=("N/A", "dB")),
+            "range_contrast": self.table.insert("", "end", text="C2 CFR Target/Floor", values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("normalized CFR", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
             "si_cfr_peak": self.table.insert("", "end", text="SI-CFR Peak", values=("N/A", "m")),
@@ -4831,6 +4899,14 @@ class PhotonicIsacSimPanel:
                 self.table.item(self.rows["comm_snr"], values=("N/A", "dB"))
             if "radar_snr" in self.rows:
                 self.table.item(self.rows["radar_snr"], values=(f"{float(self.data.get('radar_snr_db', np.nan)):.2f}", "dB"))
+            if "radar_snr_model" in self.rows:
+                self.table.item(
+                    self.rows["radar_snr_model"],
+                    values=(
+                        f"{float(self.data.get('radar_snr_predicted_db', np.nan)):.2f}",
+                        "dB",
+                    ),
+                )
             if "range_contrast" in self.rows:
                 self.table.item(
                     self.rows["range_contrast"],
@@ -17146,13 +17222,29 @@ class SystemModelValidationPanel:
                 ax_sinr.scatter([rr], [snr_comm], facecolors="none", edgecolors=blue,
                                 marker="o", s=62 if for_save else 52, linewidths=1.5, zorder=6)
 
-        for state, color, marker in (("on", red, "s"), ("off", green, "^")):
-            pts = cache.get(f"{state}_radar_points", [])
-            if pts:
-                rr = np.asarray([p[0] for p in pts], dtype=np.float64)
-                yy = np.asarray([p[1] for p in pts], dtype=np.float64)
-                ax_radar.scatter(rr, yy, facecolors=color if state == "on" else "none", edgecolors=color,
-                                 marker=marker, s=62 if for_save else 52, linewidths=1.5, zorder=6)
+        for state, color, direct_marker in (("on", red, "s"), ("off", green, "^")):
+            direct_pts = cache.get(f"{state}_direct_radar_points")
+            band_pts = cache.get(f"{state}_band_radar_points")
+            if direct_pts is None and band_pts is None:
+                direct_pts = cache.get(f"{state}_radar_points", [])
+                band_pts = []
+            for pts, marker, filled in (
+                (direct_pts or [], direct_marker, state == "on"),
+                (band_pts or [], "D", False),
+            ):
+                if pts:
+                    rr = np.asarray([p[0] for p in pts], dtype=np.float64)
+                    yy = np.asarray([p[1] for p in pts], dtype=np.float64)
+                    ax_radar.scatter(
+                        rr,
+                        yy,
+                        facecolors=color if filled else "none",
+                        edgecolors=color,
+                        marker=marker,
+                        s=62 if for_save else 52,
+                        linewidths=1.5,
+                        zorder=6,
+                    )
 
         ax_radar.set_xlabel("Range (m)")
         ax_sinr.set_ylabel("Comm. SINR [dB]", color=blue)
@@ -19608,6 +19700,76 @@ class SystemModelValidationPanel:
         effective_sinr = self._apply_sensing_residual_ceiling(raw_sinr)
         return 10.0 * np.log10(np.maximum(effective_sinr, 1e-300))
 
+    def _direct_sensing_sinr_points(
+        self, si_state: str | None = None
+    ) -> list[tuple[float, float]]:
+        """Return sensing SINR values obtained directly from range processing."""
+        pts: list[tuple[float, float]] = []
+        state_filter = str(si_state).strip().lower() if si_state is not None else ""
+        for point in self._active_measurements():
+            point_state = str(point.get("c2_si_state", "on")).strip().lower()
+            if state_filter and point_state != state_filter:
+                continue
+            rr = float(point.get("range_m", float("nan")))
+            snr = float(point.get("snr_sens_db", float("nan")))
+            if np.isfinite(rr) and rr > 0.0 and np.isfinite(snr):
+                pts.append((rr, snr))
+        return sorted(pts)
+
+    def _band_power_sensing_sinr_points(
+        self, si_state: str | None = None
+    ) -> list[tuple[float, float]]:
+        """Convert each raw C2 band-power point with a fixed detector reference.
+
+        These are estimates rather than directly processed range-profile SINRs.
+        The detector reference, receiver floor, rho, and processing gain control
+        the conversion; the theoretical SI-isolation sweep does not.
+        """
+        state_filter = str(si_state).strip().lower() if si_state is not None else ""
+        if state_filter not in ("", "on"):
+            return []
+        raw_points = self._c2_power_points("on")
+        if not raw_points:
+            return []
+        offset_db = self._float("bandpower_est_offset_db", 0.0)
+        estimates: list[tuple[float, float]] = []
+        for rr, raw_dbm in raw_points:
+            sample_range = np.asarray([rr], dtype=np.float64)
+            predicted_raw = float(
+                np.asarray(
+                    self._c2_power_curve_dbm(sample_range, "on"),
+                    dtype=np.float64,
+                ).reshape(-1)[0]
+            )
+            predicted_target = self._c2_target_power_curve_dbm(
+                sample_range, "on"
+            )
+            reference_sinr_db = float(
+                np.asarray(
+                    self._sensing_sinr_from_target_power_dbm(
+                        predicted_target, "on"
+                    ),
+                    dtype=np.float64,
+                ).reshape(-1)[0]
+            )
+            if not (
+                np.isfinite(predicted_raw)
+                and np.isfinite(reference_sinr_db)
+            ):
+                continue
+            estimates.append(
+                (
+                    rr,
+                    float(
+                        reference_sinr_db
+                        + raw_dbm
+                        - predicted_raw
+                        + offset_db
+                    ),
+                )
+            )
+        return sorted(estimates)
+
     def _c2_power_radar_snr_points(self, si_state: str | None = None) -> list[tuple[float, float]]:
         """Return direct sensing SINR and independent band-power estimates.
 
@@ -19616,54 +19778,15 @@ class SystemModelValidationPanel:
         at the same range, then applied as a correction to the simulated
         sensing SINR.  Consequently, editing one C2 point cannot shift every
         other estimate through a shared measurement anchor.
+
+        Direct and estimated points may coexist at the same range.  This is
+        intentional: one is measured by range processing and the other is an
+        estimate derived from integrated band power.
         """
-        pts: list[tuple[float, float]] = []
-        state_filter = str(si_state).strip().lower() if si_state is not None else ""
-        for point in self._active_measurements():
-            point_state = str(point.get("c2_si_state", "on")).strip().lower()
-            if state_filter and point_state != state_filter:
-                continue
-            rr = float(point.get("range_m", float("nan")))
-            pp = float(point.get("c2_inband_power_dbm", float("nan")))
-            snr = float(point.get("snr_sens_db", float("nan")))
-            if np.isfinite(rr) and rr > 0.0 and np.isfinite(snr):
-                pts.append((rr, snr))
-        if state_filter not in ("", "on"):
-            return sorted(pts)
-
-        raw_points = self._c2_power_points("on")
-        if not raw_points:
-            return sorted(pts)
-
-        combined = {round(r, 9): (r, snr) for r, snr in pts}
-        offset_db = self._float("bandpower_est_offset_db", 0.0)
-        for rr, raw_dbm in raw_points:
-            key = round(rr, 9)
-            if key in combined:
-                continue
-            predicted_raw = float(
-                np.asarray(
-                    self._c2_power_curve_dbm(np.asarray([rr]), "on"),
-                    dtype=np.float64,
-                ).reshape(-1)[0]
-            )
-            model_result = self._model(np.asarray([rr], dtype=np.float64))
-            model_sinr_lin = float(
-                np.asarray(model_result["snr_sens"], dtype=np.float64)
-                .reshape(-1)[0]
-            )
-            if not (
-                np.isfinite(predicted_raw)
-                and np.isfinite(model_sinr_lin)
-                and model_sinr_lin > 0.0
-            ):
-                continue
-            model_sinr_db = 10.0 * np.log10(model_sinr_lin)
-            estimated_snr = (
-                model_sinr_db + raw_dbm - predicted_raw + offset_db
-            )
-            combined[key] = (rr, float(estimated_snr))
-        return sorted(combined.values())
+        return sorted(
+            self._direct_sensing_sinr_points(si_state)
+            + self._band_power_sensing_sinr_points(si_state)
+        )
 
     def _derived_radar_ref_snr_db(self) -> float:
         return float(
@@ -20460,6 +20583,10 @@ class SystemModelValidationPanel:
                 "no_si_valid": bool(no_si_valid),
                 "on_radar_points": self._c2_power_radar_snr_points("on"),
                 "off_radar_points": self._c2_power_radar_snr_points("off"),
+                "on_direct_radar_points": self._direct_sensing_sinr_points("on"),
+                "off_direct_radar_points": self._direct_sensing_sinr_points("off"),
+                "on_band_radar_points": self._band_power_sensing_sinr_points("on"),
+                "off_band_radar_points": self._band_power_sensing_sinr_points("off"),
                 "c2_on_power": np.asarray(sim_c2_on_power, dtype=np.float64).copy(),
                 "c2_off_power": np.asarray(sim_c2_off_power, dtype=np.float64).copy(),
                 "c2_on_target_power": sim_c2_on_target_power.copy(),
@@ -20487,24 +20614,31 @@ class SystemModelValidationPanel:
                         zorder=6,
                     )
 
-            for state, color, marker in (
+            for state, color, direct_marker in (
                 ("on", red, "s"),
                 ("off", green, "^"),
             ):
-                pts_snr = self._c2_power_radar_snr_points(state)
-                if pts_snr:
-                    rr = np.asarray([p[0] for p in pts_snr], dtype=np.float64)
-                    ss = np.asarray([p[1] for p in pts_snr], dtype=np.float64)
-                    ax_rad.scatter(
-                        rr,
-                        ss,
-                        facecolors=color if state == "on" else "none",
-                        edgecolors=color,
-                        marker=marker,
-                        s=52,
-                        linewidths=1.5,
-                        zorder=6,
-                    )
+                for pts_snr, marker, filled in (
+                    (
+                        self._direct_sensing_sinr_points(state),
+                        direct_marker,
+                        state == "on",
+                    ),
+                    (self._band_power_sensing_sinr_points(state), "D", False),
+                ):
+                    if pts_snr:
+                        rr = np.asarray([p[0] for p in pts_snr], dtype=np.float64)
+                        ss = np.asarray([p[1] for p in pts_snr], dtype=np.float64)
+                        ax_rad.scatter(
+                            rr,
+                            ss,
+                            facecolors=color if filled else "none",
+                            edgecolors=color,
+                            marker=marker,
+                            s=52,
+                            linewidths=1.5,
+                            zorder=6,
+                        )
             ax_rad.set_xlabel("Range (m)")
             ax_evm.set_ylabel("Comm. SINR (dB)", color=blue)
             ax_rad.set_ylabel("Sensing SINR (dB)", color=red)
