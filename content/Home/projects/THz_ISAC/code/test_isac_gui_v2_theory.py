@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from isac_gui_v2 import (
+    DsoPanel,
     SimConfig,
     SystemModelValidationPanel,
     calc_sec2_sensing_sinr,
@@ -35,6 +36,8 @@ def _theory_model() -> SystemModelValidationPanel:
     model.photonic_source = None
     values = {
         "rho": 0.20,
+        "sensing_reference_mode": "Full TX (MMSE)",
+        "sensing_data_utilization": 1.0,
         "bandwidth_ghz": 20.0,
         "pilot_symbols": 1024,
         "symbol_rate_gbaud": 20.0,
@@ -63,6 +66,23 @@ def _theory_model() -> SystemModelValidationPanel:
 
 
 class ClosedFormTheoryTests(unittest.TestCase):
+    def test_live_dso_uses_full_tx_matrix_in_full_waveform_mode(self):
+        pilot = np.ones(64, dtype=np.complex128)
+        payload = {
+            "waveform_type": "DFT-s-OFDM",
+            "dft_zc_pilot": pilot,
+            "amplitude_ratio_rho": 0.20,
+            "sensing_reference_mode": "Full TX (MMSE)",
+        }
+        self.assertIsNone(DsoPanel._dfts_ofdm_pilot_matrix(payload, 3))
+
+        payload.pop("sensing_reference_mode")
+        self.assertIsNone(DsoPanel._dfts_ofdm_pilot_matrix(payload, 3))
+
+        payload["sensing_reference_mode"] = "Pilot-only (legacy)"
+        reference = DsoPanel._dfts_ofdm_pilot_matrix(payload, 3)
+        self.assertEqual(reference.shape, (3, 64))
+
     def test_first_tab_sec2_metric_matches_third_tab_si_curve(self):
         model = _theory_model()
         cfg = SimConfig(
@@ -253,7 +273,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
         self.assertEqual(band_handle.get_marker(), "D")
         self.assertEqual(band_handle.get_markerfacecolor(), "none")
 
-    def test_rho_tradeoff_ranges_satisfy_the_closed_form_thresholds(self):
+    def test_full_waveform_ranges_ignore_legacy_rho_and_satisfy_thresholds(self):
         model = _theory_model()
         rcs = np.asarray([-8.0])
         low_rho = model._rmax_vs_effective_rcs(rcs, 0.20)
@@ -267,7 +287,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             r_comm = float(curves[0][0])
             p_rx = context["comm_rx_r2_coefficient_mw_m2"] / r_comm ** 2
             comm_sinr = (
-                context["m2"] * (1.0 - rho) * p_rx ** 2
+                context["m2"] * p_rx ** 2
                 / (
                     context["detector_noise_floor_mw2"]
                     + 2.0 * p_rx * context["rf_noise_mw"]
@@ -284,8 +304,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
                 / r_sens ** 4
             )
             sensing_sinr = (
-                rho
-                * context["gp"]
+                context["gp"]
                 * 2.0
                 * context["m2"]
                 * (context["si_mw"] * p_echo + p_echo ** 2)
@@ -299,6 +318,16 @@ class ClosedFormTheoryTests(unittest.TestCase):
                 )
             )
             self.assertAlmostEqual(sensing_sinr, sensing_threshold, places=10)
+
+        np.testing.assert_allclose(high_rho[0], low_rho[0])
+        np.testing.assert_allclose(high_rho[1], low_rho[1])
+
+    def test_legacy_pilot_mode_retains_rho_tradeoff(self):
+        model = _theory_model()
+        model.params["sensing_reference_mode"].set("Pilot-only (legacy)")
+        rcs = np.asarray([-8.0])
+        low_rho = model._rmax_vs_effective_rcs(rcs, 0.20)
+        high_rho = model._rmax_vs_effective_rcs(rcs, 0.80)
 
         self.assertLess(float(high_rho[0][0]), float(low_rho[0][0]))
         self.assertGreater(float(high_rho[1][0]), float(low_rho[1][0]))

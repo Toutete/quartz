@@ -205,8 +205,18 @@ class IsacTxSimPanel:
                              state="readonly", width=10).grid(row=2, column=1, sticky="w", pady=(5, 0))
 
                 self.pilot_rho_var = tk.StringVar(value="0.20")
-                ttk.Label(sig_grp, text="Pilot rho").grid(row=2, column=2, sticky="w", padx=(10, 0), pady=(5, 0))
+                ttk.Label(sig_grp, text="Pilot rho (legacy)").grid(row=2, column=2, sticky="w", padx=(10, 0), pady=(5, 0))
                 ttk.Entry(sig_grp, textvariable=self.pilot_rho_var, width=10).grid(row=2, column=3, sticky="w", pady=(5, 0))
+
+                self.sensing_reference_mode_var = tk.StringVar(value="Full TX (MMSE)")
+                ttk.Label(sig_grp, text="Sensing reference").grid(row=3, column=4, sticky="w", padx=(10, 0), pady=(5, 0))
+                ttk.Combobox(
+                    sig_grp,
+                    textvariable=self.sensing_reference_mode_var,
+                    values=["Full TX (MMSE)", "Pilot-only (legacy)"],
+                    state="readonly",
+                    width=18,
+                ).grid(row=3, column=5, sticky="w", pady=(5, 0))
 
                 self.rrc_beta_var = tk.StringVar(value="0.20")
                 ttk.Label(sig_grp, text="RRC roll-off").grid(row=3, column=0, sticky="w", pady=(5, 0))
@@ -245,7 +255,8 @@ class IsacTxSimPanel:
 
                 for var in [self.prbs_n_var, self.fs_var, self.symbol_rate_var, self.chirp_len_var,
                              self.modulation_var, self.waveform_var, self.if_var,
-                             self.pilot_rho_var, self.rrc_beta_var, self.max_awg_ksa_var]:
+                             self.pilot_rho_var, self.sensing_reference_mode_var,
+                             self.rrc_beta_var, self.max_awg_ksa_var]:
                     var.trace_add("write", self._on_tx_param_changed)
 
                 self.power_dbm_var.trace_add("write", self._on_power_changed)
@@ -473,6 +484,9 @@ class IsacTxSimPanel:
                 pilot_rho = float(np.clip(float(self.pilot_rho_var.get()), 0.0, 0.95))
             except Exception:
                 pilot_rho = 0.20
+            sensing_reference_mode = self.sensing_reference_mode_var.get().strip()
+            full_waveform_sensing = is_full_waveform_sensing(sensing_reference_mode)
+            actual_pilot_rho = pilot_rho
             try:
                 tx_rrc_beta = float(np.clip(float(self.rrc_beta_var.get()), 0.01, 0.95))
             except Exception:
@@ -648,8 +662,9 @@ class IsacTxSimPanel:
 
                 tx_bb_matrix = np.zeros((n_chirps, dft_n_fft), dtype=np.complex128)
                 dft_data_scale = np.zeros(n_chirps, dtype=np.float64)
-                sr = np.sqrt(max(0.0, pilot_rho))
-                sd = np.sqrt(max(0.0, 1.0 - pilot_rho))
+                actual_pilot_rho = 0.0 if full_waveform_sensing else pilot_rho
+                sr = np.sqrt(max(0.0, actual_pilot_rho))
+                sd = np.sqrt(max(0.0, 1.0 - actual_pilot_rho))
                 for row in range(n_chirps):
                     data_time, scale_i = _scfdma_time_from_symbols(tx_sym_matrix[row])
                     dft_data_scale[row] = scale_i
@@ -781,7 +796,10 @@ class IsacTxSimPanel:
                 "prbs_bits_target": int((2 ** prbs) - 1),
                 "payload_data_symbols": int(payload_data_symbols),
                 "payload_data_bits": int(payload_data_symbols * bps),
-                "amplitude_ratio_rho": pilot_rho if waveform_type == "DFT-s-OFDM" else np.nan,
+                "amplitude_ratio_rho": actual_pilot_rho if waveform_type == "DFT-s-OFDM" else np.nan,
+                "configured_pilot_rho": pilot_rho if waveform_type == "DFT-s-OFDM" else np.nan,
+                "sensing_reference_mode": sensing_reference_mode,
+                "sensing_mmse_regularization": 1e-3,
             }
 
             # Save implicit reference for live processing if needed
@@ -801,6 +819,7 @@ class IsacTxSimPanel:
                 cur_sr = _parse_ghz_input(self.symbol_rate_var.get(), "Symbol Rate")
                 cur_if = _parse_ghz_input(self.if_var.get(), "IF Freq") if cur_mode == "Real IF" else 0.0
                 cur_rho = float(np.clip(float(self.pilot_rho_var.get()), 0.0, 0.95))
+                cur_sensing_mode = self.sensing_reference_mode_var.get().strip()
                 cur_beta = float(np.clip(float(self.rrc_beta_var.get()), 0.01, 0.95))
             except Exception:
                 return True
@@ -839,8 +858,10 @@ class IsacTxSimPanel:
             if not np.isfinite(beta_old) or abs(beta_old - cur_beta) > 1e-6:
                 return True
             if cur_wave == "DFT-s-OFDM":
-                rho_old = float(ctx.get("amplitude_ratio_rho", np.nan))
+                rho_old = float(ctx.get("configured_pilot_rho", ctx.get("amplitude_ratio_rho", np.nan)))
                 if not np.isfinite(rho_old) or abs(rho_old - cur_rho) > 1e-6:
+                    return True
+                if str(ctx.get("sensing_reference_mode", "Pilot-only (legacy)")) != cur_sensing_mode:
                     return True
 
             return False
@@ -2154,8 +2175,12 @@ class SimConfig:
     additive_noise_enable: bool = True
     syms_per_chirp: int = 1024
     pilot_rho: float = 0.20
-    # Coherent pilot-processing gain before the separately applied rho factor.
-    # The ideal BT_p value remains an upper bound.
+    # Full-waveform sensing uses the known communication waveform itself.
+    # Pilot-only remains available as a legacy/diagnostic reference mode.
+    sensing_reference_mode: str = "full_waveform_mmse"
+    sensing_data_utilization: float = 1.0
+    sensing_mmse_regularization: float = 1e-3
+    # Effective coherent processing gain. The ideal BT value is an upper bound.
     radar_proc_gain_eff_db: float = 26.0
     # In-band SSBI coefficient used by the Sec. II closed-form comparison.
     sensing_ssbi_fraction: float = 0.069
@@ -2167,6 +2192,23 @@ class SimConfig:
     tx_power_dbm: float = 0.0
     path_loss_db: float = 0.0
     delay_ns: float = 0.0
+
+
+def is_full_waveform_sensing(mode: str | None) -> bool:
+    """Return True when all known TX samples are used as the sensing code."""
+    normalized = str(mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return not (normalized.startswith("pilot") or normalized.startswith("legacy_pilot"))
+
+
+def sensing_waveform_utilization(
+    mode: str | None,
+    pilot_rho: float,
+    data_utilization: float = 1.0,
+) -> float:
+    """Fraction of TX waveform energy coherently used by sensing processing."""
+    if is_full_waveform_sensing(mode):
+        return float(np.clip(data_utilization, 1e-12, 1.0))
+    return float(np.clip(pilot_rho, 1e-12, 1.0))
 
 def rrc_filter(span_sym, alpha, ts, fs):
     t = np.arange(-span_sym, span_sym + 1) / fs
@@ -2726,7 +2768,11 @@ def calc_sec2_sensing_sinr(
     )
 
     m2 = 10.0 ** (-effective_cspr_db(cfg) / 10.0)
-    rho = float(np.clip(cfg.pilot_rho, 1e-12, 1.0))
+    sensing_utilization = sensing_waveform_utilization(
+        cfg.sensing_reference_mode,
+        cfg.pilot_rho,
+        cfg.sensing_data_utilization,
+    )
     pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(
         float(cfg.baud_gbaud) * 1e9, 1.0
     )
@@ -2747,7 +2793,7 @@ def calc_sec2_sensing_sinr(
         1e-300,
     )
     kappa = float(np.clip(cfg.sensing_ssbi_fraction, 0.0, 1.0))
-    numerator = rho * gp_lin * 2.0 * m2 * (
+    numerator = sensing_utilization * gp_lin * 2.0 * m2 * (
         p_si_mw * p_echo_mw + p_echo_mw ** 2
     )
     carrier_noise_mw2 = 2.0 * rf_noise_mw * (p_si_mw + p_echo_mw)
@@ -2770,6 +2816,8 @@ def calc_sec2_sensing_sinr(
         "effective_sinr_db": float(
             10.0 * np.log10(max(effective_sinr, 1e-300))
         ),
+        "sensing_utilization": sensing_utilization,
+        "sensing_reference_mode": str(cfg.sensing_reference_mode),
         "si_power_dbm": float(10.0 * np.log10(max(p_si_mw, 1e-300))),
         "echo_power_dbm": float(10.0 * np.log10(max(p_echo_mw, 1e-300))),
         "detector_floor_dbmw2": float(
@@ -3069,7 +3117,12 @@ def run_isac_sim(cfg: SimConfig):
         zc = np.asarray(generate_zadoff_chu(n_data, u=1), dtype=np.complex128)
         pilot_block, _ = scfdma_block(zc)
         dft_pilot_active = np.fft.fft(pilot_block)[active_bins]
-        rho = float(np.clip(cfg.pilot_rho, 0.0, 0.95))
+        configured_rho = float(np.clip(cfg.pilot_rho, 0.0, 0.95))
+        rho = (
+            0.0
+            if is_full_waveform_sensing(cfg.sensing_reference_mode)
+            else configured_rho
+        )
         sr = np.sqrt(rho)
         sd = np.sqrt(max(0.0, 1.0 - rho))
         dft_sr = float(sr)
@@ -3084,10 +3137,11 @@ def run_isac_sim(cfg: SimConfig):
             dft_tx_symbol_blocks.append(sym_block)
             dft_data_scales.append(scale_i)
         bb_sig = np.concatenate(blocks)[:total_samples]
-        # Match the live-DSO processor: sensing uses only the superimposed ZC
-        # pilot. Communication data remains in the received waveform and is
-        # therefore treated as interference rather than a known radar code.
-        sensing_ref_bb = np.tile(sr * pilot_block, num_blocks)[:total_samples]
+        sensing_ref_bb = (
+            bb_sig.copy()
+            if is_full_waveform_sensing(cfg.sensing_reference_mode)
+            else np.tile(sr * pilot_block, num_blocks)[:total_samples]
+        )
         chirp = np.ones_like(t)
     elif waveform_kind == "FMCW":
         sweep_bw = max(cfg.chirp_bw_ghz, 0.01) * 1e9
@@ -3470,11 +3524,17 @@ def run_isac_sim(cfg: SimConfig):
             band_cfr = make_bandpass_mask(f_cfr, f_if, occupied_bw_hz)
             band_cfr &= f_cfr > 0.0
             sxx = np.abs(X) ** 2
-            band_cfr &= sxx > (np.nanmax(sxx) + 1e-30) * 1e-5
+            sxx_peak = float(np.nanmax(sxx)) + 1e-30
+            regularization = float(
+                np.clip(cfg.sensing_mmse_regularization, 0.0, 1.0)
+            ) * sxx_peak
+            band_cfr &= sxx > sxx_peak * 1e-5
             if np.count_nonzero(band_cfr) >= 16:
                 idx_cfr = np.argsort(f_cfr[band_cfr])
-                h_cfr = (Y[band_cfr] * np.conj(X[band_cfr])) / (sxx[band_cfr] + 1e-30)
-                w_cfr = sxx[band_cfr] / (np.nanmax(sxx[band_cfr]) + 1e-30)
+                h_cfr = (Y[band_cfr] * np.conj(X[band_cfr])) / (
+                    sxx[band_cfr] + regularization
+                )
+                w_cfr = sxx[band_cfr] / sxx_peak
                 si_cfr = si_normalized_cfr_delay_profile(
                     f_cfr[band_cfr][idx_cfr],
                     h_cfr[idx_cfr],
@@ -3550,8 +3610,15 @@ def run_isac_sim(cfg: SimConfig):
         float(getattr(cfg, "radar_proc_gain_eff_db", 26.0)),
         float(ideal_proc_gain_db),
     )
+    sensing_utilization = sensing_waveform_utilization(
+        cfg.sensing_reference_mode,
+        cfg.pilot_rho,
+        cfg.sensing_data_utilization,
+    )
     rho_sensing = float(np.clip(cfg.pilot_rho, 1e-12, 1.0))
-    pilot_weighted_proc_gain_db = proc_gain_db + 10.0 * np.log10(rho_sensing)
+    pilot_weighted_proc_gain_db = (
+        proc_gain_db + 10.0 * np.log10(sensing_utilization)
+    )
     matched_filter_contrast_db = float("nan")
     matched_filter_pslr_db = float("nan")
     selected_range_m = float("nan")
@@ -3746,7 +3813,7 @@ def run_isac_sim(cfg: SimConfig):
 
     # Canonical sensing metric shared with System Model Validation. The target
     # and receiver-noise powers use the same detector-output reference plane;
-    # rho remains separate from the user-entered coherent processing gain.
+    # Waveform utilization remains separate from the entered coherent gain.
     c2_target_power_dbm = float(c2_band_metrics.get("band_power_dbm", float("nan")))
     c2_sensing_noise_dbm = float(
         c2_band_metrics.get(
@@ -4071,6 +4138,9 @@ def run_isac_sim(cfg: SimConfig):
         "processing_gain_db": proc_gain_db,
         "ideal_processing_gain_db": ideal_proc_gain_db,
         "pilot_rho": rho_sensing,
+        "sensing_reference_mode": str(cfg.sensing_reference_mode),
+        "sensing_waveform_utilization": sensing_utilization,
+        "sensing_mmse_regularization": float(cfg.sensing_mmse_regularization),
         "pilot_weighted_processing_gain_db": pilot_weighted_proc_gain_db,
         "radar_pre_snr_db_c2": (
             c2_target_power_dbm - c2_sensing_noise_dbm
@@ -4179,7 +4249,7 @@ class PhotonicIsacSimPanel:
         awg_keys = [
             "fs_var", "ip_var", "port_var", "ch_var", "vpp_var", "power_dbm_var",
             "rf_var", "if_var", "symbol_rate_var", "waveform_var", "modulation_var",
-            "chirp_len_var", "pilot_rho_var", "rrc_beta_var",
+            "chirp_len_var", "pilot_rho_var", "sensing_reference_mode_var", "rrc_beta_var",
         ]
         awg_values = {}
         awg = getattr(self, "awg_source", None)
@@ -4375,7 +4445,7 @@ class PhotonicIsacSimPanel:
             "si_norm_coh": self.table.insert("", "end", text="SI Phase Coherence", values=("N/A", "")),
             "pslr":      self.table.insert("", "end", text="C2 PSLR",           values=("N/A", "dB")),
             "proc_gain": self.table.insert("", "end", text="Effective Processing Gain", values=("N/A", "dB")),
-            "pilot_gain": self.table.insert("", "end", text="Pilot-weighted Gain (rho*Gp)", values=("N/A", "dB")),
+            "pilot_gain": self.table.insert("", "end", text="Waveform-weighted Gain", values=("N/A", "dB")),
             "evm_pct":   self.table.insert("", "end", text="Comm EVM",          values=("N/A",  "%")),
             "evm_snr":   self.table.insert("", "end", text="EVM-implied SNR",    values=("N/A", "dB")),
         }
@@ -4778,6 +4848,13 @@ class PhotonicIsacSimPanel:
             target_dist_m=max(self._param_float("target_dist_m", 1.0), 0.1),
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
+            sensing_reference_mode=(
+                getattr(self.awg_source, "sensing_reference_mode_var", None).get()
+                if getattr(self.awg_source, "sensing_reference_mode_var", None) is not None
+                else "Full TX (MMSE)"
+            ),
+            sensing_data_utilization=1.0,
+            sensing_mmse_regularization=1e-3,
             radar_proc_gain_eff_db=self._param_float("radar_proc_gain_eff_db", 26.0),
             sensing_ssbi_fraction=float(
                 np.clip(
@@ -6185,12 +6262,12 @@ class DsoPanel:
             ("c2_total_band_power_dbm", "C2 Total Band Power", "dBm", "Sensing", "Raw C2 in-band power including SI, target, and receiver background."),
             ("c2_total_band_snr_db", "C2 Total Band SNR", "dB", "Sensing", "Diagnostic total-band SNR; this is not target-only sensing SINR when SI is present."),
             ("radar_pre_snr_db_c2", "C2 Target Pre-DSP SINR (est.)", "dB", "Sensing", "Detector-domain target/noise SINR before pilot allocation and coherent gain."),
-            ("snr_rad_db", "Sensing SINR", "dB", "Sensing", "Pilot-only C2 target excess power divided by the robust range-profile floor."),
-            ("range_profile_contrast_db_c2", "C2 Range-profile Contrast", "dB", "Sensing", "Pilot-only target peak minus robust profile-floor median."),
+            ("snr_rad_db", "Sensing SINR", "dB", "Sensing", "Known-waveform C2 target excess power divided by the robust range-profile floor."),
+            ("range_profile_contrast_db_c2", "C2 Range-profile Contrast", "dB", "Sensing", "Known-waveform target peak minus robust profile-floor median."),
             ("range_floor_iqr_db_c2", "C2 Range-floor IQR", "dB", "Sensing", "Interquartile spread of off-target range-bin power; lower is more stable."),
-            ("snr_rad_post_db_c2", "C2 Sensing post-proc SINR", "dB", "Sensing", "Pilot-only C2 range-profile SINR after matched filtering."),
-            ("radar_processing_gain_db_c2", "C2 Coherent Gain Gp,eff", "dB", "Sensing", "Effective coherent gain before the separately applied rho factor."),
-            ("radar_pilot_weighted_gain_db_c2", "C2 Pilot-weighted Gain", "dB", "Sensing", "Gp,eff + 10log10(rho)."),
+            ("snr_rad_post_db_c2", "C2 Sensing post-proc SINR", "dB", "Sensing", "Known-waveform C2 range-profile SINR after matched filtering."),
+            ("radar_processing_gain_db_c2", "C2 Coherent Gain Gp,eff", "dB", "Sensing", "Effective coherent processing gain before waveform utilization."),
+            ("radar_pilot_weighted_gain_db_c2", "C2 Waveform-weighted Gain", "dB", "Sensing", "Gp,eff + 10log10(utilization)."),
             ("snr_rad_pg_corrected_db_c2", "C2 Target Pre-DSP SINR (est.)", "dB", "Sensing", "Detector-domain target/noise SINR before pilot allocation and coherent gain."),
             ("mi_rad_mbps", "MI_sens", "Mbit/s", "Sensing", "0.5/Tsig*log2(1+SINR_sens)."),
             ("crlb_range_std_mm", "Range CRLB std", "mm", "Sensing", "AWGN delay CRLB using occupied bandwidth RMS proxy."),
@@ -6205,7 +6282,7 @@ class DsoPanel:
             ("awg_papr_db", "MZM Input IF Crest PAPR", "dB", "System", "Voltage-squared crest factor of the real-IF AWG waveform that drives the MZM."),
             ("rx_papr_db", "ADC Input IF Crest PAPR", "dB", "System", "Voltage-squared crest factor of the captured DSO IF waveform; use this to check ADC/headroom stress."),
             ("amplitude_ratio_rho", "Amplitude Ratio rho", "", "System", "Dual-chirp up/down amplitude ratio, if available."),
-            ("sensing_gp_eff_db", "Sensing Gp,eff", "dB", "System", "Effective coherent sensing gain before the separately applied rho factor."),
+            ("sensing_gp_eff_db", "Sensing Gp,eff", "dB", "System", "Effective coherent sensing gain before waveform utilization."),
             ("campaign_comm_snr_db", "Campaign Comm SNR", "dB", "Measurement", "Target-on C1 excess divided by measured receiver-noise power."),
             ("campaign_sensing_pre_sinr_db", "Campaign Sensing Pre-DSP SINR", "dB", "Measurement", "Target-on C2 excess over its matched SI-only baseline."),
             ("measured_processing_gain_db", "Measured Gp,eff", "dB", "Measurement", "Measured post/pre sensing SINR gain before rho."),
@@ -9279,7 +9356,12 @@ class DsoPanel:
         if ref_mat is None:
             ref_mat = tx_bb_mat
 
-        freqs, h, w = self._estimate_lfm_cfr(rx_mat, ref_mat, fs_ref)
+        freqs, h, w = self._estimate_lfm_cfr(
+            rx_mat,
+            ref_mat,
+            fs_ref,
+            float(pl.get("sensing_mmse_regularization", 1e-3)),
+        )
         fc_ghz = float(self.fc_var.get())
         f1_ghz, f2_ghz = self._get_signal_band_ghz()
         rf_ghz = fc_ghz + freqs / 1e9
@@ -10953,12 +11035,16 @@ class DsoPanel:
 
         self._start_measurement_worker("Direct Sweep", action)
 
-    def _download_campaign_payload_sync(self, npilot: int, rho: float) -> None:
+    def _download_campaign_payload_sync(
+        self, npilot: int, rho: float, *, force_legacy_pilot: bool = True
+    ) -> None:
         source = getattr(self, "tx_source", None)
         if source is None:
             raise ValueError("The AWG TX panel is not connected to the DSO campaign.")
         source.chirp_len_var.set(str(int(npilot)))
         source.pilot_rho_var.set(f"{float(rho):.12g}")
+        if force_legacy_pilot and hasattr(source, "sensing_reference_mode_var"):
+            source.sensing_reference_mode_var.set("Pilot-only (legacy)")
         payload = source._generate_tx_signal()
         self.runtime["tx_payload"] = payload
         if callable(source.on_tx_generated):
@@ -11008,6 +11094,11 @@ class DsoPanel:
             )
             old_np = source.chirp_len_var.get()
             old_rho = source.pilot_rho_var.get()
+            old_sensing_mode = (
+                source.sensing_reference_mode_var.get()
+                if hasattr(source, "sensing_reference_mode_var")
+                else None
+            )
             total = len(np_values) * len(rho_values)
             index = 0
             try:
@@ -11025,7 +11116,13 @@ class DsoPanel:
                         self._campaign_capture_sync(condition, sweep_kind="pilot")
             finally:
                 try:
-                    self._download_campaign_payload_sync(int(float(old_np)), float(old_rho))
+                    if old_sensing_mode is not None:
+                        source.sensing_reference_mode_var.set(old_sensing_mode)
+                    self._download_campaign_payload_sync(
+                        int(float(old_np)),
+                        float(old_rho),
+                        force_legacy_pilot=False,
+                    )
                 except Exception as exc:
                     source.chirp_len_var.set(old_np)
                     source.pilot_rho_var.set(old_rho)
@@ -13536,7 +13633,12 @@ class DsoPanel:
         return 3e8 / 2.0 if "monostatic" in mode or "c/2" in mode else 3e8
 
     @staticmethod
-    def _estimate_lfm_cfr(rx_mat: np.ndarray, tx_mat: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _estimate_lfm_cfr(
+        rx_mat: np.ndarray,
+        tx_mat: np.ndarray,
+        fs: float,
+        regularization_fraction: float = 1e-3,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         rx = np.asarray(rx_mat, dtype=np.complex128)
         tx = np.asarray(tx_mat, dtype=np.complex128)
         n_rows = min(rx.shape[0] if rx.ndim == 2 else 0, tx.shape[0] if tx.ndim == 2 else 0)
@@ -13551,7 +13653,10 @@ class DsoPanel:
         rx_f = np.fft.fft(rx * win[np.newaxis, :], axis=1)
         tx_f = np.fft.fft(tx * win[np.newaxis, :], axis=1)
         sxx = np.sum(np.abs(tx_f) ** 2, axis=0)
-        h = np.sum(rx_f * np.conj(tx_f), axis=0) / (sxx + 1e-15)
+        epsilon = float(np.clip(regularization_fraction, 0.0, 1.0)) * (
+            float(np.max(sxx)) + 1e-30
+        )
+        h = np.sum(rx_f * np.conj(tx_f), axis=0) / (sxx + epsilon + 1e-30)
         freqs = np.fft.fftfreq(n, d=1.0 / float(fs))
         power = sxx / (float(np.max(sxx)) + 1e-15)
         mask = power > 1e-3
@@ -13564,11 +13669,18 @@ class DsoPanel:
     def _dfts_ofdm_pilot_matrix(pl: dict, n_rows: int) -> np.ndarray | None:
         if str(pl.get("waveform_type", "")).strip() != "DFT-s-OFDM":
             return None
+        if is_full_waveform_sensing(
+            pl.get("sensing_reference_mode", "Full TX (MMSE)")
+        ):
+            return None
         pilot = np.asarray(pl.get("dft_zc_pilot", []), dtype=np.complex128).reshape(-1)
         if len(pilot) < 16:
             return None
         rho = float(np.clip(float(pl.get("amplitude_ratio_rho", 0.20)), 0.0, 0.95))
         modulation = str(pl.get("modulation", "16QAM")).strip()
+        full_waveform = is_full_waveform_sensing(
+            pl.get("sensing_reference_mode", "Full TX (MMSE)")
+        )
         pilot = np.sqrt(max(rho, 1e-12)) * pilot
         return np.tile(pilot[np.newaxis, :], (max(1, int(n_rows)), 1))
 
@@ -13596,6 +13708,9 @@ class DsoPanel:
         if n_rows <= 0:
             raise ValueError("No complete DFT-s-OFDM blocks are available.")
 
+        # Reference selection and transmitted composition are independent.
+        # Legacy captures may contain rho>0 superposition while still being
+        # reprocessed with the complete stored TX waveform.
         sr = np.sqrt(max(rho, 1e-12))
         sd = np.sqrt(max(1.0 - rho, 1e-12))
         pilot_component = sr * pilot
@@ -13650,8 +13765,15 @@ class DsoPanel:
             if len(y) < n_fft:
                 y = np.pad(y, (0, n_fft - len(y)))
 
-            base_lock = float(np.abs(np.vdot(pilot_component, y)) / np.sqrt(
-                pilot_energy * (np.vdot(y, y).real + 1e-15)
+            lock_component = pilot_component
+            if full_waveform and tx_ref.ndim == 2 and row < tx_ref.shape[0]:
+                lock_component = np.asarray(
+                    tx_ref[row, :n_fft], dtype=np.complex128
+                ).reshape(-1)
+            lock_energy = float(np.vdot(lock_component, lock_component).real) + 1e-15
+
+            base_lock = float(np.abs(np.vdot(lock_component, y)) / np.sqrt(
+                lock_energy * (np.vdot(y, y).real + 1e-15)
             ))
             best_lock = base_lock
             best_cfo = 0.0
@@ -13661,8 +13783,8 @@ class DsoPanel:
                     if abs(float(cfo_hz)) < 1e-9:
                         continue
                     yc = y * np.exp(-1j * 2.0 * np.pi * float(cfo_hz) * t_block)
-                    lock_c = float(np.abs(np.vdot(pilot_component, yc)) / np.sqrt(
-                        pilot_energy * (np.vdot(yc, yc).real + 1e-15)
+                    lock_c = float(np.abs(np.vdot(lock_component, yc)) / np.sqrt(
+                        lock_energy * (np.vdot(yc, yc).real + 1e-15)
                     ))
                     if lock_c > best_lock:
                         best_lock = lock_c
@@ -13728,7 +13850,7 @@ class DsoPanel:
                 denom = float(np.mean(np.abs(ref_local) ** 2)) + 1e-15
                 return float(np.sqrt(np.mean(np.abs(est_fit - ref_local) ** 2) / denom))
 
-            h_p = np.vdot(pilot_component, y) / pilot_energy
+            h_p = np.vdot(lock_component, y) / lock_energy
             if (not np.isfinite(h_p.real)) or abs(h_p) <= 1e-12:
                 if tx_ref.ndim == 2 and row < tx_ref.shape[0]:
                     tref = tx_ref[row, :n_fft]
@@ -13847,8 +13969,8 @@ class DsoPanel:
                     pass
             est_rows.append(sym_est[:n_data])
 
-            lock = float(np.abs(np.vdot(pilot_component, y)) / np.sqrt(
-                pilot_energy * (np.vdot(y, y).real + 1e-15)
+            lock = float(np.abs(np.vdot(lock_component, y)) / np.sqrt(
+                lock_energy * (np.vdot(y, y).real + 1e-15)
             ))
             pilot_locks.append(lock)
             if np.ndim(h_sel) == 0:
@@ -14346,7 +14468,12 @@ class DsoPanel:
                         f"{zero_exclude_m:.4g} m; using absolute peak."
                     )
 
-        freqs_cur, h_cur, w_cur = self._estimate_lfm_cfr(rx_mat, ref_mat, fs_ref)
+        freqs_cur, h_cur, w_cur = self._estimate_lfm_cfr(
+            rx_mat,
+            ref_mat,
+            fs_ref,
+            float(pl.get("sensing_mmse_regularization", 1e-3)),
+        )
         si_cfr_rng = np.zeros(0, dtype=np.float64)
         si_cfr_prof_db = np.zeros(0, dtype=np.float64)
         si_cfr_peak_m = float("nan")
@@ -14488,11 +14615,13 @@ class DsoPanel:
             )
             entered_gp = float(self.radar_proc_gain_eff_var.get())
             processing_gain_db = min(entered_gp, ideal_processing_gain_db)
-            rho = float(
-                np.clip(float(pl.get("amplitude_ratio_rho", 0.20)), 1e-12, 1.0)
+            utilization = sensing_waveform_utilization(
+                pl.get("sensing_reference_mode", "Full TX (MMSE)"),
+                float(pl.get("amplitude_ratio_rho", 0.20)),
+                1.0,
             )
             pilot_weighted_gain_db = (
-                processing_gain_db + 10.0 * math.log10(rho)
+                processing_gain_db + 10.0 * math.log10(utilization)
             )
         except Exception:
             processing_gain_db = float("nan")
@@ -14604,6 +14733,16 @@ class DsoPanel:
             "processing_gain_db": processing_gain_db,
             "ideal_processing_gain_db": ideal_processing_gain_db,
             "pilot_weighted_gain_db": pilot_weighted_gain_db,
+            "sensing_reference_mode": str(
+                pl.get("sensing_reference_mode", "Full TX (MMSE)")
+            ),
+            "sensing_waveform_utilization": float(
+                sensing_waveform_utilization(
+                    pl.get("sensing_reference_mode", "Full TX (MMSE)"),
+                    float(pl.get("amplitude_ratio_rho", 0.20)),
+                    1.0,
+                )
+            ),
             "pg_corrected_snr_db": pg_corrected_snr_db,
             "range_mode": range_mode,
             "self_interference_range_m": self_interference_range_m,
@@ -14786,7 +14925,12 @@ class DsoPanel:
                         "center_m": float(abs_range_m) if np.isfinite(abs_range_m) else 0.0,
                         "abs_range_m": float(abs_range_m) if np.isfinite(abs_range_m) else float("nan"),
                     }
-                    freqs_ref, h_ref, w_ref = self._estimate_lfm_cfr(rx_mat, ref_mat, fs_ref)
+                    freqs_ref, h_ref, w_ref = self._estimate_lfm_cfr(
+                        rx_mat,
+                        ref_mat,
+                        fs_ref,
+                        float(pl.get("sensing_mmse_regularization", 1e-3)),
+                    )
                     cfr_info = None
                     if len(freqs_ref) >= 16:
                         cfr_info = {
@@ -15102,7 +15246,7 @@ class DsoPanel:
             self._set_metric(f"radar_processing_gain_db{suffix}".strip().replace(" ", "_").lower(),
                              f"Sensing Gp,eff{suffix}", processing_gain_db, "dB")
             self._set_metric(f"radar_pilot_weighted_gain_db{suffix}".strip().replace(" ", "_").lower(),
-                             f"Pilot-weighted gain{suffix}", pilot_weighted_gain_db, "dB")
+                             f"Waveform-weighted gain{suffix}", pilot_weighted_gain_db, "dB")
             self._set_metric(f"snr_rad_pg_corrected_db{suffix}".strip().replace(" ", "_").lower(),
                              f"Sensing PG-corrected SINR{suffix}", pg_corrected_snr_db, "dB")
             self._set_metric(f"diff_range_mm{suffix}".strip().replace(" ", "_").lower(),
@@ -15124,7 +15268,7 @@ class DsoPanel:
                 self._set_metric("pslr_db", "PSLR", pslr_db, "dB")
                 self._set_metric("snr_rad_post_db", "Sensing post-proc SINR", range_profile_snr_db, "dB")
                 self._set_metric("radar_processing_gain_db", "Sensing Gp,eff", processing_gain_db, "dB")
-                self._set_metric("radar_pilot_weighted_gain_db", "Pilot-weighted gain", pilot_weighted_gain_db, "dB")
+                self._set_metric("radar_pilot_weighted_gain_db", "Waveform-weighted gain", pilot_weighted_gain_db, "dB")
                 self._set_metric("snr_rad_pg_corrected_db", "Sensing PG-corrected SINR", pg_corrected_snr_db, "dB")
                 self._set_metric("diff_range_mm", "Range Difference", diff_range_mm, "mm")
                 self._set_metric("range_difference_mm", "Range Difference", diff_range_mm, "mm")
@@ -15137,7 +15281,7 @@ class DsoPanel:
                 self._set_metric("range_floor_iqr_db_c2", "C2 Range-floor IQR", range_floor_iqr_db, "dB")
                 self._set_metric("radar_processing_gain_db_c2", "C2 Coherent Gain Gp,eff", processing_gain_db, "dB")
                 self._set_metric("radar_ideal_processing_gain_db_c2", "C2 Ideal Gain BTp", ideal_processing_gain_db, "dB")
-                self._set_metric("radar_pilot_weighted_gain_db_c2", "C2 Pilot-weighted Gain", pilot_weighted_gain_db, "dB")
+                self._set_metric("radar_pilot_weighted_gain_db_c2", "C2 Waveform-weighted Gain", pilot_weighted_gain_db, "dB")
                 self._set_metric("radar_pre_snr_db_c2", "C2 Target Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
                 self._set_metric("snr_rad_pg_corrected_db_c2", "C2 Target Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
                 self._set_metric(
@@ -15145,7 +15289,7 @@ class DsoPanel:
                     "Sensing SINR",
                     range_profile_snr_db,
                     "dB",
-                    "Pilot-only C2 target excess power divided by the robust range-profile floor.",
+                    "Known-waveform C2 target excess power divided by the robust range-profile floor.",
                 )
 
             ax.cla()
@@ -16144,23 +16288,38 @@ class SystemModelValidationPanel:
         """Effective sensing gain; BT_p is retained only as an upper bound."""
         return max(10.0 ** (self._radar_proc_gain_db() / 10.0), 1e-30)
 
+    def _full_waveform_sensing(self) -> bool:
+        var = self.params.get("sensing_reference_mode")
+        mode = var.get() if var is not None else "Full TX (MMSE)"
+        return is_full_waveform_sensing(mode)
+
+    def _sensing_utilization(
+        self, rho: np.ndarray | float | None = None
+    ) -> np.ndarray:
+        if self._full_waveform_sensing():
+            eta = float(np.clip(self._float("sensing_data_utilization", 1.0), 1e-12, 1.0))
+            shape_source = 1.0 if rho is None else np.asarray(rho, dtype=np.float64)
+            return np.full_like(np.asarray(shape_source, dtype=np.float64), eta)
+        rho_value = self._float("rho", 0.20) if rho is None else rho
+        return np.clip(np.asarray(rho_value, dtype=np.float64), 1e-12, 1.0)
+
+    def _comm_data_fraction(
+        self, rho: np.ndarray | float | None = None
+    ) -> np.ndarray:
+        if self._full_waveform_sensing():
+            shape_source = 1.0 if rho is None else np.asarray(rho, dtype=np.float64)
+            return np.ones_like(np.asarray(shape_source, dtype=np.float64))
+        rho_value = self._float("rho", 0.20) if rho is None else rho
+        return 1.0 - np.clip(np.asarray(rho_value, dtype=np.float64), 0.0, 1.0)
+
     def _pilot_weighted_processing_gain_lin(
         self, rho: np.ndarray | float | None = None
     ) -> np.ndarray:
-        """Return rho*Gp,eff without folding rho into the user-entered gain.
-
-        ``G_p,eff`` is the coherent processing gain of the selected pilot.
-        The pilot receives only the power fraction ``rho`` of the unit-power
-        DFT-s-OFDM waveform, so the net pre/post-detection gain relative to
-        the full-waveform target power is rho*Gp,eff.
-        """
-        rho_value = (
-            self._float("rho", 0.20)
-            if rho is None
-            else np.asarray(rho, dtype=np.float64)
+        """Return coherent gain times the energy usable by the selected reference."""
+        return np.asarray(
+            self._processing_gain_lin() * self._sensing_utilization(rho),
+            dtype=np.float64,
         )
-        rho_arr = np.clip(np.asarray(rho_value, dtype=np.float64), 1e-12, 1.0)
-        return np.asarray(self._processing_gain_lin() * rho_arr, dtype=np.float64)
 
     def _pilot_weighted_processing_gain_db(
         self, rho: np.ndarray | float | None = None
@@ -16171,14 +16330,14 @@ class SystemModelValidationPanel:
         )
 
     def _processing_gain_annotation(self, rho: float | None = None) -> str:
-        rho_value = float(
-            np.clip(
-                self._float("rho", 0.20) if rho is None else rho,
-                1e-12,
-                1.0,
-            )
-        )
+        rho_value = float(np.clip(self._float("rho", 0.20) if rho is None else rho, 1e-12, 1.0))
         net_db = float(self._pilot_weighted_processing_gain_db(rho_value))
+        if self._full_waveform_sensing():
+            eta = float(self._sensing_utilization(rho_value))
+            return (
+                rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():.1f}$ dB, "
+                rf"$\eta_d={eta:g}$ (full-waveform gain={net_db:.1f} dB)"
+            )
         return (
             rf"$G_{{p,\mathrm{{eff}}}}={self._radar_proc_gain_db():.1f}$ dB, "
             rf"$\rho={rho_value:g}$ "
@@ -16327,8 +16486,8 @@ class SystemModelValidationPanel:
         """Propagate EVM-equivalent C1 SINR from one physical simulation point.
 
         At a fixed detector-output noise floor, square-law desired-signal
-        power scales as P_t^2 R^-4, m^2, and (1-rho).  The reference EVM uses
-        the same synchronization and equalization as the waveform simulator.
+        power scales as P_t^2 R^-4 and m^2. Pilot-only mode additionally uses
+        the legacy (1-rho) data fraction; full-waveform mode does not.
         """
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         rho_arr = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
@@ -16372,7 +16531,15 @@ class SystemModelValidationPanel:
         cspr_ref_db = self._float("comm_detector_ref_cspr_db", cspr_db)
         tx_scale = 10.0 ** (2.0 * (tx_dbm - tx_ref_dbm) / 10.0)
         modulation_scale = 10.0 ** ((cspr_ref_db - cspr_db) / 10.0)
-        data_scale = (1.0 - rho_arr) / max(1.0 - rho_ref, 1e-12)
+        data_fraction = self._comm_data_fraction(rho_arr)
+        ref_data_fraction = max(
+            self._float(
+                "comm_detector_ref_data_fraction",
+                float(self._comm_data_fraction(rho_ref)),
+            ),
+            1e-12,
+        )
+        data_scale = data_fraction / ref_data_fraction
         noise_snr = (
             ref_noise_snr
             * tx_scale
@@ -16380,9 +16547,8 @@ class SystemModelValidationPanel:
             * data_scale
             * (ref_range / r) ** 4
         )
-        # For P_sig proportional to m^2(1-rho) and residual interference
-        # (including SSBI) proportional to m^4, SIR is range/TX independent
-        # but scales as (1-rho)/m^2.
+        # Residual interference including SSBI is proportional to m^4, so
+        # SIR is range/TX independent and scales as data_fraction/m^2.
         sir = ref_sir * data_scale / max(modulation_scale, 1e-30)
         return 1.0 / (
             1.0 / np.maximum(noise_snr, 1e-300)
@@ -16498,7 +16664,14 @@ class SystemModelValidationPanel:
                 1.0 - 1e-12,
             )
         )
-        data_scale = (1.0 - rho) / max(1.0 - rho_ref, 1e-12)
+        ref_data_fraction = max(
+            self._float(
+                "comm_detector_ref_data_fraction",
+                float(self._comm_data_fraction(rho_ref)),
+            ),
+            1e-12,
+        )
+        data_scale = self._comm_data_fraction(rho) / ref_data_fraction
         tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
         tx_ref_dbm = self._float(
             "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0)
@@ -16548,7 +16721,7 @@ class SystemModelValidationPanel:
         rcs_dbsm: np.ndarray | float,
         tx_power_dbm: np.ndarray | float | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Return pilot-weighted detector-domain C4'/C8' coefficients.
+        """Return waveform-weighted detector-domain C4'/C8' coefficients.
 
         The reference target components and noise are produced by the same
         ZBD/LNA/IF simulation used by the distance-SINR panel.  Scaling away
@@ -16619,7 +16792,8 @@ class SystemModelValidationPanel:
         ref_range = max(self._float("detector_ref_range_m", self._float("ref_range_m", 1.0)), 1e-9)
         rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-12, 1.0 - 1e-12))
         rho_arr = np.clip(np.asarray(rho, dtype=np.float64), 1e-12, 1.0 - 1e-12)
-        rho_scale = rho_arr / rho_ref
+        utilization_ref = float(self._sensing_utilization(rho_ref))
+        utilization_scale = self._sensing_utilization(rho_arr) / max(utilization_ref, 1e-12)
 
         tx_dbm = (
             self._float("sweep_tx_power_dbm", -10.0)
@@ -16649,10 +16823,10 @@ class SystemModelValidationPanel:
             self._float("effective_rcs_dbsm", -6.0),
         )
         rcs_power_scale = 10.0 ** ((rcs - rcs_ref_dbsm) / 10.0)
-        common_scale = rho_scale * tx_scale * modulation_scale
+        common_scale = utilization_scale * tx_scale * modulation_scale
 
-        # The detector components contain the complete unit-power waveform.
-        # Only rho_ref is the sensing-pilot fraction in the Sec. II model.
+        # Full-waveform processing coherently uses all known TX energy. Legacy
+        # pilot-only processing retains the rho weighting for comparison.
         cross_snr_ref = (
             self._pilot_weighted_processing_gain_lin(rho_ref)
             * cross_mw
@@ -16784,20 +16958,31 @@ class SystemModelValidationPanel:
         add(3, "si_sweep_limits_dbm", "SI sweep [dBm] min, max", "-60, -20")
         add(4, "si_on_iso_db", "Net SI isolation [dB]", "25")
         add(5, "lna_ip1db_dbm", "LNA input P1dB [dBm]", "-20")
-        add(6, "rho", "Power allocation rho", "0.20")
-        add(7, "effective_rcs_dbsm", "Effective RCS [dBsm]", "-8.0")
-        add(8, "radar_proc_gain_db", "Sensing G_p,eff [dB]", "30.10")
-        add(9, "symbol_rate_gbaud", "Symbol rate / noise BW [GBd]", "20.0")
-        add(10, "theory_ssbi_fraction", "In-band SSBI fraction kappa", "0.069")
-        add(11, "theory_lna_nep", "LNA gain, ZBD NEP [dB, pW/sqrtHz]", "13, 5")
-        add(12, "required_sinr_db", "Req. SINR comm, sensing [dB]", "15.75, 13.2")
-        add(13, "sinr_ylim_db", "SINR y limits [dB]", "0, 40")
-        add(14, "rcs_limits_dbsm", "RCS sweep [dBsm] min, max", "-30, 0")
-        add(15, "bandpower_est_offset_db", "Band-power est. offset [dB]", "0.0")
-        add(16, "sensing_residual_model", "Practical ceiling [dB], SI^2 fraction", "40, 0.10")
-        add(17, "manual_range_evm_points", "Measured EVM [mm:dB]", "1000:-17.49, 1100:-16.21, 1200:-15.10")
-        add(18, "manual_evm_points", "Measured EVM [GBd:dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
-        add(19, "manual_c2_si_on_points", "Measured C2 [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
+        ttk.Label(ctrl, text="Sensing reference").grid(row=6, column=0, sticky="w", pady=2)
+        self.params["sensing_reference_mode"] = tk.StringVar(value="Full TX (MMSE)")
+        sensing_mode_box = ttk.Combobox(
+            ctrl,
+            textvariable=self.params["sensing_reference_mode"],
+            values=["Full TX (MMSE)", "Pilot-only (legacy)"],
+            state="readonly",
+            width=18,
+        )
+        sensing_mode_box.grid(row=6, column=1, sticky="ew", pady=2)
+        sensing_mode_box.bind("<<ComboboxSelected>>", lambda _event: self._refresh_plot())
+        add(7, "sensing_data_utilization", "Full-waveform utilization eta_d", "1.0")
+        add(8, "effective_rcs_dbsm", "Effective RCS [dBsm]", "-8.0")
+        add(9, "radar_proc_gain_db", "Sensing G_p,eff [dB]", "30.10")
+        add(10, "symbol_rate_gbaud", "Symbol rate / noise BW [GBd]", "20.0")
+        add(11, "theory_ssbi_fraction", "In-band SSBI fraction kappa", "0.069")
+        add(12, "theory_lna_nep", "LNA gain, ZBD NEP [dB, pW/sqrtHz]", "13, 5")
+        add(13, "required_sinr_db", "Req. SINR comm, sensing [dB]", "15.75, 13.2")
+        add(14, "sinr_ylim_db", "SINR y limits [dB]", "0, 40")
+        add(15, "rcs_limits_dbsm", "RCS sweep [dBsm] min, max", "-30, 0")
+        add(16, "bandpower_est_offset_db", "Band-power est. offset [dB]", "0.0")
+        add(17, "sensing_residual_model", "Practical ceiling [dB], SI^2 fraction", "40, 0.10")
+        add(18, "manual_range_evm_points", "Measured EVM [mm:dB]", "1000:-17.49, 1100:-16.21, 1200:-15.10")
+        add(19, "manual_evm_points", "Measured EVM [GBd:dB]", "2:-25.56, 4:-23.37, 8:-20.46, 10:-19.5, 12:-18.61, 15:-17.49, 17:-16.5, 20:-15.8")
+        add(20, "manual_c2_si_on_points", "Measured C2 [mm:dBm]", "1000:-38.3, 1100:-40.6, 1200:-42.4")
         hidden("r_min_m", "0.5")
         hidden("r_max_m", "2")
         hidden("sweep_points", "9")
@@ -16836,6 +17021,8 @@ class SystemModelValidationPanel:
         hidden("si_sinr_ylim_min", "0")
         hidden("si_sinr_ylim_max", "40")
         hidden("rho_ref", "0.20")
+        hidden("rho", "0.20")
+        hidden("comm_detector_ref_data_fraction", "1.0")
         hidden("sim_comm_ref_snr_db", "17.49")
         hidden("c2_power_ref_dbm", "-42.52")
         hidden("c2_target_power_ref_dbm", "-42.52")
@@ -16867,18 +17054,18 @@ class SystemModelValidationPanel:
         hidden("photocurrent_target_range_m", "1.014")
 
         btns = ttk.Frame(ctrl)
-        btns.grid(row=20, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        btns.grid(row=21, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(btns, text="Symbol Rate Sweep", command=self._run_symbol_rate_sweep).pack(side=tk.LEFT)
         ttk.Button(btns, text="Range Sweep", style="Primary.TButton", command=self._run).pack(side=tk.LEFT, padx=(6, 0))
 
         action_btns = ttk.Frame(ctrl)
-        action_btns.grid(row=21, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        action_btns.grid(row=22, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(action_btns, text="Redraw", command=self._refresh_plot).pack(side=tk.LEFT)
         ttk.Button(action_btns, text="Sync Sim", command=self._sync_from_sim).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(action_btns, text="Save Figures", command=self._save_all_figures).pack(side=tk.LEFT, padx=(6, 0))
 
         photocurrent_btns = ttk.Frame(ctrl)
-        photocurrent_btns.grid(row=22, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        photocurrent_btns.grid(row=23, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(
             photocurrent_btns,
             text="Sensing vs Photocurrent",
@@ -16890,10 +17077,10 @@ class SystemModelValidationPanel:
             ctrl,
             text="Include legend in saved PNG",
             variable=self.save_legend_var,
-        ).grid(row=23, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=24, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ttk.Label(ctrl, textvariable=self.status_var, style="Muted.TLabel", wraplength=280).grid(
-            row=24, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+            row=25, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
         ctrl.columnconfigure(1, weight=1)
 
@@ -17883,6 +18070,8 @@ class SystemModelValidationPanel:
         tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
         pt_mw = 10.0 ** (tx_dbm / 10.0)
         rho = float(np.clip(self._float("rho", 0.20), 1e-12, 1.0))
+        sensing_utilization = float(self._sensing_utilization(rho))
+        comm_data_fraction = float(self._comm_data_fraction(rho))
         cspr_db = self._float("cspr_db", 13.0)
         m2 = 10.0 ** (-cspr_db / 10.0)
         gp = max(self._processing_gain_lin(), 1e-30)
@@ -17920,6 +18109,8 @@ class SystemModelValidationPanel:
             "tx_dbm": tx_dbm,
             "pt_mw": pt_mw,
             "rho": rho,
+            "sensing_utilization": sensing_utilization,
+            "comm_data_fraction": comm_data_fraction,
             "m2": m2,
             "gp": gp,
             "rf_noise_mw": rf_noise_mw,
@@ -17988,12 +18179,7 @@ class SystemModelValidationPanel:
         ]
         ssbi_coefficient = context["detector_ssbi_coefficient"]
         m2 = context["m2"]
-        prefactor = (
-            context["rho"]
-            * context["gp"]
-            * 2.0
-            * m2
-        )
+        prefactor = context["sensing_utilization"] * context["gp"] * 2.0 * m2
         fixed_floor = np.full_like(p_si_mw, noise_floor)
         si_noise = si_noise_coefficient * p_si_mw
         echo_noise = np.full_like(
@@ -19218,18 +19404,15 @@ class SystemModelValidationPanel:
             + si_noise_coefficient * si_mw
             + ssbi_coefficient * si_mw ** 2
         )
-        prefactor = (
-            rho_v
-            * context["gp"]
-            * 2.0
-            * m2
-        )
+        sensing_utilization = float(self._sensing_utilization(rho_v))
+        prefactor = sensing_utilization * context["gp"] * 2.0 * m2
 
         def sensing_range_from_quadratic(
             si_power_mw: float, fixed_denominator_mw2: float
         ) -> np.ndarray:
             # With P_ec=C/u, gamma[D0+2NC/u]
-            # =rho*Gp*2m^2[P_SI*C/u+C^2/u^2].
+            # =eta*Gp*2m^2[P_SI*C/u+C^2/u^2], where eta=1 for
+            # ideal full-waveform processing and eta=rho for pilot-only.
             qa = sensing_threshold * max(fixed_denominator_mw2, 1e-300)
             qb = echo_r4_coefficient * (
                 2.0 * sensing_threshold * rf_noise_mw
@@ -19254,10 +19437,8 @@ class SystemModelValidationPanel:
         comm_threshold = 10.0 ** (comm_threshold_db / 10.0)
         # Eq. (14), with P_rx=C/R^2.  Solving gamma_comm=gamma_c first
         # gives the required received carrier power and then R_max.
-        comm_quadratic = (
-            m2 * (1.0 - rho_v)
-            - comm_threshold * ssbi_coefficient
-        )
+        comm_data_fraction = float(self._comm_data_fraction(rho_v))
+        comm_quadratic = m2 * comm_data_fraction - comm_threshold * ssbi_coefficient
         if comm_quadratic <= 0.0:
             comm_range = 0.0
         else:
@@ -20014,12 +20195,18 @@ class SystemModelValidationPanel:
         rho_ref = float(np.clip(self._float("rho_ref", 0.20), 1e-9, 1.0 - 1e-9))
         rho_v = float(np.clip(rho, 1e-9, 1.0 - 1e-9))
         if kind == "comm":
-            rho_term = 10.0 * np.log10((1.0 - rho_v) / max(1.0 - rho_ref, 1e-12))
+            data_fraction = float(self._comm_data_fraction(rho_v))
+            ref_fraction = float(self._comm_data_fraction(rho_ref))
+            rho_term = 10.0 * np.log10(data_fraction / max(ref_fraction, 1e-12))
             # C1 is also a ZBD square-law branch. With a fixed output-noise
             # floor, desired output power follows received RF power squared.
             range_term = -40.0 * np.log10(r / ref_r)
         else:
-            rho_term = 10.0 * np.log10(rho_v / rho_ref)
+            utilization = float(self._sensing_utilization(rho_v))
+            ref_utilization = float(self._sensing_utilization(rho_ref))
+            rho_term = 10.0 * np.log10(
+                utilization / max(ref_utilization, 1e-12)
+            )
             range_term = -40.0 * np.log10(r / ref_r)
         return float(ref_snr_db) + rho_term + range_term
 
@@ -20035,6 +20222,14 @@ class SystemModelValidationPanel:
         )
         self.params["theory_ssbi_fraction"].set(
             f"{float(cfg.sensing_ssbi_fraction):.6g}"
+        )
+        self.params["sensing_reference_mode"].set(
+            "Full TX (MMSE)"
+            if is_full_waveform_sensing(cfg.sensing_reference_mode)
+            else "Pilot-only (legacy)"
+        )
+        self.params["sensing_data_utilization"].set(
+            f"{float(cfg.sensing_data_utilization):.6g}"
         )
         _old_ceiling, old_quadratic_fraction = self._sensing_residual_parameters()
         self.params["sensing_residual_model"].set(
@@ -20159,6 +20354,9 @@ class SystemModelValidationPanel:
         self.params["comm_detector_ref_range_m"].set(f"{float(cfg.target_dist_m):.9g}")
         self.params["comm_detector_ref_tx_dbm"].set(f"{float(cfg.utcpd_target_dbm):.9g}")
         self.params["comm_detector_ref_rho"].set(f"{float(cfg.pilot_rho):.9g}")
+        self.params["comm_detector_ref_data_fraction"].set(
+            f"{1.0 if is_full_waveform_sensing(cfg.sensing_reference_mode) else max(1.0 - float(cfg.pilot_rho), 1e-12):.9g}"
+        )
         self.params["comm_detector_ref_cspr_db"].set(
             f"{effective_cspr_db(cfg):.9g}"
         )
@@ -20387,24 +20585,38 @@ class SystemModelValidationPanel:
         )
         pre_snr_db = float(data.get("radar_pre_snr_db_c2", float("nan")))
         post_snr_db = float(data.get("snr_rad_post_db_c2", data.get("radar_snr_db", float("nan"))))
-        # Keep coherent Gp,eff separate from rho.  post-pre is the
-        # pilot-weighted gain (Gp,eff+10log10(rho)) and must not be reused as
-        # coherent gain or the range sweep would apply rho twice.
+        # Keep coherent Gp,eff separate from waveform utilization. post-pre is the
+        # waveform-weighted gain and must not be reused as coherent gain or
+        # the range sweep would apply utilization twice.
         pg_db = float(data.get("radar_processing_gain_db_c2", float("nan")))
         pilot_rho = float(
             np.clip(data.get("pilot_rho", self._float("rho", 0.20)), 1e-12, 1.0)
+        )
+        sensing_utilization = float(
+            np.clip(
+                data.get(
+                    "sensing_waveform_utilization",
+                    sensing_waveform_utilization(
+                        data.get("sensing_reference_mode", "Full TX (MMSE)"),
+                        pilot_rho,
+                        1.0,
+                    ),
+                ),
+                1e-12,
+                1.0,
+            )
         )
         if not np.isfinite(pg_db):
             pilot_weighted_db = float(
                 data.get("radar_pilot_weighted_gain_db_c2", float("nan"))
             )
             if np.isfinite(pilot_weighted_db):
-                pg_db = pilot_weighted_db - 10.0 * np.log10(pilot_rho)
+                pg_db = pilot_weighted_db - 10.0 * np.log10(sensing_utilization)
             elif np.isfinite(post_snr_db) and np.isfinite(pre_snr_db):
                 pg_db = (
                     post_snr_db
                     - pre_snr_db
-                    - 10.0 * np.log10(pilot_rho)
+                    - 10.0 * np.log10(sensing_utilization)
                 )
         use_noise = c2_noise_dbm if fixed_noise_dbm is None else fixed_noise_dbm
         use_pg = pg_db if fixed_pg_db is None else fixed_pg_db
@@ -20412,7 +20624,7 @@ class SystemModelValidationPanel:
             c2_target_power_dbm
             - use_noise
             + use_pg
-            + 10.0 * np.log10(pilot_rho)
+            + 10.0 * np.log10(sensing_utilization)
             if all(np.isfinite(v) for v in (c2_target_power_dbm, use_noise, use_pg))
             else post_snr_db
         )
@@ -20549,7 +20761,11 @@ class SystemModelValidationPanel:
                 target_power
                 - ref_noise_by_state[state]
                 + 10.0 * np.log10(
-                    max(10.0 ** (ref_pg / 10.0) * sweep_rho, 1e-300)
+                    max(
+                        10.0 ** (ref_pg / 10.0)
+                        * float(self._sensing_utilization(sweep_rho)),
+                        1e-300,
+                    )
                 )
             )
             raw_radar_sinr = 10.0 ** (raw_radar_snr_db / 10.0)
@@ -20934,7 +21150,7 @@ class SystemModelValidationPanel:
                 f"ISAC theory: NF={self._float('system_nf_db', 8.0):.2f} dB, "
                 f"target@R0={self._c2_target_power_ref_dbm():.2f} dBm, "
                 f"Nd={self._c2_noise_power_dbm():.2f} dBm, "
-                f"Gp,eff={theory_gp_db:.2f} dB, rho*Gp={pilot_weighted_gain_db:.2f} dB, "
+                f"Gp,eff={theory_gp_db:.2f} dB, waveform gain={pilot_weighted_gain_db:.2f} dB, "
                 f"receiver/spectrum prediction="
                 f"{sensing_diag['receiver_prediction_db']:.2f}/"
                 f"{sensing_diag['spectrum_prediction_db']:.2f} dB, "
