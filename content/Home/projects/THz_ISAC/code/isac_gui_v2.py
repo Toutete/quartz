@@ -17134,7 +17134,16 @@ class SystemModelValidationPanel:
         mark_crossing(ax_sinr, rmax_comm, comm_threshold_db, blue)
         return rmax_comm, rmax_radar
 
-    def _add_grouped_sinr_legends(self, ax_sinr, ax_radar, no_si_valid: bool, linewidth: float, for_save: bool) -> None:
+    def _add_grouped_sinr_legends(
+        self,
+        ax_sinr,
+        ax_radar,
+        no_si_valid: bool,
+        linewidth: float,
+        for_save: bool,
+        has_direct_sensing: bool = True,
+        has_band_power_estimates: bool = True,
+    ) -> None:
         from matplotlib.lines import Line2D
 
         if for_save and not bool(self.save_legend_var.get()):
@@ -17151,10 +17160,35 @@ class SystemModelValidationPanel:
             radar_handles.append(
                 Line2D([0], [0], color=green, linestyle="--", linewidth=linewidth * 0.9, label="Sim. (without SI)")
             )
-        radar_handles.append(
-            Line2D([0], [0], color=red, marker="s", linestyle="None", markerfacecolor=red,
-                   markeredgecolor=red, markersize=6.5, label="Meas./band-power est.")
-        )
+        if has_direct_sensing:
+            radar_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=red,
+                    marker="s",
+                    linestyle="None",
+                    markerfacecolor=red,
+                    markeredgecolor=red,
+                    markersize=6.5,
+                    label="Direct meas.",
+                )
+            )
+        if has_band_power_estimates:
+            radar_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=red,
+                    marker="D",
+                    linestyle="None",
+                    markerfacecolor="none",
+                    markeredgecolor=red,
+                    markeredgewidth=1.4,
+                    markersize=6.5,
+                    label="Band-power est.",
+                )
+            )
         comm_handles = [
             Line2D([0], [0], color=blue, linestyle="--", linewidth=linewidth, label="Sim."),
             Line2D([0], [0], color=blue, marker="o", linestyle="None", markerfacecolor="none",
@@ -17288,7 +17322,23 @@ class SystemModelValidationPanel:
             radar_thr,
             for_save=for_save,
         )
-        self._add_grouped_sinr_legends(ax_sinr, ax_radar, no_si_valid, lw, for_save)
+        has_direct_sensing = any(
+            cache.get(f"{state}_direct_radar_points", [])
+            for state in ("on", "off")
+        )
+        has_band_power_estimates = any(
+            cache.get(f"{state}_band_radar_points", [])
+            for state in ("on", "off")
+        )
+        self._add_grouped_sinr_legends(
+            ax_sinr,
+            ax_radar,
+            no_si_valid,
+            lw,
+            for_save,
+            has_direct_sensing=has_direct_sensing,
+            has_band_power_estimates=has_band_power_estimates,
+        )
         gp_eff_db = float(cache.get("effective_processing_gain_db", self._radar_proc_gain_db()))
         cache_rho = float(cache.get("rho", self._float("rho", 0.20)))
         if np.isfinite(gp_eff_db):
@@ -20689,7 +20739,21 @@ class SystemModelValidationPanel:
                 sens_thr,
                 for_save=False,
             )
-            self._add_grouped_sinr_legends(ax_evm, ax_rad, no_si_valid, 1.9, False)
+            self._add_grouped_sinr_legends(
+                ax_evm,
+                ax_rad,
+                no_si_valid,
+                1.9,
+                False,
+                has_direct_sensing=any(
+                    self._direct_sensing_sinr_points(state)
+                    for state in ("on", "off")
+                ),
+                has_band_power_estimates=any(
+                    self._band_power_sensing_sinr_points(state)
+                    for state in ("on", "off")
+                ),
+            )
             gp_eff_db = self._radar_proc_gain_db()
             if np.isfinite(gp_eff_db):
                 ax_rad.text(

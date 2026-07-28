@@ -163,6 +163,30 @@ class ClosedFormTheoryTests(unittest.TestCase):
         self.assertNotIn("#008000", [line.get_color() for line in ax.lines])
         self.assertFalse(any(line.get_marker() == "o" for line in ax.lines))
 
+    def test_sensing_legend_distinguishes_open_band_power_marker(self):
+        model = _theory_model()
+        fig = Figure(figsize=(5.0, 4.0))
+        ax_radar = fig.add_subplot(111)
+        ax_comm = ax_radar.twinx()
+
+        model._add_grouped_sinr_legends(
+            ax_comm,
+            ax_radar,
+            no_si_valid=False,
+            linewidth=1.9,
+            for_save=False,
+            has_direct_sensing=False,
+            has_band_power_estimates=True,
+        )
+
+        legend = ax_radar.get_legend()
+        labels = [item.get_text() for item in legend.get_texts()]
+        self.assertIn("Band-power est.", labels)
+        self.assertNotIn("Direct meas.", labels)
+        band_handle = legend.legend_handles[labels.index("Band-power est.")]
+        self.assertEqual(band_handle.get_marker(), "D")
+        self.assertEqual(band_handle.get_markerfacecolor(), "none")
+
     def test_rho_tradeoff_ranges_satisfy_the_closed_form_thresholds(self):
         model = _theory_model()
         rcs = np.asarray([-8.0])
