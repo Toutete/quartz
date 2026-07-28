@@ -2157,6 +2157,8 @@ class SimConfig:
     # Coherent pilot-processing gain before the separately applied rho factor.
     # The ideal BT_p value remains an upper bound.
     radar_proc_gain_eff_db: float = 26.0
+    # In-band SSBI coefficient used by the Sec. II closed-form comparison.
+    sensing_ssbi_fraction: float = 0.069
     # Residual implementation/ADC/SI floor applied to the reported sensing
     # SINR. Physical detector noise is still calculated independently.
     sensing_residual_ceiling_db: float = 40.0
@@ -2689,6 +2691,96 @@ def calc_common_receiver_nf_db(cfg: SimConfig) -> float:
     f_if = 10.0 ** (float(cfg.if_amp_nf_db) / 10.0)
     f_total = max(f_lna + (f_if - 1.0) / g_lna, 1.0)
     return float(10.0 * np.log10(f_total))
+
+
+def calc_sec2_sensing_sinr(
+    cfg: SimConfig,
+    effective_rcs_sqm: float,
+    occupied_bw_hz: float,
+) -> dict[str, float]:
+    """Evaluate the manuscript detector-output sensing equation for one point.
+
+    This is intentionally separate from the realized normalized CFR metric.
+    All RF powers are referred to the LNA input and use the same ideal radar
+    equation and detector-noise terms as the third-tab closed-form figure.
+    """
+    pt_mw = 10.0 ** (float(cfg.utcpd_target_dbm) / 10.0)
+    p_si_mw = (
+        pt_mw * 10.0 ** (-float(cfg.omt_iso_db) / 10.0)
+        if bool(cfg.si_enable)
+        else 0.0
+    )
+    carrier_hz = max(float(cfg.rf_carrier_ghz) * 1e9, 1.0)
+    wavelength_m = 299792458.0 / carrier_hz
+    tx_gain = 10.0 ** (float(cfg.tx_ant_gain_dbi) / 10.0)
+    rx_gain = 10.0 ** (float(cfg.rx_ant_gain_dbi) / 10.0)
+    distance_m = max(float(cfg.target_dist_m), 1e-12)
+    sigma_sqm = max(float(effective_rcs_sqm), 0.0)
+    p_echo_mw = (
+        pt_mw
+        * tx_gain
+        * rx_gain
+        * wavelength_m ** 2
+        * sigma_sqm
+        / ((4.0 * np.pi) ** 3 * distance_m ** 4)
+    )
+
+    m2 = 10.0 ** (-effective_cspr_db(cfg) / 10.0)
+    rho = float(np.clip(cfg.pilot_rho, 1e-12, 1.0))
+    pilot_time_s = max(float(cfg.syms_per_chirp), 1.0) / max(
+        float(cfg.baud_gbaud) * 1e9, 1.0
+    )
+    ideal_gp_lin = max(float(occupied_bw_hz) * pilot_time_s, 1.0)
+    gp_lin = min(
+        10.0 ** (float(cfg.radar_proc_gain_eff_db) / 10.0),
+        ideal_gp_lin,
+    )
+
+    noise_bw_hz = max(float(cfg.baud_gbaud) * 1e9, 1.0)
+    noise_factor = 10.0 ** (calc_common_receiver_nf_db(cfg) / 10.0)
+    rf_noise_mw = 1.380649e-23 * 290.0 * noise_factor * noise_bw_hz * 1e3
+    lna_power_gain = max(10.0 ** (float(cfg.lna_gain_db) / 10.0), 1e-30)
+    zbd_nep_mw_sqrt_hz = max(float(cfg.zbd_nep_pw_sqrt_hz), 0.0) * 1e-9
+    detector_floor_mw2 = max(
+        rf_noise_mw ** 2
+        + zbd_nep_mw_sqrt_hz ** 2 * noise_bw_hz / lna_power_gain ** 2,
+        1e-300,
+    )
+    kappa = float(np.clip(cfg.sensing_ssbi_fraction, 0.0, 1.0))
+    numerator = rho * gp_lin * 2.0 * m2 * (
+        p_si_mw * p_echo_mw + p_echo_mw ** 2
+    )
+    carrier_noise_mw2 = 2.0 * rf_noise_mw * (p_si_mw + p_echo_mw)
+    ssbi_mw2 = kappa * m2 ** 2 * p_si_mw ** 2
+    denominator = max(
+        detector_floor_mw2 + carrier_noise_mw2 + ssbi_mw2,
+        1e-300,
+    )
+    raw_sinr = numerator / denominator
+    ceiling = 10.0 ** (float(cfg.sensing_residual_ceiling_db) / 10.0)
+    effective_sinr = 1.0 / (
+        1.0 / max(raw_sinr, 1e-300) + 1.0 / max(ceiling, 1e-300)
+    )
+    return {
+        # Fig. 3 is the ideal Sec. II equation and does not apply the optional
+        # practical residual ceiling.  Expose the ceiling-limited value under
+        # a separate key for diagnostics.
+        "sinr_db": float(10.0 * np.log10(max(raw_sinr, 1e-300))),
+        "raw_sinr_db": float(10.0 * np.log10(max(raw_sinr, 1e-300))),
+        "effective_sinr_db": float(
+            10.0 * np.log10(max(effective_sinr, 1e-300))
+        ),
+        "si_power_dbm": float(10.0 * np.log10(max(p_si_mw, 1e-300))),
+        "echo_power_dbm": float(10.0 * np.log10(max(p_echo_mw, 1e-300))),
+        "detector_floor_dbmw2": float(
+            10.0 * np.log10(max(detector_floor_mw2, 1e-300))
+        ),
+        "carrier_noise_dbmw2": float(
+            10.0 * np.log10(max(carrier_noise_mw2, 1e-300))
+        ),
+        "ssbi_dbmw2": float(10.0 * np.log10(max(ssbi_mw2, 1e-300))),
+        "processing_gain_db": float(10.0 * np.log10(max(gp_lin, 1e-300))),
+    }
 
 def calc_uxr0404a_noise_vrms(vscale_mv: float, bandwidth_hz: float) -> float:
     """Approximate UXR0404A input-referred noise for the selected V/div scale."""
@@ -3684,15 +3776,20 @@ def run_isac_sim(cfg: SimConfig):
     else:
         predicted_radar_snr_db = float("nan")
 
-    # The detector-domain equation is a prediction.  The displayed normalized
-    # CFR has its own realized target-to-floor metric, which includes waveform,
-    # window, CFR-estimation, and sidelobe effects.  Keep both values explicit.
-    radar_snr_db = (
+    sec2_sensing = calc_sec2_sensing_sinr(
+        cfg,
+        float(link["effective_rcs_sqm"]),
+        occupied_bw_hz,
+    )
+    # These three metrics have different meanings and must not be substituted
+    # for one another.  Gp,eff belongs to the two detector-output equations;
+    # the normalized CFR contrast is realized by the fixed waveform processor.
+    radar_snr_db = float(predicted_radar_snr_db)
+    range_profile_contrast_db = (
         float(si_cfr_contrast_db)
         if np.isfinite(si_cfr_contrast_db)
-        else float(predicted_radar_snr_db)
+        else float(matched_filter_contrast_db)
     )
-    range_profile_contrast_db = radar_snr_db
     pslr_db = (
         float(si_cfr_pslr_db)
         if np.isfinite(si_cfr_pslr_db)
@@ -3960,6 +4057,9 @@ def run_isac_sim(cfg: SimConfig):
         "c2_raw_band_metrics": c2_raw_band_metrics,
         "radar_snr_db": radar_snr_db,
         "radar_snr_predicted_db": predicted_radar_snr_db,
+        "sec2_sensing_sinr_db": sec2_sensing["sinr_db"],
+        "sec2_sensing_sinr_raw_db": sec2_sensing["raw_sinr_db"],
+        "sec2_sensing_terms": sec2_sensing,
         "radar_snr_raw_db": raw_radar_snr_db,
         "sensing_residual_ceiling_db": float(
             getattr(cfg, "sensing_residual_ceiling_db", 40.0)
@@ -4264,8 +4364,8 @@ class PhotonicIsacSimPanel:
             "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Density", values=("N/A", "dBm/Hz")),
             "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
             "comm_snr":  self.table.insert("", "end", text="Comm SNR (EVM)",    values=("N/A", "dB")),
-            "radar_snr": self.table.insert("", "end", text="C2 CFR Sensing SINR", values=("N/A", "dB")),
-            "radar_snr_model": self.table.insert("", "end", text="C2 Detector-model SINR", values=("N/A", "dB")),
+            "radar_snr": self.table.insert("", "end", text="C2 Detector-output SINR", values=("N/A", "dB")),
+            "radar_snr_model": self.table.insert("", "end", text="C2 Sec. II ideal SINR", values=("N/A", "dB")),
             "range_contrast": self.table.insert("", "end", text="C2 CFR Target/Floor", values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("normalized CFR", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
@@ -4395,6 +4495,7 @@ class PhotonicIsacSimPanel:
             "Sensing residual ceiling [dB]",
             "40.0",
         )
+        add_p(44, "sensing_ssbi_fraction", "Sensing SSBI kappa", "0.069")
 
         ttk.Label(grp, text="Target Dist [m]").grid(row=32, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
@@ -4678,6 +4779,13 @@ class PhotonicIsacSimPanel:
             syms_per_chirp=max(8, int(_awg_float("chirp_len_var", 1024))),
             pilot_rho=float(np.clip(_awg_float("pilot_rho_var", 0.20), 0.0, 0.95)),
             radar_proc_gain_eff_db=self._param_float("radar_proc_gain_eff_db", 26.0),
+            sensing_ssbi_fraction=float(
+                np.clip(
+                    self._param_float("sensing_ssbi_fraction", 0.069),
+                    0.0,
+                    1.0,
+                )
+            ),
             sensing_residual_ceiling_db=self._param_float(
                 "sensing_residual_ceiling_db", 40.0
             ),
@@ -4903,7 +5011,7 @@ class PhotonicIsacSimPanel:
                 self.table.item(
                     self.rows["radar_snr_model"],
                     values=(
-                        f"{float(self.data.get('radar_snr_predicted_db', np.nan)):.2f}",
+                        f"{float(self.data.get('sec2_sensing_sinr_db', np.nan)):.2f}",
                         "dB",
                     ),
                 )
@@ -19922,11 +20030,22 @@ class SystemModelValidationPanel:
         self.params["bandwidth_ghz"].set(f"{bandwidth_hz / 1e9:.6g}")
         self.params["symbol_rate_gbaud"].set(f"{float(cfg.baud_gbaud):.6g}")
         self.params["pilot_symbols"].set(f"{int(max(cfg.syms_per_chirp, 1))}")
+        self.params["radar_proc_gain_db"].set(
+            f"{float(cfg.radar_proc_gain_eff_db):.6g}"
+        )
+        self.params["theory_ssbi_fraction"].set(
+            f"{float(cfg.sensing_ssbi_fraction):.6g}"
+        )
+        _old_ceiling, old_quadratic_fraction = self._sensing_residual_parameters()
+        self.params["sensing_residual_model"].set(
+            f"{float(cfg.sensing_residual_ceiling_db):.6g}, "
+            f"{old_quadratic_fraction:.6g}"
+        )
         ideal_gp_db = 10.0 * np.log10(max(self._ideal_processing_gain_lin(), 1.0))
         if "ideal_processing_gain_db" in self.params:
             self.params["ideal_processing_gain_db"].set(f"{ideal_gp_db:.6g}")
         self.params["system_nf_db"].set(f"{calc_common_receiver_nf_db(cfg):.6g}")
-        self.params["cspr_db"].set(f"{float(cfg.cspr_db):.6g}")
+        self.params["cspr_db"].set(f"{effective_cspr_db(cfg):.6g}")
         self.params["theory_lna_nep"].set(
             f"{float(cfg.lna_gain_db):.6g}, "
             f"{float(cfg.zbd_nep_pw_sqrt_hz):.6g}"
@@ -20009,7 +20128,9 @@ class SystemModelValidationPanel:
         self.params["detector_ref_range_m"].set(f"{float(cfg.target_dist_m):.9g}")
         self.params["detector_ref_tx_dbm"].set(f"{float(cfg.utcpd_target_dbm):.9g}")
         self.params["detector_ref_iso_db"].set(f"{float(cfg.omt_iso_db):.9g}")
-        self.params["detector_ref_cspr_db"].set(f"{float(cfg.cspr_db):.9g}")
+        self.params["detector_ref_cspr_db"].set(
+            f"{effective_cspr_db(cfg):.9g}"
+        )
         if np.isfinite(rcs_ref):
             self.params["detector_ref_rcs_dbsm"].set(f"{rcs_ref:.9g}")
 
@@ -20038,7 +20159,9 @@ class SystemModelValidationPanel:
         self.params["comm_detector_ref_range_m"].set(f"{float(cfg.target_dist_m):.9g}")
         self.params["comm_detector_ref_tx_dbm"].set(f"{float(cfg.utcpd_target_dbm):.9g}")
         self.params["comm_detector_ref_rho"].set(f"{float(cfg.pilot_rho):.9g}")
-        self.params["comm_detector_ref_cspr_db"].set(f"{float(cfg.cspr_db):.9g}")
+        self.params["comm_detector_ref_cspr_db"].set(
+            f"{effective_cspr_db(cfg):.9g}"
+        )
         has_sensing_reference = all(
             np.isfinite(self._as_float(values.get(key)))
             for key in (

@@ -12,7 +12,9 @@ from matplotlib.figure import Figure
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from isac_gui_v2 import (
+    SimConfig,
     SystemModelValidationPanel,
+    calc_sec2_sensing_sinr,
     generate_bandlimited_noise,
 )
 
@@ -61,6 +63,70 @@ def _theory_model() -> SystemModelValidationPanel:
 
 
 class ClosedFormTheoryTests(unittest.TestCase):
+    def test_first_tab_sec2_metric_matches_third_tab_si_curve(self):
+        model = _theory_model()
+        cfg = SimConfig(
+            baud_gbaud=20.0,
+            rf_carrier_ghz=280.0,
+            utcpd_target_dbm=-10.0,
+            awg_rf_power_dbm=-6.0,
+            awg_ref_power_dbm=-6.0,
+            omt_iso_db=25.0,
+            cspr_db=13.0,
+            lna_gain_db=13.0,
+            lna_nf_db=8.0,
+            if_amp_nf_db=0.0,
+            zbd_nep_pw_sqrt_hz=5.0,
+            tx_ant_gain_dbi=33.0,
+            rx_ant_gain_dbi=33.0,
+            target_dist_m=1.1,
+            target_effective_rcs_dbsm=-8.0,
+            pilot_rho=0.20,
+            syms_per_chirp=1024,
+            radar_proc_gain_eff_db=30.1029995664,
+            sensing_ssbi_fraction=0.069,
+            sensing_residual_ceiling_db=40.0,
+        )
+        first_tab = calc_sec2_sensing_sinr(cfg, 10.0 ** (-8.0 / 10.0), 20e9)
+        third_tab = model._si_power_sweep_curves()
+        expected = float(
+            np.interp(
+                first_tab["si_power_dbm"],
+                third_tab["si_power_dbm"],
+                third_tab["with_si_db"],
+            )
+        )
+
+        self.assertAlmostEqual(first_tab["sinr_db"], expected, places=10)
+
+    def test_sec2_sensing_metric_responds_to_effective_processing_gain(self):
+        cfg = SimConfig(
+            baud_gbaud=20.0,
+            rf_carrier_ghz=280.0,
+            utcpd_target_dbm=-10.0,
+            awg_rf_power_dbm=-6.0,
+            awg_ref_power_dbm=-6.0,
+            omt_iso_db=25.0,
+            cspr_db=13.0,
+            lna_gain_db=13.0,
+            lna_nf_db=8.0,
+            if_amp_nf_db=0.0,
+            zbd_nep_pw_sqrt_hz=5.0,
+            tx_ant_gain_dbi=33.0,
+            rx_ant_gain_dbi=33.0,
+            target_dist_m=1.1,
+            pilot_rho=0.20,
+            syms_per_chirp=1024,
+            sensing_ssbi_fraction=0.069,
+            sensing_residual_ceiling_db=80.0,
+        )
+        cfg.radar_proc_gain_eff_db = 20.0
+        low_gain = calc_sec2_sensing_sinr(cfg, 10.0 ** (-8.0 / 10.0), 20e9)
+        cfg.radar_proc_gain_eff_db = 30.0
+        high_gain = calc_sec2_sensing_sinr(cfg, 10.0 ** (-8.0 / 10.0), 20e9)
+
+        self.assertGreater(high_gain["sinr_db"] - low_gain["sinr_db"], 9.9)
+
     def test_distance_comm_curve_uses_first_tab_equalizer_evm(self):
         sweep_evm_sinr = np.asarray([21.0, 17.5, 12.25])
         result = SystemModelValidationPanel._comm_sinr_from_distance_sweep(
