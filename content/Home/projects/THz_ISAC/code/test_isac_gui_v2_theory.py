@@ -16,6 +16,7 @@ from isac_gui_v2 import (
     SimConfig,
     SystemModelValidationPanel,
     calc_sec2_sensing_sinr,
+    estimate_mmse_sensing_efficiency,
     generate_bandlimited_noise,
 )
 
@@ -37,7 +38,10 @@ def _theory_model() -> SystemModelValidationPanel:
     values = {
         "rho": 0.20,
         "sensing_reference_mode": "Full TX (MMSE)",
-        "sensing_data_utilization": 1.0,
+        "sensing_mmse_regularization": 0.001,
+        "theory_waveform": "DFT-s-OFDM",
+        "theory_modulation": "32QAM",
+        "sensing_eta_db": "",
         "bandwidth_ghz": 20.0,
         "pilot_symbols": 1024,
         "symbol_rate_gbaud": 20.0,
@@ -66,6 +70,18 @@ def _theory_model() -> SystemModelValidationPanel:
 
 
 class ClosedFormTheoryTests(unittest.TestCase):
+    def test_mmse_efficiency_matches_32qam_waveform_statistics(self):
+        eta_ofdm = estimate_mmse_sensing_efficiency(
+            "OFDM", "32QAM", 1024, 0.001
+        )
+        eta_dfts = estimate_mmse_sensing_efficiency(
+            "DFT-s-OFDM", "32QAM", 1024, 0.001
+        )
+
+        self.assertAlmostEqual(10.0 * np.log10(eta_ofdm), -3.44, delta=0.08)
+        self.assertAlmostEqual(10.0 * np.log10(eta_dfts), -7.30, delta=0.12)
+        self.assertLess(eta_dfts, eta_ofdm)
+
     def test_live_dso_uses_full_tx_matrix_in_full_waveform_mode(self):
         pilot = np.ones(64, dtype=np.complex128)
         payload = {
@@ -86,6 +102,8 @@ class ClosedFormTheoryTests(unittest.TestCase):
     def test_first_tab_sec2_metric_matches_third_tab_si_curve(self):
         model = _theory_model()
         cfg = SimConfig(
+            waveform="DFT-s-OFDM",
+            modulation="32QAM",
             baud_gbaud=20.0,
             rf_carrier_ghz=280.0,
             utcpd_target_dbm=-10.0,
@@ -121,6 +139,8 @@ class ClosedFormTheoryTests(unittest.TestCase):
 
     def test_sec2_sensing_metric_responds_to_effective_processing_gain(self):
         cfg = SimConfig(
+            waveform="DFT-s-OFDM",
+            modulation="32QAM",
             baud_gbaud=20.0,
             rf_carrier_ghz=280.0,
             utcpd_target_dbm=-10.0,
@@ -304,7 +324,8 @@ class ClosedFormTheoryTests(unittest.TestCase):
                 / r_sens ** 4
             )
             sensing_sinr = (
-                context["gp"]
+                context["sensing_utilization"]
+                * context["gp"]
                 * 2.0
                 * context["m2"]
                 * (context["si_mw"] * p_echo + p_echo ** 2)
