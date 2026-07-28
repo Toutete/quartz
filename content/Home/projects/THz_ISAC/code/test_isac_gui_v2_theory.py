@@ -312,7 +312,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             r_comm = float(curves[0][0])
             p_rx = context["comm_rx_r2_coefficient_mw_m2"] / r_comm ** 2
             comm_sinr = (
-                context["m2"] * p_rx ** 2
+                2.0 * context["m2"] * p_rx ** 2
                 / (
                     context["detector_noise_floor_mw2"]
                     + 2.0 * p_rx * context["rf_noise_mw"]
@@ -547,6 +547,28 @@ class ClosedFormTheoryTests(unittest.TestCase):
 
         self.assertAlmostEqual(reference, 8.0)
         self.assertAlmostEqual(calc_common_receiver_nf_db(cfg), reference)
+
+    def test_comm_range_matches_synced_1p1m_simulation_operating_point(self):
+        model = _theory_model()
+        model.params["symbol_rate_gbaud"].set(15.0)
+        model.params["theory_omt_il_db"].set(2.3)
+        context = model._closed_form_theory_context()
+        curves = model._rmax_vs_effective_rcs(np.asarray([-8.0]), 0.20)
+        comm_range = float(curves[0][0])
+        p_rx_1p1m = (
+            context["comm_rx_r2_coefficient_mw_m2"] / 1.1 ** 2
+        )
+        comm_sinr_1p1m = (
+            2.0 * context["m2"] * p_rx_1p1m ** 2
+            / (
+                context["detector_noise_floor_mw2"]
+                + 2.0 * context["rf_noise_mw"] * p_rx_1p1m
+                + context["detector_ssbi_coefficient"] * p_rx_1p1m ** 2
+            )
+        )
+
+        self.assertAlmostEqual(comm_range, 1.10247, delta=5e-4)
+        self.assertGreater(10.0 * np.log10(comm_sinr_1p1m), 15.75)
 
 
 if __name__ == "__main__":

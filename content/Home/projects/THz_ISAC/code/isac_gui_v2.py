@@ -19603,7 +19603,13 @@ class SystemModelValidationPanel:
         # Eq. (14), with P_rx=C/R^2.  Solving gamma_comm=gamma_c first
         # gives the required received carrier power and then R_max.
         comm_data_fraction = float(self._comm_data_fraction(rho_v))
-        comm_quadratic = m2 * comm_data_fraction - comm_threshold * ssbi_coefficient
+        # |sqrt(P_c)(1+m*s)|^2 has wanted AC power 2*m^2*P_c^2
+        # for unit-power complex s. This is the same factor used by the
+        # echo self-beat term in the sensing equation.
+        comm_quadratic = (
+            2.0 * m2 * comm_data_fraction
+            - comm_threshold * ssbi_coefficient
+        )
         if comm_quadratic <= 0.0:
             comm_range = 0.0
         else:

@@ -13,11 +13,12 @@
 - 두 sensing range의 RCS 의존성: (R_{\max}\propto\sigma_{\rm eff}^{1/4})
 - ISAC range: (\min(R_{\max}^{\rm comm},R_{\max}^{\rm sens}))
 
-이번 검증에서 코드 오류 세 개를 수정했다.
+이번 검증에서 코드 오류 네 개를 수정했다.
 
 1. 세 번째 탭 이론 링크에 누락된 OMT 삽입손실 (2L_{\rm OMT}\)를 추가했다.
 2. GUI의 UTC-PD 전력이 total carrier-plus-sideband power인 점을 반영해, square-law 식에는 carrier power (P_c=P_{t,\rm tot}/(1+m^2))를 사용하도록 통일했다.
 3. ZBD 뒤에 위치한 IF amplifier NF를 RF LNA와 Friis 합성하던 처리를 제거했다. IF amplifier 잡음은 (N)이 아니라 검파 후 고정 바닥 (N_{d,0})에 속한다.
+4. communication square-law desired power에 누락됐던 계수 2를 복원했다. sensing echo self-beat와 마찬가지로 unit-power complex waveform의 desired AC power는 (2m^2P_{\rm rx}^2)이다.
 
 다만 현재 `sec2.tex`는 최신 코드와 동일한 모델이 아니다. 논문은 여전히 pilot power allocation (\rho)를 사용하지만, 코드는 기본적으로 full-waveform MMSE sensing을 사용한다. 또한 논문의 (N_{d,0}=-97.5\) dB(mW\(^2\))는 현재 GUI 기본 NEP로부터 계산되는 (-89.0\) dB(mW\(^2\))와 일치하지 않는다. 이 두 항목은 논문 그림을 확정하기 전에 반드시 하나의 정의로 통일해야 한다.
 
@@ -203,7 +204,7 @@ full-waveform 모드의 communication 식은
 \[
 \boxed{
 \gamma_{\rm comm}(R)=
-\frac{m^2P_{\rm rx}^2}
+\frac{2m^2P_{\rm rx}^2}
 {N_{d,0}+2NP_{\rm rx}+\kappa m^4P_{\rm rx}^2}}
 }.
 \]
@@ -212,12 +213,12 @@ legacy pilot superposition에서만 numerator에 (1-\rho)가 들어간다. 이 �
 
 - fixed-floor limited: (\gamma_{\rm comm}\propto P_{\rm rx}^2\propto R^{-4})
 - carrier--noise limited: (\gamma_{\rm comm}\propto P_{\rm rx}\propto R^{-2})
-- SSBI limited: (\gamma_{\rm comm}\to1/(\kappa m^2))
+- SSBI limited: (\gamma_{\rm comm}\to2/(\kappa m^2))
 
 threshold (\gamma_c)에 필요한 carrier power는
 
 \[
-A_c=m^2f_d-\gamma_c\kappa m^4,
+A_c=2m^2f_d-\gamma_c\kappa m^4,
 \]
 
 \[
@@ -260,14 +261,14 @@ Fig. 3에 표시된 LNA (P_{1\rm dB})는 유효 범위 경계일 뿐이다. clos
 
 기본값 (P_{t,\rm tot}=-10) dBm, CSPR 13 dB, (G_t=G_r=33) dBi, OMT 1.9 dB/pass, (N_{d,0}=-89.01) dB(mW\(^2\)), (kappa=0.069), (\sigma=-8) dBsm에서:
 
-- (R_{\max}^{\rm comm}=0.857) m
+- (R_{\max}^{\rm comm}=1.104) m
 - (R_{\max}^{\rm sens}\), with SI (=1.268) m
 - (R_{\max}^{\rm sens}\), without SI (=0.788) m
-- (R_{\max}^{\rm ISAC}=0.857) m
+- (R_{\max}^{\rm ISAC}=1.104) m
 
-기존 약 1.36 m 통신 range는 OMT loss가 빠진 낙관적인 값이었다. 같은 corrected link에서 1.1 m communication range를 얻으려면 약 2.17 dB의 추가 net link budget이 필요하다.
+이 값은 square-law communication desired power의 계수 2와 OMT two-pass loss를 모두 적용한 결과다. 계수 2를 누락한 이전 코드는 0.857 m를 표시했지만, 동일한 15-GBd simulation 조건과 OMT 2.3 dB/pass를 적용하면 corrected closed-form range는 1.102 m이며 1.1 m waveform EVM 결과와 일치한다.
 
-한편 (N_{d,0}=-97.5) dB(mW\(^2\))를 독립적인 calibrated floor로 사용하면 동일한 corrected link의 통신 range는 약 1.06 m가 된다. 즉 논문의 1.1 m는 이 floor와는 대체로 일관되지만, NEP 5 pW/\(\sqrt{\rm Hz}\)로 계산한 floor와는 일관되지 않는다.
+한편 (N_{d,0}=-97.5) dB(mW\(^2\))를 독립적인 calibrated floor로 사용하면 동일한 20-GBd 기본 link의 통신 range는 약 1.46 m가 된다. 따라서 이 floor를 사용하려면 실제 receiver bandwidth와 EVM 결과에 맞춰 다른 noise 항도 함께 재보정해야 한다.
 
 full-waveform 모드에서는 (\rho)가 통신 및 sensing range에 영향을 주지 않는 것이 의도된 결과다. legacy pilot-only 모드에서만 communication의 (1-\rho)와 sensing의 (\rho) trade-off가 남는다.
 
@@ -358,6 +359,7 @@ H(f)/\overline H_{\rm SI}-1
 회귀 테스트가 확인하는 항목은 다음과 같다.
 
 - first-tab Sec. II metric과 third-tab SI curve의 동일 조건 일치
+- communication square-law desired term의 계수 (2m^2P_{\rm rx}^2)
 - OMT loss 1 dB/pass 증가 시 echo 및 communication coefficient가 각각 2 dB 감소
 - net SI power에는 OMT loss가 중복 적용되지 않음
 - IF amplifier NF 변화가 LNA-input RF (N)을 바꾸지 않음

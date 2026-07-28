@@ -302,7 +302,7 @@ noise in the same way. There is no cross-beat, since there is only one
 path, so
 \begin{equation}
 \gamma_{\mathrm{comm}}
-=\frac{m^2(1-\rho)P_{\mathrm{rx}}^2}
+=\frac{2m^2(1-\rho)P_{\mathrm{rx}}^2}
 {N_{\mathrm{d},0}+2P_{\mathrm{rx}}N+\kappa m^4P_{\mathrm{rx}}^2},
 \label{eq:sinr_comm}
 \end{equation}
@@ -310,7 +310,7 @@ which is~\eqref{eq:sinr_sens} with the leakage replaced by the received
 carrier. The desired term scales as $P_{\mathrm{rx}}^2\propto R^{-4}$,
 matching the SI-homodyned sensing branch. At the ranges of interest the
 carrier--noise beat dominates the denominator, while the SSBI imposes a
-ceiling $(1-\rho)/\kappa m^2$ that lies well above $\gamma_c$ for the
+ceiling $2(1-\rho)/\kappa m^2$ that lies well above $\gamma_c$ for the
 values of Table~\ref{tab:simulation_parameters}. The maximum
 communication range $R_{\max}^{\mathrm{comm}}$ is the distance at which
 $\gamma_{\mathrm{comm}}=\gamma_c$.
