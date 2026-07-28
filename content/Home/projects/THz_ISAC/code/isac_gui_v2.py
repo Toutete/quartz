@@ -2806,15 +2806,12 @@ def calc_isac_link_budget(
 def calc_common_receiver_nf_db(cfg: SimConfig) -> float:
     """Common C1/C2 equivalent NF used by the theoretical ISAC bound.
 
-    The requested thermal-noise-only model uses the shared LNA followed by
-    the IF amplifier. The ZBD NEP and digitizer noise remain explicit in the
-    waveform simulation and are not folded into this signal-dependent NF.
+    The RF noise power ``N`` is referred to the LNA input.  The IF amplifier
+    is downstream of the nonlinear ZBD, so its noise figure cannot be
+    cascaded with the LNA by the RF Friis formula.  ZBD, IF-chain, and
+    digitizer noise instead belong to the detector-output fixed floor.
     """
-    f_lna = 10.0 ** (float(cfg.lna_nf_db) / 10.0)
-    g_lna = max(10.0 ** (float(cfg.lna_gain_db) / 10.0), 1e-30)
-    f_if = 10.0 ** (float(cfg.if_amp_nf_db) / 10.0)
-    f_total = max(f_lna + (f_if - 1.0) / g_lna, 1.0)
-    return float(10.0 * np.log10(f_total))
+    return float(max(float(cfg.lna_nf_db), 0.0))
 
 
 def calc_sec2_sensing_sinr(
@@ -2828,9 +2825,14 @@ def calc_sec2_sensing_sinr(
     All RF powers are referred to the LNA input and use the same ideal radar
     equation and detector-noise terms as the third-tab closed-form figure.
     """
-    pt_mw = 10.0 ** (float(cfg.utcpd_target_dbm) / 10.0)
+    pt_total_mw = 10.0 ** (float(cfg.utcpd_target_dbm) / 10.0)
+    m2 = 10.0 ** (-effective_cspr_db(cfg) / 10.0)
+    # The GUI's UTC-PD power is total carrier-plus-sideband power, whereas
+    # Sec. II writes x=sqrt(P_c)(1+m*s).  Therefore P_SI and P_ec in the
+    # square-law products are carrier powers P_c=P_total/(1+m^2).
+    pt_carrier_mw = pt_total_mw / (1.0 + m2)
     p_si_mw = (
-        pt_mw * 10.0 ** (-float(cfg.omt_iso_db) / 10.0)
+        pt_carrier_mw * 10.0 ** (-float(cfg.omt_iso_db) / 10.0)
         if bool(cfg.si_enable)
         else 0.0
     )
@@ -2840,16 +2842,17 @@ def calc_sec2_sensing_sinr(
     rx_gain = 10.0 ** (float(cfg.rx_ant_gain_dbi) / 10.0)
     distance_m = max(float(cfg.target_dist_m), 1e-12)
     sigma_sqm = max(float(effective_rcs_sqm), 0.0)
+    omt_two_pass = 10.0 ** (-2.0 * float(cfg.omt_il_db) / 10.0)
     p_echo_mw = (
-        pt_mw
+        pt_carrier_mw
         * tx_gain
         * rx_gain
         * wavelength_m ** 2
         * sigma_sqm
+        * omt_two_pass
         / ((4.0 * np.pi) ** 3 * distance_m ** 4)
     )
 
-    m2 = 10.0 ** (-effective_cspr_db(cfg) / 10.0)
     sensing_utilization = sensing_waveform_utilization(
         cfg.sensing_reference_mode,
         cfg.pilot_rho,
@@ -2903,6 +2906,11 @@ def calc_sec2_sensing_sinr(
         ),
         "sensing_utilization": sensing_utilization,
         "sensing_reference_mode": str(cfg.sensing_reference_mode),
+        "tx_total_power_dbm": float(cfg.utcpd_target_dbm),
+        "tx_carrier_power_dbm": float(
+            10.0 * np.log10(max(pt_carrier_mw, 1e-300))
+        ),
+        "omt_two_pass_loss_db": float(2.0 * cfg.omt_il_db),
         "si_power_dbm": float(10.0 * np.log10(max(p_si_mw, 1e-300))),
         "echo_power_dbm": float(10.0 * np.log10(max(p_echo_mw, 1e-300))),
         "detector_floor_dbmw2": float(
@@ -17151,6 +17159,7 @@ class SystemModelValidationPanel:
         hidden("theory_rf_carrier_ghz", "280.0")
         hidden("theory_tx_gain_dbi", "33.0")
         hidden("theory_rx_gain_dbi", "33.0")
+        hidden("theory_omt_il_db", "1.9")
         hidden("theory_noise_noise_overlap", "1.0")
         # Optional downstream electrical floor referred to the LNA input.
         # -300 dB(mW^2) makes it negligible for the ideal theory figures.
@@ -18080,19 +18089,25 @@ class SystemModelValidationPanel:
     def _si_input_dbm_to_tx_dbm(
         self, si_power_dbm: np.ndarray | float
     ) -> np.ndarray:
-        """Map total SI power at the LNA input to THz TX output power."""
+        """Map SI carrier power at the LNA input to total THz TX power."""
+        m2 = 10.0 ** (-self._float("cspr_db", 13.0) / 10.0)
+        carrier_fraction_db = -10.0 * np.log10(1.0 + m2)
         return (
             np.asarray(si_power_dbm, dtype=np.float64)
             + self._theory_isolation_db()
+            - carrier_fraction_db
         )
 
     def _tx_dbm_to_si_input_dbm(
         self, tx_power_dbm: np.ndarray | float
     ) -> np.ndarray:
-        """Return total SI power at the LNA input for net isolation."""
+        """Return SI carrier power at the LNA input for net isolation."""
+        m2 = 10.0 ** (-self._float("cspr_db", 13.0) / 10.0)
+        carrier_fraction_db = -10.0 * np.log10(1.0 + m2)
         return (
             np.asarray(tx_power_dbm, dtype=np.float64)
             - self._theory_isolation_db()
+            + carrier_fraction_db
         )
 
     def _closed_form_detector_noise_coefficients(
@@ -18208,12 +18223,13 @@ class SystemModelValidationPanel:
     def _closed_form_theory_context(self) -> dict[str, float | str]:
         """Return the fixed Table-I parameters for the closed-form figures."""
         tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
-        pt_mw = 10.0 ** (tx_dbm / 10.0)
+        pt_total_mw = 10.0 ** (tx_dbm / 10.0)
         rho = float(np.clip(self._float("rho", 0.20), 1e-12, 1.0))
         sensing_utilization = float(self._sensing_utilization(rho))
         comm_data_fraction = float(self._comm_data_fraction(rho))
         cspr_db = self._float("cspr_db", 13.0)
         m2 = 10.0 ** (-cspr_db / 10.0)
+        pt_carrier_mw = pt_total_mw / (1.0 + m2)
         gp = max(self._processing_gain_lin(), 1e-30)
         detector_noise = self._closed_form_detector_noise_coefficients(m2)
         rf_noise_mw = float(detector_noise["rf_noise_mw"])
@@ -18229,25 +18245,32 @@ class SystemModelValidationPanel:
         rx_gain = 10.0 ** (
             self._float("theory_rx_gain_dbi", 33.0) / 10.0
         )
+        omt_il_db = max(self._float("theory_omt_il_db", 1.9), 0.0)
+        omt_two_pass = 10.0 ** (-2.0 * omt_il_db / 10.0)
         echo_per_pt_unit_rcs = (
             tx_gain
             * rx_gain
             * wavelength_m ** 2
+            * omt_two_pass
             / (4.0 * np.pi) ** 3
         )
         comm_rx_r2_coefficient = (
-            pt_mw
+            pt_carrier_mw
             * tx_gain
             * rx_gain
             * wavelength_m ** 2
+            * omt_two_pass
             / (4.0 * np.pi) ** 2
         )
-        si_mw = pt_mw * 10.0 ** (
+        si_mw = pt_carrier_mw * 10.0 ** (
             -self._theory_isolation_db() / 10.0
         )
         return {
             "tx_dbm": tx_dbm,
-            "pt_mw": pt_mw,
+            "pt_total_mw": pt_total_mw,
+            "pt_mw": pt_carrier_mw,
+            "pt_carrier_mw": pt_carrier_mw,
+            "carrier_fraction": 1.0 / (1.0 + m2),
             "rho": rho,
             "sensing_utilization": sensing_utilization,
             "comm_data_fraction": comm_data_fraction,
@@ -18261,6 +18284,8 @@ class SystemModelValidationPanel:
             "wavelength_m": wavelength_m,
             "tx_gain": tx_gain,
             "rx_gain": rx_gain,
+            "omt_il_db": omt_il_db,
+            "omt_two_pass": omt_two_pass,
             "detector_noise_floor_mw2": float(
                 detector_noise["noise_floor_mw2"]
             ),
@@ -18934,7 +18959,7 @@ class SystemModelValidationPanel:
             ),
         )
         secondary.set_xlabel(
-            rf"SI power at LNA input (dBm), isolation={self._theory_isolation_db():g} dB"
+            rf"SI carrier power at LNA input (dBm), isolation={self._theory_isolation_db():g} dB"
         )
         secondary.tick_params(direction="in", labelsize=9 if for_save else 7.5)
         ax.xaxis.set_major_locator(MultipleLocator(10.0))
@@ -19018,7 +19043,7 @@ class SystemModelValidationPanel:
         if y_max > y_min:
             ax.set_ylim(y_min, y_max)
             ax.yaxis.set_major_locator(MultipleLocator(10.0))
-        ax.set_xlabel(r"SI power at LNA input, $P_{\mathrm{SI}}$ (dBm)")
+        ax.set_xlabel(r"SI carrier power at LNA input, $P_{\mathrm{SI}}$ (dBm)")
         ax.set_ylabel("Sensing SINR (dB)")
         ax.xaxis.set_major_locator(MultipleLocator(10.0))
         ax.xaxis.set_minor_locator(AutoMinorLocator(2))
@@ -20395,6 +20420,9 @@ class SystemModelValidationPanel:
         )
         self.params["theory_rx_gain_dbi"].set(
             f"{float(cfg.rx_ant_gain_dbi):.6g}"
+        )
+        self.params["theory_omt_il_db"].set(
+            f"{float(cfg.omt_il_db):.6g}"
         )
         self.params["theory_tx_ref_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
         rcs_dbsm = cfg.target_effective_rcs_dbsm

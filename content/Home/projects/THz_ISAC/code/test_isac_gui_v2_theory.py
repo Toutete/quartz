@@ -15,6 +15,7 @@ from isac_gui_v2 import (
     DsoPanel,
     SimConfig,
     SystemModelValidationPanel,
+    calc_common_receiver_nf_db,
     calc_sec2_sensing_sinr,
     estimate_mmse_sensing_efficiency,
     generate_bandlimited_noise,
@@ -55,6 +56,7 @@ def _theory_model() -> SystemModelValidationPanel:
         "theory_rf_carrier_ghz": 280.0,
         "theory_tx_gain_dbi": 33.0,
         "theory_rx_gain_dbi": 33.0,
+        "theory_omt_il_db": 1.9,
         "theory_noise_noise_overlap": 1.0,
         "theory_post_detector_floor_dbmw2": -300.0,
         "theory_ssbi_fraction": 0.069,
@@ -110,6 +112,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             awg_rf_power_dbm=-6.0,
             awg_ref_power_dbm=-6.0,
             omt_iso_db=25.0,
+            omt_il_db=1.9,
             cspr_db=13.0,
             lna_gain_db=13.0,
             lna_nf_db=8.0,
@@ -135,7 +138,9 @@ class ClosedFormTheoryTests(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(first_tab["sinr_db"], expected, places=10)
+        # The third-tab curve is sampled on a 0.2-dB SI grid, so interpolation
+        # introduces a very small curvature error around the exact point.
+        self.assertAlmostEqual(first_tab["sinr_db"], expected, delta=1e-3)
 
     def test_sec2_sensing_metric_responds_to_effective_processing_gain(self):
         cfg = SimConfig(
@@ -403,7 +408,13 @@ class ClosedFormTheoryTests(unittest.TestCase):
         self.assertGreater(nearest(slope, -40.0), 0.65)
         self.assertGreater(nearest(slope, -35.0), 0.55)
         self.assertLess(nearest(slope, -20.0), -0.50)
-        self.assertAlmostEqual(float(curves["current_si_dbm"]), -35.0)
+        carrier_fraction_db = -10.0 * np.log10(
+            1.0 + 10.0 ** (-13.0 / 10.0)
+        )
+        self.assertAlmostEqual(
+            float(curves["current_si_dbm"]),
+            -35.0 + carrier_fraction_db,
+        )
         self.assertGreater(float(curves["current_sinr_db"]), 13.2)
         self.assertLess(
             float(curves["linear_region_min_dbm"]),
@@ -498,6 +509,44 @@ class ClosedFormTheoryTests(unittest.TestCase):
             -3.0,
             places=12,
         )
+
+    def test_theory_link_applies_two_pass_omt_loss_once(self):
+        model = _theory_model()
+        reference = model._closed_form_theory_context()
+        model.params["theory_omt_il_db"].set(2.9)
+        extra_loss = model._closed_form_theory_context()
+
+        self.assertAlmostEqual(
+            10.0
+            * np.log10(
+                extra_loss["echo_per_pt_unit_rcs"]
+                / reference["echo_per_pt_unit_rcs"]
+            ),
+            -2.0,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            10.0
+            * np.log10(
+                extra_loss["comm_rx_r2_coefficient_mw_m2"]
+                / reference["comm_rx_r2_coefficient_mw_m2"]
+            ),
+            -2.0,
+            places=12,
+        )
+        self.assertAlmostEqual(
+            float(extra_loss["si_mw"]),
+            float(reference["si_mw"]),
+            places=18,
+        )
+
+    def test_if_amplifier_nf_is_not_friis_cascaded_through_zbd(self):
+        cfg = SimConfig(lna_nf_db=8.0, if_amp_nf_db=0.0)
+        reference = calc_common_receiver_nf_db(cfg)
+        cfg.if_amp_nf_db = 20.0
+
+        self.assertAlmostEqual(reference, 8.0)
+        self.assertAlmostEqual(calc_common_receiver_nf_db(cfg), reference)
 
 
 if __name__ == "__main__":
