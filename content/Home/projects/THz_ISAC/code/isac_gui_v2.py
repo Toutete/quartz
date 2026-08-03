@@ -1245,7 +1245,7 @@ class IsacTxSimPanel:
             sigma = _parse_float_input(self.rcs_var.get(), "Sensing RCS sigma")
             ant_gain = _parse_float_input(self.ant_gain_var.get(), "Antenna Gain")
             rx_gain_db = _parse_float_input(self.rx_gain_var.get(), "RX IF Gain")
-            antenna_sic_db = _parse_float_input(self.antenna_sic_var.get(), "OMT Isolation")
+            antenna_sic_db = _parse_float_input(self.antenna_sic_var.get(), "Duplexer Isolation")
             sic_dsp_enabled = bool(self.sic_dsp_var.get())
             sic_mode = str(self.sic_mode_var.get()).strip()
             si_enabled = bool(self.si_enable_var.get())
@@ -1310,7 +1310,7 @@ class IsacTxSimPanel:
                 "dsp_output_dbm": float("nan"),
             }
             if si_enabled:
-                # OMT leakage model: a fraction of TX leaks into OMT RX port before LNA/mixer.
+                # Duplexer leakage model: a fraction of TX leaks into the RX port before LNA/mixer.
                 p_si_target_dbm = txp_dbm - max(0.0, antenna_sic_db) + rx_gain_db
                 p_si_target_w = self._dbm_to_w(p_si_target_dbm)
                 p_si_raw_w = float(np.mean(np.abs(tx_bb_sim) ** 2) / 50.0) + 1e-30
@@ -2039,7 +2039,7 @@ class IsacTxSimPanel:
                         ("Path Loss", float(meta.get("path_loss_db", float("nan"))), "dB"),
                         ("Received Power", float(si_info.get("comm_power_dbm_omt", meta.get("pr_comm_dbm", float("nan")))), "dBm"),
                         ("LNA Input Power", float(si_info.get("lna_input_dbm", float("nan"))), "dBm"),
-                        ("OMT Isolation", float(si_info.get("antenna_sic_db", 0.0)), "dB"),
+                        ("Duplexer Isolation", float(si_info.get("antenna_sic_db", 0.0)), "dB"),
                         ("SINR post", float(si_info.get("sinr_post_db", float("nan"))), "dB"),
                         ("SINR req (BER1e-3)", sinr_req_nom, "dB"),
                         ("d_max @ BER1e-3", dmax_nom, "m"),
@@ -2072,7 +2072,7 @@ class IsacTxSimPanel:
                 ant_gain = _parse_float_input(self.ant_gain_var.get(), "Antenna Gain")
                 rx_gain_db = _parse_float_input(self.rx_gain_var.get(), "RX IF Gain")
                 si_enabled = bool(self.si_enable_var.get())
-                antenna_sic_db = _parse_float_input(self.antenna_sic_var.get(), "OMT Isolation")
+                antenna_sic_db = _parse_float_input(self.antenna_sic_var.get(), "Duplexer Isolation")
 
                 path_loss_db = self._fspl_db(d, f)
                 pr_comm_dbm = ptx_dbm + 2.0 * ant_gain - path_loss_db
@@ -2091,7 +2091,7 @@ class IsacTxSimPanel:
                     ("Path Loss", path_loss_db, "dB"),
                     ("Received Power", pr_comm_dbm, "dBm"),
                     ("LNA Input Power", lna_input_dbm, "dBm"),
-                    ("OMT Isolation", antenna_sic_db, "dB"),
+                    ("Duplexer Isolation", antenna_sic_db, "dB"),
                     ("SINR post", "--", "dB"),
                     ("SINR req (BER1e-3)", self._sinr_target_ber_1e3(self.modulation_var.get(), impl_margin_db=0.0), "dB"),
                     ("d_max @ BER1e-3", "--", "m"),
@@ -2120,21 +2120,21 @@ class IsacTxSimPanel:
 # === PHOTONIC ISAC SIM ===
 @dataclass
 class SimConfig:
-    fs_gsps: float = 100.0
+    fs_gsps: float = 120.0
     frame_len: int = 4096
     num_frames: int = 100
     step_ns: float = 20.0
 
     linewidth_mhz: float = 0.015
-    baud_gbaud: float = 10.0
-    if_ghz: float = 12.0
-    rf_carrier_ghz: float = 270.0
-    waveform: str = "16QAM"
-    modulation: str = "16QAM"
-    chirp_bw_ghz: float = 2.0
+    baud_gbaud: float = 15.0
+    if_ghz: float = 11.0
+    rf_carrier_ghz: float = 280.0
+    waveform: str = "DFT-s-OFDM"
+    modulation: str = "32QAM"
+    chirp_bw_ghz: float = 15.0
 
     coherence_mode: str = "Free-running"
-    rx_mode: str = "Mixer"
+    rx_mode: str = "ZBD"
     # DSB is the baseline model. Enable WSS-filtered SSB explicitly when needed.
     optical_sideband_mode: str = "DSB"
     si_enable: bool = True
@@ -2145,7 +2145,7 @@ class SimConfig:
 
     # Optical front-end / MZM settings. UTC-PD photocurrent sets absolute
     # optical power; AWG RF power moves the signal-to-carrier ratio.
-    awg_rf_power_dbm: float = -10.0
+    awg_rf_power_dbm: float = -6.0
     # Effective CSPR calibration point used by the system model.
     awg_ref_power_dbm: float = -6.0
     mzm_drive_gain_db: float = 8.0
@@ -2157,7 +2157,10 @@ class SimConfig:
     awg_dac_bits: float = 8.0
     optical_center_freq_thz: float = 193.41
     utcpd_photocurrent_ma: float = 7.0
+    # UTC-PD output before the optional THz PA.
     utcpd_target_dbm: float = -10.0
+    thz_pa_enable: bool = False
+    thz_pa_gain_db: float = 10.0
     utcpd_responsivity_a_per_w: float = 0.24
     cspr_db: float = 13.0
     lna_gain_db: float = 13.0
@@ -2171,19 +2174,21 @@ class SimConfig:
     if_amp_nf_db: float = 5.0
     dso_vscale_mv: float = 100.0
     dso_bandwidth_ghz: float = 40.0
-    omt_iso_db: float = 24.0
+    omt_iso_db: float = 25.0
     omt_il_db: float = 2.0
-    ant_gain_dbi: float = 32.0
-    tx_ant_gain_dbi: float = 32.0
-    rx_ant_gain_dbi: float = 32.0
+    # The 33-dBi system gain includes the two-lens antenna assembly.
+    ant_gain_dbi: float = 33.0
+    tx_ant_gain_dbi: float = 33.0
+    rx_ant_gain_dbi: float = 33.0
     target_rcs_sqm: float = 0.01
-    target_ant_gain_dbi: float = 32.0
+    # The physical target is the bare 25-dBi, 17-mm corrugated horn.
+    target_ant_gain_dbi: float = 25.0
     target_gamma_mag: float = 0.1
     target_pol_eff: float = 1.0
     target_rcs_mode: str = "direct_effective"
     # Optional measured/scenario-level RCS override. In coupled-antenna mode
     # this is None and sigma_eff is derived from structural + antenna modes.
-    target_effective_rcs_dbsm: float | None = -6.0
+    target_effective_rcs_dbsm: float | None = -8.0
     target_dist_m: float = 1.0  # Default 1m
     # Deterministic by default so repeated GUI runs are directly comparable.
     # Set to None explicitly when a Monte-Carlo noise realization is required.
@@ -2197,10 +2202,11 @@ class SimConfig:
     # Pilot-only remains available as a legacy/diagnostic reference mode.
     sensing_reference_mode: str = "full_waveform_mmse"
     sensing_mmse_regularization: float = 1e-3
-    # Effective coherent processing gain. The ideal BT value is an upper bound.
-    radar_proc_gain_eff_db: float = 26.0
+    # Coherent processing gain before waveform utilization. The ideal BT value
+    # is an upper bound; eta_d (or legacy rho) is applied separately.
+    radar_proc_gain_eff_db: float = 30.10
     # In-band SSBI coefficient used by the Sec. II closed-form comparison.
-    sensing_ssbi_fraction: float = 0.069
+    sensing_ssbi_fraction: float = 0.06
     # Residual implementation/ADC/SI floor applied to the reported sensing
     # SINR. Physical detector noise is still calculated independently.
     sensing_residual_ceiling_db: float = 40.0
@@ -2340,6 +2346,11 @@ def calc_utcpd_output_dbm(photocurrent_ma: float) -> float:
     i_ref_ma, p_ref_dbm = 7.0, -10.0
     return p_ref_dbm + 20.0 * np.log10(max(photocurrent_ma, 1e-6) / i_ref_ma)
 
+def calc_thz_tx_output_dbm(cfg: SimConfig) -> float:
+    """Return final TX-reference power for PA-off or ideal linear PA-on mode."""
+    pa_gain_db = max(float(cfg.thz_pa_gain_db), 0.0) if cfg.thz_pa_enable else 0.0
+    return float(cfg.utcpd_target_dbm) + pa_gain_db
+
 def dbm_to_w(p_dbm: float) -> float:
     return 1e-3 * (10.0 ** (float(p_dbm) / 10.0))
 
@@ -2446,8 +2457,8 @@ def calc_utcpd_optical_line_powers(cfg: SimConfig) -> dict[str, float]:
     }
 
 def calc_utcpd_rf_line_powers(cfg: SimConfig) -> dict[str, float]:
-    """Expected UTC-PD RF line powers after photomixing, normalized to TX power."""
-    total_rf_w = dbm_to_w(cfg.utcpd_target_dbm)
+    """Expected RF line powers normalized at the final THz TX reference plane."""
+    total_rf_w = dbm_to_w(calc_thz_tx_output_dbm(cfg))
     cspr_lin = max(10.0 ** (effective_cspr_db(cfg) / 10.0), 1e-12)
     mode = optical_sideband_mode(cfg)
     n_sidebands = 1.0 if mode == "SSB" else 2.0
@@ -2685,7 +2696,7 @@ def make_osa_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
     }
 
 def make_utcpd_rf_display_spectrum(cfg: SimConfig) -> dict[str, np.ndarray]:
-    """Display UTC-PD output as carrier + signal sideband RF line powers in dBm."""
+    """Display final THz TX output as carrier + sideband RF line powers in dBm."""
     rf = float(cfg.rf_carrier_ghz)
     f_if = float(cfg.if_ghz)
     bw = max(float(cfg.baud_gbaud), 0.2)
@@ -2730,12 +2741,12 @@ def calc_isac_link_budget(
     target_pol_eff: float = 1.0,
     effective_rcs_dbsm: float | None = None,
 ) -> dict[str, float]:
-    # One-way RX (C1): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant -> OMT -> LNA
+    # One-way RX (C1): UTC-PD -> duplexer -> TX ant -- FSPL -- RX ant -> duplexer -> LNA
     #   P_rx,load = (1-|Gamma|^2) P_incident
-    #             = P_tx - L_OMT + G_tx - FSPL + G_rx - L_OMT - L_mismatch
-    # Monostatic sensing RX (C2): UTC-PD -> OMT -> TX ant -- FSPL -- RX ant
-    #   (antenna-mode + structural RCS) -- FSPL -- TX ant -> OMT -> LNA
-    #   P_radar_echo = P_tx - L_OMT + G_tx - L_radar + G_tx - L_OMT
+    #             = P_tx - L_dup + G_tx - FSPL + G_rx - L_dup - L_mismatch
+    # Monostatic sensing RX (C2): UTC-PD -> duplexer -> TX ant -- FSPL -- RX ant
+    #   (antenna-mode + structural RCS) -- FSPL -- TX ant -> duplexer -> LNA
+    #   P_radar_echo = P_tx - L_dup + G_tx - L_radar + G_tx - L_dup
     #   L_radar = 2*FSPL - G_RCS, with G_RCS = 10*log10(4*pi*sigma_eff/lambda^2)
     #   the RCS expressed as an equivalent antenna gain.
     d = max(float(distance_m), 1e-9)
@@ -2825,9 +2836,10 @@ def calc_sec2_sensing_sinr(
     All RF powers are referred to the LNA input and use the same ideal radar
     equation and detector-noise terms as the third-tab closed-form figure.
     """
-    pt_total_mw = 10.0 ** (float(cfg.utcpd_target_dbm) / 10.0)
+    tx_output_dbm = calc_thz_tx_output_dbm(cfg)
+    pt_total_mw = 10.0 ** (tx_output_dbm / 10.0)
     m2 = 10.0 ** (-effective_cspr_db(cfg) / 10.0)
-    # The GUI's UTC-PD power is total carrier-plus-sideband power, whereas
+    # The GUI's final THz TX power is total carrier-plus-sideband power, whereas
     # Sec. II writes x=sqrt(P_c)(1+m*s).  Therefore P_SI and P_ec in the
     # square-law products are carrier powers P_c=P_total/(1+m^2).
     pt_carrier_mw = pt_total_mw / (1.0 + m2)
@@ -2906,7 +2918,10 @@ def calc_sec2_sensing_sinr(
         ),
         "sensing_utilization": sensing_utilization,
         "sensing_reference_mode": str(cfg.sensing_reference_mode),
-        "tx_total_power_dbm": float(cfg.utcpd_target_dbm),
+        "tx_total_power_dbm": tx_output_dbm,
+        "utcpd_output_dbm": float(cfg.utcpd_target_dbm),
+        "thz_pa_enable": bool(cfg.thz_pa_enable),
+        "thz_pa_gain_db": float(cfg.thz_pa_gain_db),
         "tx_carrier_power_dbm": float(
             10.0 * np.log10(max(pt_carrier_mw, 1e-300))
         ),
@@ -3100,7 +3115,7 @@ def run_isac_sim(cfg: SimConfig):
     link = calc_isac_link_budget(
         distance_m=d_link,
         rf_ghz=cfg.rf_carrier_ghz,
-        tx_dbm=cfg.utcpd_target_dbm,
+        tx_dbm=calc_thz_tx_output_dbm(cfg),
         tx_gain_dbi=cfg.tx_ant_gain_dbi,
         rx_gain_dbi=cfg.rx_ant_gain_dbi,
         rcs_sqm=cfg.target_rcs_sqm,
@@ -3330,16 +3345,18 @@ def run_isac_sim(cfg: SimConfig):
     e_data = e_mod * np.exp(1j * phi_1)
     e_lo = np.sqrt(p_lo_laser_w) * np.exp(1j * (phi_2 + phi_wander))
 
-    # UTC-PD photomixes the two optical tones and drives the antenna directly (no THz PA).
+    # Normalize at the final TX reference plane after applying the optional
+    # ideal PA gain. PA compression and added noise are not modeled.
     beat_raw = e_data * np.conj(e_lo)
     beat_pwr_w = np.mean(np.abs(beat_raw)**2) / 50.0
-    target_w = 10**((cfg.utcpd_target_dbm - 30) / 10)
+    tx_output_dbm = calc_thz_tx_output_dbm(cfg)
+    target_w = 10**((tx_output_dbm - 30) / 10)
     v_tx_out = beat_raw * np.sqrt(target_w / max(float(beat_pwr_w), 1e-30))
 
     #
-    # omt_iso_db is the measured net port-to-port OMT isolation.  Do not add
+    # omt_iso_db is the measured net port-to-port duplexer isolation. Do not add
     # omt_il_db again on the SI path; that would double-count insertion loss.
-    # Target/communication links retain two physical OMT insertion-loss terms.
+    # Target/communication links retain two physical duplexer insertion-loss terms.
     alpha_si = 10**(-cfg.omt_iso_db / 20.0)
     beta_echo = 10**(-radar_path_loss_db / 20.0)
     delay_samp = int(delay_ns * 1e-9 * fs)
@@ -3709,7 +3726,7 @@ def run_isac_sim(cfg: SimConfig):
     ideal_processing_gain_lin = max(float(occupied_bw_hz) * pilot_time_s, 1.0)
     ideal_proc_gain_db = 10.0 * np.log10(ideal_processing_gain_lin)
     proc_gain_db = min(
-        float(getattr(cfg, "radar_proc_gain_eff_db", 26.0)),
+        float(getattr(cfg, "radar_proc_gain_eff_db", 30.10)),
         float(ideal_proc_gain_db),
     )
     sensing_utilization = sensing_waveform_utilization(
@@ -4300,6 +4317,7 @@ class PhotonicIsacSimPanel:
         self.anim_ms = tk.IntVar(value=100)
         self.carrier_wander_enable_var = tk.BooleanVar(value=True)
         self.si_enable_var = tk.BooleanVar(value=True)
+        self.thz_pa_enable_var = tk.BooleanVar(value=False)
         self.ssb_enable_var = tk.BooleanVar(value=False)
         self.sim_welch_psd_var = tk.BooleanVar(value=True)
         self.show_si_norm_range_var = tk.BooleanVar(value=False)
@@ -4329,7 +4347,7 @@ class PhotonicIsacSimPanel:
             # Keep WSS-filtered SSB opt-in while the baseline system model is DSB.
             self.ssb_enable_var.set(False)
             if "omt_iso_db" in self.params:
-                self.params["omt_iso_db"].set("24")
+                self.params["omt_iso_db"].set("25")
             self.status_var.set(f"Default preset: {preset_path.name}")
         except Exception as exc:
             self.status_var.set(f"Default preset error: {exc}")
@@ -4377,6 +4395,7 @@ class PhotonicIsacSimPanel:
             "controls": {
                 "carrier_wander_enable": bool(self.carrier_wander_enable_var.get()),
                 "si_enable": bool(self.si_enable_var.get()),
+                "thz_pa_enable": bool(self.thz_pa_enable_var.get()),
                 "ssb_enable": bool(self.ssb_enable_var.get()),
                 "sim_welch_psd": bool(self.sim_welch_psd_var.get()),
                 "show_si_norm_range": bool(self.show_si_norm_range_var.get()),
@@ -4404,6 +4423,7 @@ class PhotonicIsacSimPanel:
         bool_map = {
             "carrier_wander_enable": self.carrier_wander_enable_var,
             "si_enable": self.si_enable_var,
+            "thz_pa_enable": self.thz_pa_enable_var,
             "ssb_enable": self.ssb_enable_var,
             "sim_welch_psd": self.sim_welch_psd_var,
             "show_si_norm_range": self.show_si_norm_range_var,
@@ -4518,14 +4538,15 @@ class PhotonicIsacSimPanel:
         tbl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.rows = {
-            "tx":        self.table.insert("", "end", text="UTC-PD Output (TX)", values=("0.00", "dBm")),
+            "utcpd_tx":  self.table.insert("", "end", text="UTC-PD THz Output", values=("-10.00", "dBm")),
+            "tx":        self.table.insert("", "end", text="Final THz TX Output", values=("-10.00", "dBm")),
             "opt_pwr":   self.table.insert("", "end", text="UTC-PD Optical In", values=("0.00", "mW")),
             "mzm_rf":    self.table.insert("", "end", text="MZM RF Input",        values=("-2.0", "dBm")),
             "rcs_model": self.table.insert("", "end", text="Target RCS Model", values=("coupled", "")),
             "target_gamma": self.table.insert("", "end", text="Target |Gamma|", values=("0.10", "")),
             "rcs_eff":    self.table.insert("", "end", text="Effective RCS",     values=("0.00", "dBsm")),
             "delay":     self.table.insert("", "end", text="Sensing Echo Delay", values=("0.00", "ns")),
-            "omt_il":    self.table.insert("", "end", text="OMT Insertion Loss (x2)", values=("0.00", "dB")),
+            "omt_il":    self.table.insert("", "end", text="Duplexer Insertion Loss (x2)", values=("0.00", "dB")),
             "comm_loss": self.table.insert("", "end", text="C1 FSPL (one-way)", values=("0.00", "dB")),
             "comm_mismatch": self.table.insert("", "end", text="C1 Load Mismatch Loss", values=("0.00", "dB")),
             "comm_accepted": self.table.insert("", "end", text="C1 Accepted Power Fraction", values=("0.00", "")),
@@ -4543,8 +4564,8 @@ class PhotonicIsacSimPanel:
             "c2_noise_density": self.table.insert("", "end", text="C2 Spectrum Noise Density", values=("N/A", "dBm/Hz")),
             "noise_source": self.table.insert("", "end", text="Noise Source", values=("N/A", "")),
             "comm_snr":  self.table.insert("", "end", text="Comm SNR (EVM)",    values=("N/A", "dB")),
-            "radar_snr": self.table.insert("", "end", text="C2 Detector-output SINR", values=("N/A", "dB")),
-            "radar_snr_model": self.table.insert("", "end", text="C2 Sec. II ideal SINR", values=("N/A", "dB")),
+            "radar_snr": self.table.insert("", "end", text="C2 Practical post-proc SINR", values=("N/A", "dB")),
+            "radar_snr_model": self.table.insert("", "end", text="C2 ZBD-output SINR (waveform eta)", values=("N/A", "dB")),
             "range_contrast": self.table.insert("", "end", text="C2 CFR Target/Floor", values=("N/A", "dB")),
             "range_detect": self.table.insert("", "end", text="Range Detection", values=("normalized CFR", "")),
             "range_sel": self.table.insert("", "end", text="Selected Target Range", values=("N/A", "m")),
@@ -4639,16 +4660,17 @@ class PhotonicIsacSimPanel:
         add_p(17, "c1_drive_gain_db","C1 Drive Amp [dB]",   "27")
         add_p(18, "if_amp_nf_db", "IF Amp NF [dB]",         "5.0")
         add_p(19, "c2_drive_gain_db","C2 Drive Amp [dB]",   "20")
-        add_p(20, "tx_ant_gain_dbi", "Common Ant Gain [dBi]", "32")
+        add_p(20, "tx_ant_gain_dbi", "System ant/lens gain [dBi]", "33")
         add_p(21, "mzm_vpi_v", "MZM Vpi @20GHz [V]", "3")
         add_p(22, "c1_cable_loss_db", "C1 Cable/Adaptor Loss [dB]", "10")
         add_p(23, "c2_cable_loss_db", "C2 Cable Loss [dB]", "22")
         add_p(24, "dso_vscale_mv", "UXR V/div [mV]",        "100.0")
         add_p(25, "dso_bw_ghz",    "UXR BW [GHz]",          "40.0")
-        add_p(26, "omt_iso_db",   "OMT Net SI Isolation [dB]", "24")
-        add_p(27, "omt_il_db",    "OMT Insertion Loss [dB]", "1.9")
-        self.effective_rcs_entry = add_p(28, "effective_rcs_dbsm", "Effective RCS override [dBsm]", "-6.0")
+        add_p(26, "omt_iso_db",   "Duplexer net SI isolation [dB]", "25")
+        add_p(27, "omt_il_db",    "Duplexer insertion loss [dB]", "2")
+        self.effective_rcs_entry = add_p(28, "effective_rcs_dbsm", "Effective RCS override [dBsm]", "-8.0")
         add_p(29, "mzm_phi_bias_deg", "MZM Bias phi [deg]", "45.0")
+        add_p(30, "thz_pa_gain_db", "THz PA gain [dB]", "10")
         add_p(35, "mzm_eo_bw_ghz", "MZM EO BW [GHz]", "30.0")
         add_p(36, "awg_dac_bits", "AWG DAC ENOB [bits]", "8.0")
         ttk.Label(grp, text="Target RCS model").grid(row=37, column=0, sticky="w", pady=2)
@@ -4662,19 +4684,25 @@ class PhotonicIsacSimPanel:
             width=18,
         ).grid(row=37, column=1, sticky="w")
         add_p(38, "target_rcs_sqm", "Structural RCS [m^2]", "0.01")
-        add_p(39, "target_ant_gain_dbi", "Target antenna gain [dBi]", "32")
+        add_p(39, "target_ant_gain_dbi", "Target horn gain [dBi]", "25")
         self.target_gamma_entry = add_p(
             40, "target_gamma_mag", "Target |Gamma| (coupled only)", "0.1"
         )
         add_p(41, "target_pol_eff", "Target polarization efficiency", "1.0")
-        add_p(42, "radar_proc_gain_eff_db", "Sensing Gp,eff [dB]", "26.0")
+        add_p(42, "radar_proc_gain_eff_db", "Coherent Gp (pre-util.) [dB]", "30.10")
         add_p(
             43,
             "sensing_residual_ceiling_db",
             "Sensing residual ceiling [dB]",
             "40.0",
         )
-        add_p(44, "sensing_ssbi_fraction", "Sensing SSBI kappa", "0.069")
+        add_p(44, "sensing_ssbi_fraction", "Sensing SSBI kappa", "0.06")
+        ttk.Checkbutton(
+            grp,
+            text="Enable THz PA",
+            variable=self.thz_pa_enable_var,
+            command=self._update_table,
+        ).grid(row=45, column=0, columnspan=2, sticky="w", pady=4)
 
         ttk.Label(grp, text="Target Dist [m]").grid(row=32, column=0, sticky="w", pady=2)
         self.params["target_dist_m"] = tk.StringVar(value="1.0")
@@ -4698,7 +4726,11 @@ class PhotonicIsacSimPanel:
             d = self._param_float("target_dist_m", 1.0)
             photocurrent_ma = self._param_float("utcpd_photocurrent_ma", 7.0)
             utcpd_resp = self._param_float("utcpd_resp_aw", 0.24)
-            tx_dbm = calc_utcpd_output_dbm(photocurrent_ma)
+            utcpd_dbm = calc_utcpd_output_dbm(photocurrent_ma)
+            pa_gain_db = max(self._param_float("thz_pa_gain_db", 10.0), 0.0)
+            tx_dbm = utcpd_dbm + (
+                pa_gain_db if bool(self.thz_pa_enable_var.get()) else 0.0
+            )
             opt_mw = (
                 photocurrent_ma
                 / max(utcpd_resp, 1e-12)
@@ -4728,7 +4760,9 @@ class PhotonicIsacSimPanel:
                 mzm_eo_bw_ghz=self._param_float("mzm_eo_bw_ghz", 30.0),
                 utcpd_photocurrent_ma=photocurrent_ma,
                 utcpd_responsivity_a_per_w=utcpd_resp,
-                utcpd_target_dbm=tx_dbm,
+                utcpd_target_dbm=utcpd_dbm,
+                thz_pa_enable=bool(self.thz_pa_enable_var.get()),
+                thz_pa_gain_db=pa_gain_db,
             )
             optical_lines = calc_utcpd_optical_line_powers(optical_cfg)
             rf_lines = calc_utcpd_rf_line_powers(optical_cfg)
@@ -4744,11 +4778,11 @@ class PhotonicIsacSimPanel:
                 self._param_float("dso_vscale_mv", 100.0),
                 self._param_float("dso_bw_ghz", 40.0) * 1e9,
             ) * 1e3
-            tx_gain = self._param_float("tx_ant_gain_dbi", 32.0)
+            tx_gain = self._param_float("tx_ant_gain_dbi", 33.0)
             rx_gain = tx_gain
             rcs_mode = self.params["target_rcs_mode"].get().strip()
             effective_rcs_dbsm = (
-                self._param_float("effective_rcs_dbsm", -6.0)
+                self._param_float("effective_rcs_dbsm", -8.0)
                 if rcs_mode.lower().startswith("direct")
                 else None
             )
@@ -4773,7 +4807,7 @@ class PhotonicIsacSimPanel:
                 c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
                 c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
                 omt_il_db=self._param_float("omt_il_db", 2.0),
-                target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", tx_gain),
+                target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", 25.0),
                 target_gamma_mag=self._param_float("target_gamma_mag", 0.1),
                 target_pol_eff=self._param_float("target_pol_eff", 1.0),
                 effective_rcs_dbsm=effective_rcs_dbsm,
@@ -4782,7 +4816,7 @@ class PhotonicIsacSimPanel:
             loss_db = link["radar_loss_db"]
             echo_dbm = link["c2_rf_dbm"]
             si_enable = bool(self.si_enable_var.get())
-            si_dbm = tx_dbm - self._param_float("omt_iso_db", 24.0) if si_enable else -300.0
+            si_dbm = tx_dbm - self._param_float("omt_iso_db", 25.0) if si_enable else -300.0
             lna_gain_db = self._param_float("lna_gain_db", 13.0)
             lna_nf_db = self._param_float("lna_nf_db", 8.0)
             lna_out_dbm = max(echo_dbm, si_dbm) + lna_gain_db
@@ -4840,6 +4874,7 @@ class PhotonicIsacSimPanel:
 
             # Measured EVM is updated after simulation run.
 
+            self.table.item(self.rows["utcpd_tx"], values=(f"{utcpd_dbm:.1f}", "dBm"))
             self.table.item(self.rows["tx"], values=(f"{tx_dbm:.1f}", "dBm"))
             if "opt_pwr" in self.rows:
                 self.table.item(self.rows["opt_pwr"], values=(f"{opt_mw:.2f}", "mW"))
@@ -4902,7 +4937,7 @@ class PhotonicIsacSimPanel:
         rcs_mode_label = self.params["target_rcs_mode"].get().strip()
         rcs_mode = "direct_effective" if rcs_mode_label.lower().startswith("direct") else "coupled_antenna"
         effective_rcs_override = (
-            self._param_float("effective_rcs_dbsm", -6.0)
+            self._param_float("effective_rcs_dbsm", -8.0)
             if rcs_mode == "direct_effective"
             else None
         )
@@ -4929,7 +4964,11 @@ class PhotonicIsacSimPanel:
             mzm_eo_bw_ghz=self._param_float("mzm_eo_bw_ghz", 30.0),
             awg_dac_bits=self._param_float("awg_dac_bits", 8.0),
             utcpd_photocurrent_ma=self._param_float("utcpd_photocurrent_ma", 7.0),
-            utcpd_target_dbm=calc_utcpd_output_dbm(self._param_float("utcpd_photocurrent_ma", 7.0)),
+            utcpd_target_dbm=calc_utcpd_output_dbm(
+                self._param_float("utcpd_photocurrent_ma", 7.0)
+            ),
+            thz_pa_enable=bool(self.thz_pa_enable_var.get()),
+            thz_pa_gain_db=max(self._param_float("thz_pa_gain_db", 10.0), 0.0),
             utcpd_responsivity_a_per_w=self._param_float("utcpd_resp_aw", 0.24),
             cspr_db=self._param_float("cspr_db", 13.0),
             lna_gain_db=self._param_float("lna_gain_db", 13.0),
@@ -4941,15 +4980,15 @@ class PhotonicIsacSimPanel:
             if_amp_nf_db=self._param_float("if_amp_nf_db", 5.0),
             dso_vscale_mv=self._param_float("dso_vscale_mv", 100.0),
             dso_bandwidth_ghz=self._param_float("dso_bw_ghz", 40.0),
-            omt_iso_db=self._param_float("omt_iso_db", 24.0),
+            omt_iso_db=self._param_float("omt_iso_db", 25.0),
             omt_il_db=self._param_float("omt_il_db", 2.0),
-            ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
-            tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
-            rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 32.0),
+            ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
+            tx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
+            rx_ant_gain_dbi=self._param_float("tx_ant_gain_dbi", 33.0),
             c1_cable_loss_db=self._param_float("c1_cable_loss_db", 10.0),
             c2_cable_loss_db=self._param_float("c2_cable_loss_db", 22.0),
             target_rcs_sqm=max(self._param_float("target_rcs_sqm", 0.01), 0.0),
-            target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", self._param_float("tx_ant_gain_dbi", 32.0)),
+            target_ant_gain_dbi=self._param_float("target_ant_gain_dbi", 25.0),
             target_gamma_mag=float(np.clip(self._param_float("target_gamma_mag", 0.1), 0.0, 1.0)),
             target_pol_eff=float(np.clip(self._param_float("target_pol_eff", 1.0), 0.0, 1.0)),
             target_rcs_mode=rcs_mode,
@@ -4965,10 +5004,10 @@ class PhotonicIsacSimPanel:
             sensing_mmse_regularization=max(
                 _awg_float("sensing_mmse_epsilon_var", 1e-3), 0.0
             ),
-            radar_proc_gain_eff_db=self._param_float("radar_proc_gain_eff_db", 26.0),
+            radar_proc_gain_eff_db=self._param_float("radar_proc_gain_eff_db", 30.10),
             sensing_ssbi_fraction=float(
                 np.clip(
-                    self._param_float("sensing_ssbi_fraction", 0.069),
+                    self._param_float("sensing_ssbi_fraction", 0.06),
                     0.0,
                     1.0,
                 )
@@ -4983,7 +5022,7 @@ class PhotonicIsacSimPanel:
         cfg.path_loss_db = calc_isac_link_budget(
             distance_m=cfg.target_dist_m,
             rf_ghz=cfg.rf_carrier_ghz,
-            tx_dbm=cfg.utcpd_target_dbm,
+            tx_dbm=calc_thz_tx_output_dbm(cfg),
             tx_gain_dbi=cfg.tx_ant_gain_dbi,
             rx_gain_dbi=cfg.rx_ant_gain_dbi,
             rcs_sqm=cfg.target_rcs_sqm,
@@ -4998,7 +5037,7 @@ class PhotonicIsacSimPanel:
             target_pol_eff=cfg.target_pol_eff,
             effective_rcs_dbsm=cfg.target_effective_rcs_dbsm,
         )["radar_path_loss_db"]
-        cfg.tx_power_dbm = cfg.utcpd_target_dbm
+        cfg.tx_power_dbm = calc_thz_tx_output_dbm(cfg)
         return cfg
 
     def _init_plot(self):
@@ -5010,7 +5049,7 @@ class PhotonicIsacSimPanel:
         self.lines = []
         self._spectrum_band_artists = []
         self._spectrum_power_texts = {}
-        titles = ["1) Optical Tones", "2) UTC-PD Output (TX Antenna)", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
+        titles = ["1) Optical Tones", "2) Final THz TX Output", "3) C2 Spectrum (Monostatic)", "4) C1 Spectrum (One-way)"]
         colors = ["purple", "red", "#2563eb", "#2563eb"]
 
         for i, ax in enumerate(self.axes):
@@ -5078,7 +5117,8 @@ class PhotonicIsacSimPanel:
             opt_center = cfg.optical_center_freq_thz
             self.axes[0].set_xlim(opt_center - cfg.rf_carrier_ghz / 1000.0 - 0.03, opt_center + cfg.if_ghz / 1000.0 + 0.03)
             self.axes[0].set_title(f"1) Optical Tones + {sideband_mode}")
-            self.axes[1].set_title(f"2) UTC-PD Output ({sideband_mode})")
+            pa_state = "PA on" if cfg.thz_pa_enable else "PA off"
+            self.axes[1].set_title(f"2) THz TX Output ({sideband_mode}, {pa_state})")
             self.axes[1].set_xlim(c - span, c + span)
             spec_fmax_ghz = min(25.0, cfg.dso_bandwidth_ghz, 0.5 * fs / 1e9)
             self.axes[2].set_xlim(0.0, spec_fmax_ghz)
@@ -5090,7 +5130,7 @@ class PhotonicIsacSimPanel:
             #
             #
             bw_db = 10 * np.log10(fs)
-            p_tx_dbm = cfg.utcpd_target_dbm
+            p_tx_dbm = calc_thz_tx_output_dbm(cfg)
             p_si_dbm = p_tx_dbm - cfg.omt_iso_db
             p_echo_dbm = p_tx_dbm - cfg.path_loss_db
             p_lna_sig_dbm = max(p_si_dbm, p_echo_dbm) + cfg.lna_gain_db
@@ -5109,7 +5149,7 @@ class PhotonicIsacSimPanel:
             opt_lo = float(optical_lines.get("sideband_each_dbm", opt_hi - 20.0))
             self.axes[0].set_ylim(opt_lo - 45.0, opt_hi + 8.0)
             rf_lines = self.data.get("utcpd_rf_line_powers", {})
-            rf_hi = float(rf_lines.get("carrier_dbm", cfg.utcpd_target_dbm))
+            rf_hi = float(rf_lines.get("carrier_dbm", calc_thz_tx_output_dbm(cfg)))
             rf_lo = float(rf_lines.get("sideband_each_dbm", rf_hi - 20.0))
             self.axes[1].set_ylim(rf_lo - 45.0, rf_hi + 8.0)
             _, p_c2_probe = calc_psd(self.data["v_rec_c2"], fs)
@@ -5317,7 +5357,7 @@ class PhotonicIsacSimPanel:
         self.l_lo.set_label("Optical tone")
         self.axes[0].legend(loc="upper right", fontsize=8)
 
-        # Plot 2: RF spectrum analyzer-like UTC-PD output power trace.
+        # Plot 2: RF spectrum-analyzer-like final THz TX power trace.
         rf_disp = self.data.get("utcpd_rf_display", {})
         pwr_tx = calc_power_dbm(self.data["v_tx_out"][s:e])
         self.lines[1].set_data(rf_disp.get("freq_ghz", []), rf_disp.get("power_dbm", []))
@@ -5768,7 +5808,7 @@ class DsoPanel:
         self.pd_responsivity_var = tk.StringVar(value="0.24")
         ttk.Entry(grp2, textvariable=self.pd_responsivity_var, width=10).grid(
             row=8, column=3, sticky="w", pady=(6, 0))
-        ttk.Label(grp2, text="Sensing Gp,eff (dB)").grid(
+        ttk.Label(grp2, text="Coherent Gp before util. (dB)").grid(
             row=10, column=0, sticky="w", pady=(6, 0)
         )
         self.radar_proc_gain_eff_var = tk.StringVar(value="26.0")
@@ -6371,14 +6411,14 @@ class DsoPanel:
             ("symbols", "Symbols", "", "Comm", "Symbols used for BER/EVM."),
             ("c2_total_band_power_dbm", "C2 Total Band Power", "dBm", "Sensing", "Raw C2 in-band power including SI, target, and receiver background."),
             ("c2_total_band_snr_db", "C2 Total Band SNR", "dB", "Sensing", "Diagnostic total-band SNR; this is not target-only sensing SINR when SI is present."),
-            ("radar_pre_snr_db_c2", "C2 Target Pre-DSP SINR (est.)", "dB", "Sensing", "Detector-domain target/noise SINR before pilot allocation and coherent gain."),
+            ("radar_pre_snr_db_c2", "C2 DSO-input Pre-DSP SINR (est.)", "dB", "Sensing", "Target/noise SINR at the DSO input before waveform utilization and coherent gain."),
             ("snr_rad_db", "Sensing SINR", "dB", "Sensing", "Known-waveform C2 target excess power divided by the robust range-profile floor."),
             ("range_profile_contrast_db_c2", "C2 Range-profile Contrast", "dB", "Sensing", "Known-waveform target peak minus robust profile-floor median."),
             ("range_floor_iqr_db_c2", "C2 Range-floor IQR", "dB", "Sensing", "Interquartile spread of off-target range-bin power; lower is more stable."),
             ("snr_rad_post_db_c2", "C2 Sensing post-proc SINR", "dB", "Sensing", "Known-waveform C2 range-profile SINR after matched filtering."),
-            ("radar_processing_gain_db_c2", "C2 Coherent Gain Gp,eff", "dB", "Sensing", "Effective coherent processing gain before waveform utilization."),
-            ("radar_pilot_weighted_gain_db_c2", "C2 Waveform-weighted Gain", "dB", "Sensing", "Gp,eff + 10log10(utilization)."),
-            ("snr_rad_pg_corrected_db_c2", "C2 Target Pre-DSP SINR (est.)", "dB", "Sensing", "Detector-domain target/noise SINR before pilot allocation and coherent gain."),
+            ("radar_processing_gain_db_c2", "C2 Coherent Gp (pre-util.)", "dB", "Sensing", "Coherent processing gain before eta_d or legacy rho."),
+            ("radar_pilot_weighted_gain_db_c2", "C2 Net Waveform Gain", "dB", "Sensing", "Coherent Gp + 10log10(eta_d), or +10log10(rho) in legacy mode."),
+            ("snr_rad_pg_corrected_db_c2", "C2 DSO-input Pre-DSP SINR (est.)", "dB", "Sensing", "Target/noise SINR at the DSO input before waveform utilization and coherent gain."),
             ("mi_rad_mbps", "MI_sens", "Mbit/s", "Sensing", "0.5/Tsig*log2(1+SINR_sens)."),
             ("crlb_range_std_mm", "Range CRLB std", "mm", "Sensing", "AWGN delay CRLB using occupied bandwidth RMS proxy."),
             ("pslr_db", "PSLR", "dB", "Sensing", "Peak-to-sidelobe ratio from latest range profile."),
@@ -6392,10 +6432,10 @@ class DsoPanel:
             ("awg_papr_db", "MZM Input IF Crest PAPR", "dB", "System", "Voltage-squared crest factor of the real-IF AWG waveform that drives the MZM."),
             ("rx_papr_db", "ADC Input IF Crest PAPR", "dB", "System", "Voltage-squared crest factor of the captured DSO IF waveform; use this to check ADC/headroom stress."),
             ("amplitude_ratio_rho", "Amplitude Ratio rho", "", "System", "Dual-chirp up/down amplitude ratio, if available."),
-            ("sensing_gp_eff_db", "Sensing Gp,eff", "dB", "System", "Effective coherent sensing gain before waveform utilization."),
+            ("sensing_gp_eff_db", "Coherent Gp (pre-util.)", "dB", "System", "Coherent sensing gain before eta_d or legacy rho."),
             ("campaign_comm_snr_db", "Campaign Comm SNR", "dB", "Measurement", "Target-on C1 excess divided by measured receiver-noise power."),
             ("campaign_sensing_pre_sinr_db", "Campaign Sensing Pre-DSP SINR", "dB", "Measurement", "Target-on C2 excess over its matched SI-only baseline."),
-            ("measured_processing_gain_db", "Measured Gp,eff", "dB", "Measurement", "Measured post/pre sensing SINR gain before rho."),
+            ("measured_processing_gain_db", "Measured Coherent Gp", "dB", "Measurement", "Legacy pilot-sweep post/pre gain after removing 10log10(rho)."),
             ("processing_gain_np_slope", "Gp Np Slope", "dB/dB", "Measurement", "Post-SINR slope versus 10log10(Np); ideal is one."),
             ("estimated_effective_rcs_dbsm", "Estimated Effective RCS", "dBsm", "Measurement", "Input-referred effective-RCS estimate using the calibrated RX-chain gain."),
             ("photocurrent_ma", "Photocurrent", "mA", "System", "Enter the measured UTC-PD DC photocurrent above."),
@@ -6516,10 +6556,10 @@ class DsoPanel:
             gp_eff_db = float(self.radar_proc_gain_eff_var.get())
             self._set_metric(
                 "sensing_gp_eff_db",
-                "Sensing Gp,eff",
+                "Coherent Gp (pre-util.)",
                 gp_eff_db,
                 "dB",
-                "Effective coherent sensing gain; rho is stored and applied separately.",
+                "Coherent sensing gain; eta_d or legacy rho is applied separately.",
             )
         except Exception:
             pass
@@ -11409,8 +11449,17 @@ class DsoPanel:
             slope = float(np.polyfit(grouped_x, grouped_y, 1)[0])
         self._measurement_results["processing_gain_estimates"] = estimates
         self._measurement_results["processing_gain_eff_db"] = gp_db
+        self._measurement_results["processing_gain_definition"] = (
+            "coherent_before_waveform_utilization"
+        )
+        self._measurement_results["processing_gain_reference_mode"] = (
+            "Pilot-only (legacy)"
+        )
         self._measurement_results["processing_gain_np_slope"] = self._json_safe(slope)
         self.runtime["measured_processing_gain_db"] = gp_db
+        self.runtime["measured_processing_gain_definition"] = (
+            "coherent_before_waveform_utilization"
+        )
         self.radar_proc_gain_eff_var.set(f"{gp_db:.6g}")
         source = getattr(self, "simulation_source", None)
         if source is not None and hasattr(source, "params"):
@@ -11424,10 +11473,10 @@ class DsoPanel:
                 var.set(f"{gp_db:.6g}")
         self._set_metric(
             "measured_processing_gain_db",
-            "Measured Gp,eff",
+            "Measured Coherent Gp",
             gp_db,
             "dB",
-            "Median of post-SINR minus baseline-subtracted pre-SINR minus 10log10(rho).",
+            "Legacy pilot-sweep estimate: post-SINR minus pre-SINR minus 10log10(rho).",
         )
         if np.isfinite(slope):
             self._set_metric(
@@ -11440,12 +11489,12 @@ class DsoPanel:
         self._autosave_measurement_set()
         self._refresh_metrics_table()
         self._refresh_system_model_measurements()
-        self._update_measurement_status(f"Gp,eff={gp_db:.2f} dB")
+        self._update_measurement_status(f"Coherent Gp={gp_db:.2f} dB")
         if show_dialog:
             slope_text = f"{slope:.3f}" if np.isfinite(slope) else "N/A"
             messagebox.showinfo(
                 "Processing Gain",
-                f"Measured Gp,eff: {gp_db:.2f} dB\n"
+                f"Measured coherent Gp (before rho): {gp_db:.2f} dB\n"
                 f"Np scaling slope: {slope_text} dB/dB\n"
                 f"Matched pairs: {len(estimates)}",
                 parent=self.parent,
@@ -12005,6 +12054,10 @@ class DsoPanel:
             out["range_summary_pslr_db"] = np.asarray([float(x.get("pslr_db", float("nan"))) for x in self._last_range_summaries])
             out["range_summary_snr_rad_post_db"] = np.asarray([float(x.get("range_profile_snr_db", float("nan"))) for x in self._last_range_summaries])
             out["range_summary_processing_gain_db"] = np.asarray([float(x.get("processing_gain_db", float("nan"))) for x in self._last_range_summaries])
+            out["range_summary_processing_gain_definition"] = np.asarray([
+                str(x.get("processing_gain_definition", "coherent_before_waveform_utilization"))
+                for x in self._last_range_summaries
+            ])
             out["range_summary_ideal_processing_gain_db"] = np.asarray([float(x.get("ideal_processing_gain_db", float("nan"))) for x in self._last_range_summaries])
             out["range_summary_pilot_weighted_gain_db"] = np.asarray([float(x.get("pilot_weighted_gain_db", float("nan"))) for x in self._last_range_summaries])
             out["range_summary_snr_rad_pg_corrected_db"] = np.asarray([float(x.get("pg_corrected_snr_db", float("nan"))) for x in self._last_range_summaries])
@@ -14532,7 +14585,7 @@ class DsoPanel:
 
         # The "exclude near rng=0, then hunt for the strongest peak farther
         # out" logic below only makes sense in ABSOLUTE mode, where the
-        # OMT's leaked self-interference genuinely sits at delay~0 (relative
+        # The duplexer's leaked self-interference genuinely sits at delay~0 (relative
         # to the frame-sync peak) and a real target is farther away. Once a
         # range-zero calibration is active we're doing fine relative-
         # displacement sensing around that calibrated reference point, where
@@ -14859,6 +14912,7 @@ class DsoPanel:
             "range_profile_contrast_db": range_profile_contrast_db,
             "range_floor_iqr_db": range_floor_iqr_db,
             "processing_gain_db": processing_gain_db,
+            "processing_gain_definition": "coherent_before_waveform_utilization",
             "ideal_processing_gain_db": ideal_processing_gain_db,
             "pilot_weighted_gain_db": pilot_weighted_gain_db,
             "sensing_reference_mode": str(
@@ -15354,6 +15408,12 @@ class DsoPanel:
                 "range_profile_contrast_db": range_profile_contrast_db,
                 "range_floor_iqr_db": range_floor_iqr_db,
                 "processing_gain_db": processing_gain_db,
+                "processing_gain_definition": str(
+                    item.get(
+                        "processing_gain_definition",
+                        "coherent_before_waveform_utilization",
+                    )
+                ),
                 "ideal_processing_gain_db": ideal_processing_gain_db,
                 "pilot_weighted_gain_db": pilot_weighted_gain_db,
                 "pg_corrected_snr_db": pg_corrected_snr_db,
@@ -15375,7 +15435,7 @@ class DsoPanel:
             self._set_metric(f"snr_rad_post_db{suffix}".strip().replace(" ", "_").lower(),
                              f"Sensing post-proc SINR{suffix}", range_profile_snr_db, "dB")
             self._set_metric(f"radar_processing_gain_db{suffix}".strip().replace(" ", "_").lower(),
-                             f"Sensing Gp,eff{suffix}", processing_gain_db, "dB")
+                             f"Coherent Gp (pre-util.){suffix}", processing_gain_db, "dB")
             self._set_metric(f"radar_pilot_weighted_gain_db{suffix}".strip().replace(" ", "_").lower(),
                              f"Waveform-weighted gain{suffix}", pilot_weighted_gain_db, "dB")
             self._set_metric(f"snr_rad_pg_corrected_db{suffix}".strip().replace(" ", "_").lower(),
@@ -15398,8 +15458,8 @@ class DsoPanel:
                 self._set_metric("range_peak_mm", "Range Peak", reported_range_m * 1e3, "mm")
                 self._set_metric("pslr_db", "PSLR", pslr_db, "dB")
                 self._set_metric("snr_rad_post_db", "Sensing post-proc SINR", range_profile_snr_db, "dB")
-                self._set_metric("radar_processing_gain_db", "Sensing Gp,eff", processing_gain_db, "dB")
-                self._set_metric("radar_pilot_weighted_gain_db", "Waveform-weighted gain", pilot_weighted_gain_db, "dB")
+                self._set_metric("radar_processing_gain_db", "Coherent Gp (pre-util.)", processing_gain_db, "dB")
+                self._set_metric("radar_pilot_weighted_gain_db", "Net waveform gain", pilot_weighted_gain_db, "dB")
                 self._set_metric("snr_rad_pg_corrected_db", "Sensing PG-corrected SINR", pg_corrected_snr_db, "dB")
                 self._set_metric("diff_range_mm", "Range Difference", diff_range_mm, "mm")
                 self._set_metric("range_difference_mm", "Range Difference", diff_range_mm, "mm")
@@ -15410,11 +15470,11 @@ class DsoPanel:
                 self._set_metric("snr_rad_post_db_c2", "C2 Sensing post-proc SINR", range_profile_snr_db, "dB")
                 self._set_metric("range_profile_contrast_db_c2", "C2 Range-profile Contrast", range_profile_contrast_db, "dB")
                 self._set_metric("range_floor_iqr_db_c2", "C2 Range-floor IQR", range_floor_iqr_db, "dB")
-                self._set_metric("radar_processing_gain_db_c2", "C2 Coherent Gain Gp,eff", processing_gain_db, "dB")
+                self._set_metric("radar_processing_gain_db_c2", "C2 Coherent Gp (pre-util.)", processing_gain_db, "dB")
                 self._set_metric("radar_ideal_processing_gain_db_c2", "C2 Ideal Gain BTp", ideal_processing_gain_db, "dB")
-                self._set_metric("radar_pilot_weighted_gain_db_c2", "C2 Waveform-weighted Gain", pilot_weighted_gain_db, "dB")
-                self._set_metric("radar_pre_snr_db_c2", "C2 Target Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
-                self._set_metric("snr_rad_pg_corrected_db_c2", "C2 Target Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
+                self._set_metric("radar_pilot_weighted_gain_db_c2", "C2 Net Waveform Gain", pilot_weighted_gain_db, "dB")
+                self._set_metric("radar_pre_snr_db_c2", "C2 DSO-input Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
+                self._set_metric("snr_rad_pg_corrected_db_c2", "C2 DSO-input Pre-DSP SINR (est.)", pg_corrected_snr_db, "dB")
                 self._set_metric(
                     "snr_rad_db",
                     "Sensing SINR",
@@ -16564,9 +16624,9 @@ class SystemModelValidationPanel:
     def _detector_si_power_scale(
         self, tx_power_dbm: np.ndarray | float | None = None
     ) -> np.ndarray | float:
-        """Return SI carrier power relative to the detector reference."""
+        """Return SI power relative to the detector reference."""
         tx_dbm = (
-            self._float("sweep_tx_power_dbm", -10.0)
+            self._float("sweep_tx_power_dbm", 0.0)
             if tx_power_dbm is None
             else np.asarray(tx_power_dbm, dtype=np.float64)
         )
@@ -16600,14 +16660,14 @@ class SystemModelValidationPanel:
     def _theory_carrier_power_mw(self) -> float:
         ac2_mw = max(self._float("ac2", 1.0), 1e-30)
         if "sweep_tx_power_dbm" in self.params and "theory_tx_ref_dbm" in self.params:
-            tx_dbm = self._float("sweep_tx_power_dbm", self._float("theory_tx_ref_dbm", -10.0))
+            tx_dbm = self._float("sweep_tx_power_dbm", self._float("theory_tx_ref_dbm", 0.0))
             tx_ref_dbm = self._float("theory_tx_ref_dbm", tx_dbm)
             ac2_mw *= 10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
         return ac2_mw
 
     def _theory_isolation_db(self) -> float:
         if "si_on_iso_db" in self.params:
-            return self._float("si_on_iso_db", 24.0)
+            return self._float("si_on_iso_db", 25.0)
         return self._float("iso_db", 25.0)
 
     def _theory_link_terms(self) -> dict[str, float]:
@@ -16640,7 +16700,7 @@ class SystemModelValidationPanel:
         source = source_var.get().strip().lower() if source_var is not None else ""
         if source != "simulation":
             tx_shape_value = (
-                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                np.asarray(self._float("sweep_tx_power_dbm", 0.0))
                 if tx_power_dbm is None
                 else np.asarray(tx_power_dbm, dtype=np.float64)
             )
@@ -16665,12 +16725,12 @@ class SystemModelValidationPanel:
             )
         )
         tx_dbm = (
-            self._float("sweep_tx_power_dbm", -10.0)
+            self._float("sweep_tx_power_dbm", 0.0)
             if tx_power_dbm is None
             else np.asarray(tx_power_dbm, dtype=np.float64)
         )
         tx_ref_dbm = self._float(
-            "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0)
+            "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", 0.0)
         )
         cspr_db = self._float("cspr_db", 13.0)
         cspr_ref_db = self._float("comm_detector_ref_cspr_db", cspr_db)
@@ -16756,7 +16816,7 @@ class SystemModelValidationPanel:
         r = np.maximum(np.asarray(ranges_m, dtype=np.float64), 1e-12)
         snr_comm = self._comm_sinr_from_reference(r, rho_v)
         c4, c8 = self._detector_domain_sensing_coefficients(
-            rho_v, self._float("effective_rcs_dbsm", -6.0)
+            rho_v, self._float("effective_rcs_dbsm", -8.0)
         )
         # The exact phase-averaged ZBD target power contains both the
         # SI--echo cross-beat and echo self-beat.  Dropping C8 is valid only
@@ -16817,9 +16877,9 @@ class SystemModelValidationPanel:
             1e-12,
         )
         data_scale = self._comm_data_fraction(rho) / ref_data_fraction
-        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_dbm = self._float("sweep_tx_power_dbm", 0.0)
         tx_ref_dbm = self._float(
-            "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0)
+            "comm_detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", 0.0)
         )
         tx_scale = 10.0 ** (2.0 * (tx_dbm - tx_ref_dbm) / 10.0)
         cspr_db = self._float("cspr_db", 13.0)
@@ -16836,7 +16896,7 @@ class SystemModelValidationPanel:
             noise_snr_at_ref / required_noise_snr, 0.0
         ) ** 0.25
         c4, c8 = self._detector_domain_sensing_coefficients(
-            rho, self._float("effective_rcs_dbsm", -6.0)
+            rho, self._float("effective_rcs_dbsm", -8.0)
         )
         r_sens = self._solve_sensing_range(c4, c8, g_sens)
         return r_comm, r_sens, np.minimum(r_comm, r_sens)
@@ -16849,7 +16909,7 @@ class SystemModelValidationPanel:
             10.0 ** (threshold_db / 10.0)
         )
         _c4, c8 = self._detector_domain_sensing_coefficients(
-            rho, self._float("effective_rcs_dbsm", -6.0)
+            rho, self._float("effective_rcs_dbsm", -8.0)
         )
         # The input thermal/NF model is common, but square-law conversion is
         # not: SI-on contains SI--receiver-noise beating.  Preserve the
@@ -16879,7 +16939,7 @@ class SystemModelValidationPanel:
         source = source_var.get().strip().lower() if source_var is not None else ""
         if source != "simulation":
             tx_shape_value = (
-                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                np.asarray(self._float("sweep_tx_power_dbm", 0.0))
                 if tx_power_dbm is None
                 else np.asarray(tx_power_dbm, dtype=np.float64)
             )
@@ -16922,7 +16982,7 @@ class SystemModelValidationPanel:
             and np.isfinite(self_mw) and self_mw >= 0.0
         ):
             tx_shape_value = (
-                np.asarray(self._float("sweep_tx_power_dbm", -10.0))
+                np.asarray(self._float("sweep_tx_power_dbm", 0.0))
                 if tx_power_dbm is None
                 else np.asarray(tx_power_dbm, dtype=np.float64)
             )
@@ -16941,11 +17001,11 @@ class SystemModelValidationPanel:
         utilization_scale = self._sensing_utilization(rho_arr) / max(utilization_ref, 1e-12)
 
         tx_dbm = (
-            self._float("sweep_tx_power_dbm", -10.0)
+            self._float("sweep_tx_power_dbm", 0.0)
             if tx_power_dbm is None
             else np.asarray(tx_power_dbm, dtype=np.float64)
         )
-        tx_ref_dbm = self._float("detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", -10.0))
+        tx_ref_dbm = self._float("detector_ref_tx_dbm", self._float("theory_tx_ref_dbm", 0.0))
         # Both RF fields scale as sqrt(P_t); detector-output target power
         # therefore scales as P_t^2.
         tx_scale = 10.0 ** (2.0 * (tx_dbm - tx_ref_dbm) / 10.0)
@@ -16965,7 +17025,7 @@ class SystemModelValidationPanel:
 
         rcs_ref_dbsm = self._float(
             "detector_ref_rcs_dbsm",
-            self._float("effective_rcs_dbsm", -6.0),
+            self._float("effective_rcs_dbsm", -8.0),
         )
         rcs_power_scale = 10.0 ** ((rcs - rcs_ref_dbsm) / 10.0)
         common_scale = utilization_scale * tx_scale * modulation_scale
@@ -17099,7 +17159,7 @@ class SystemModelValidationPanel:
 
         add(0, "range_limits_m", "Range [m] min, max", "0.5, 2")
         add(1, "ref_range_m", "Reference / TX-curve range [m]", "1.1")
-        add(2, "sweep_tx_power_dbm", "Operating THz P_t [dBm]", "-10")
+        add(2, "sweep_tx_power_dbm", "Operating THz P_t (post-PA) [dBm]", "0")
         add(3, "si_sweep_limits_dbm", "SI sweep [dBm] min, max", "-60, -20")
         add(4, "si_on_iso_db", "Net SI isolation [dB]", "25")
         add(5, "lna_ip1db_dbm", "LNA input P1dB [dBm]", "-20")
@@ -17116,9 +17176,9 @@ class SystemModelValidationPanel:
         sensing_mode_box.bind("<<ComboboxSelected>>", lambda _event: self._refresh_plot())
         add(7, "sensing_mmse_regularization", "MMSE epsilon / mean |D|^2", "0.001")
         add(8, "effective_rcs_dbsm", "Effective RCS [dBsm]", "-8.0")
-        add(9, "radar_proc_gain_db", "Sensing G_p,eff [dB]", "30.10")
+        add(9, "radar_proc_gain_db", "Coherent G_p (pre-util.) [dB]", "30.10")
         add(10, "symbol_rate_gbaud", "Symbol rate / noise BW [GBd]", "20.0")
-        add(11, "theory_ssbi_fraction", "In-band SSBI fraction kappa", "0.069")
+        add(11, "theory_ssbi_fraction", "In-band SSBI fraction kappa", "0.06")
         add(12, "theory_lna_nep", "LNA gain, ZBD NEP [dB, pW/sqrtHz]", "13, 5")
         add(13, "required_sinr_db", "Req. SINR comm, sensing [dB]", "15.75, 13.2")
         add(14, "sinr_ylim_db", "SINR y limits [dB]", "0, 40")
@@ -17150,7 +17210,7 @@ class SystemModelValidationPanel:
         hidden("rcs_points", "201")
         hidden("target_gamma_mag", "N/A")
         hidden("target_rcs_sqm", "0.01")
-        hidden("target_ant_gain_dbi", "32")
+        hidden("target_ant_gain_dbi", "25")
         hidden("target_rcs_mode", "direct_effective")
         hidden("si_sweep_min_dbm", "-60")
         hidden("si_sweep_max_dbm", "-20")
@@ -17159,7 +17219,7 @@ class SystemModelValidationPanel:
         hidden("theory_rf_carrier_ghz", "280.0")
         hidden("theory_tx_gain_dbi", "33.0")
         hidden("theory_rx_gain_dbi", "33.0")
-        hidden("theory_omt_il_db", "1.9")
+        hidden("theory_omt_il_db", "2")
         hidden("theory_noise_noise_overlap", "1.0")
         # Optional downstream electrical floor referred to the LNA input.
         # -300 dB(mW^2) makes it negligible for the ideal theory figures.
@@ -17199,7 +17259,7 @@ class SystemModelValidationPanel:
         hidden("sqrt_k", "1e-4")
         hidden("gc_db", "0")
         hidden("cspr_db", "13")
-        hidden("theory_tx_ref_dbm", "-10")
+        hidden("theory_tx_ref_dbm", "0")
         hidden("photocurrent_target_range_m", "1.014")
 
         btns = ttk.Frame(ctrl)
@@ -18089,7 +18149,7 @@ class SystemModelValidationPanel:
     def _si_input_dbm_to_tx_dbm(
         self, si_power_dbm: np.ndarray | float
     ) -> np.ndarray:
-        """Map SI carrier power at the LNA input to total THz TX power."""
+        """Map SI power at the LNA input to total THz TX power."""
         m2 = 10.0 ** (-self._float("cspr_db", 13.0) / 10.0)
         carrier_fraction_db = -10.0 * np.log10(1.0 + m2)
         return (
@@ -18101,7 +18161,7 @@ class SystemModelValidationPanel:
     def _tx_dbm_to_si_input_dbm(
         self, tx_power_dbm: np.ndarray | float
     ) -> np.ndarray:
-        """Return SI carrier power at the LNA input for net isolation."""
+        """Return SI power at the LNA input for net isolation."""
         m2 = 10.0 ** (-self._float("cspr_db", 13.0) / 10.0)
         carrier_fraction_db = -10.0 * np.log10(1.0 + m2)
         return (
@@ -18173,7 +18233,7 @@ class SystemModelValidationPanel:
             1e-300,
         )
         ssbi_fraction = float(
-            np.clip(self._float("theory_ssbi_fraction", 0.069), 0.0, 1.0)
+            np.clip(self._float("theory_ssbi_fraction", 0.06), 0.0, 1.0)
         )
         si_noise_coefficient_mw = 2.0 * rf_noise_mw
         ssbi_coefficient = ssbi_fraction * m2_value ** 2
@@ -18222,11 +18282,14 @@ class SystemModelValidationPanel:
 
     def _closed_form_theory_context(self) -> dict[str, float | str]:
         """Return the fixed Table-I parameters for the closed-form figures."""
-        tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        tx_dbm = self._float("sweep_tx_power_dbm", 0.0)
         pt_total_mw = 10.0 ** (tx_dbm / 10.0)
         rho = float(np.clip(self._float("rho", 0.20), 1e-12, 1.0))
-        sensing_utilization = float(self._sensing_utilization(rho))
-        comm_data_fraction = float(self._comm_data_fraction(rho))
+        # Fig. 2/3 are ideal closed-form figures. Waveform inversion loss,
+        # AWG/DSO quantization, and measured processing inefficiency belong to
+        # the simulation/measurement range figure, not these theory bounds.
+        sensing_utilization = 1.0
+        comm_data_fraction = 1.0
         cspr_db = self._float("cspr_db", 13.0)
         m2 = 10.0 ** (-cspr_db / 10.0)
         pt_carrier_mw = pt_total_mw / (1.0 + m2)
@@ -18245,7 +18308,7 @@ class SystemModelValidationPanel:
         rx_gain = 10.0 ** (
             self._float("theory_rx_gain_dbi", 33.0) / 10.0
         )
-        omt_il_db = max(self._float("theory_omt_il_db", 1.9), 0.0)
+        omt_il_db = max(self._float("theory_omt_il_db", 2.0), 0.0)
         omt_two_pass = 10.0 ** (-2.0 * omt_il_db / 10.0)
         echo_per_pt_unit_rcs = (
             tx_gain
@@ -18330,7 +18393,7 @@ class SystemModelValidationPanel:
         p_si_mw = 10.0 ** (p_si_dbm / 10.0)
 
         plot_range = max(self._float("ref_range_m", 1.0), 1e-12)
-        rcs_dbsm = self._float("effective_rcs_dbsm", -6.0)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -8.0)
         rcs_sqm = 10.0 ** (rcs_dbsm / 10.0)
         echo_mw = (
             context["echo_per_pt_unit_rcs"]
@@ -18654,10 +18717,10 @@ class SystemModelValidationPanel:
         tx_dbm = tx_power_dbm
         tx_ref_dbm = self._float(
             "detector_ref_tx_dbm",
-            self._float("theory_tx_ref_dbm", -10.0),
+            self._float("theory_tx_ref_dbm", 0.0),
         )
         tx_echo_scale = 10.0 ** ((tx_dbm - tx_ref_dbm) / 10.0)
-        rcs_dbsm = self._float("effective_rcs_dbsm", -6.0)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -8.0)
         rcs_ref_dbsm = self._float("detector_ref_rcs_dbsm", rcs_dbsm)
         rcs_scale = 10.0 ** ((rcs_dbsm - rcs_ref_dbsm) / 10.0)
         range_scale = (detector_ref_range / plot_range) ** 4
@@ -18736,7 +18799,7 @@ class SystemModelValidationPanel:
             detector_noise_mw = np.full_like(p_si_mw, np.nan)
 
         sqrt_k = max(self._float("sqrt_k", 1e-4), 1e-30)
-        operating_tx_dbm = self._float("sweep_tx_power_dbm", -10.0)
+        operating_tx_dbm = self._float("sweep_tx_power_dbm", 0.0)
         operating_carrier_mw = self._theory_carrier_power_mw()
         carrier_tx_mw = (
             operating_carrier_mw
@@ -18959,7 +19022,7 @@ class SystemModelValidationPanel:
             ),
         )
         secondary.set_xlabel(
-            rf"SI carrier power at LNA input (dBm), isolation={self._theory_isolation_db():g} dB"
+            rf"SI power at LNA input (dBm), isolation={self._theory_isolation_db():g} dB"
         )
         secondary.tick_params(direction="in", labelsize=9 if for_save else 7.5)
         ax.xaxis.set_major_locator(MultipleLocator(10.0))
@@ -18982,7 +19045,7 @@ class SystemModelValidationPanel:
             0.03,
             (
                 rf"$\sigma_{{\mathrm{{eff}}}}="
-                rf"{self._float('effective_rcs_dbsm', -6.0):.1f}$ dBsm"
+                rf"{self._float('effective_rcs_dbsm', -8.0):.1f}$ dBsm"
                 "\n"
                 + self._processing_gain_annotation()
                 + (
@@ -19043,7 +19106,7 @@ class SystemModelValidationPanel:
         if y_max > y_min:
             ax.set_ylim(y_min, y_max)
             ax.yaxis.set_major_locator(MultipleLocator(10.0))
-        ax.set_xlabel(r"SI carrier power at LNA input, $P_{\mathrm{SI}}$ (dBm)")
+        ax.set_xlabel(r"SI power at LNA input, $P_{\mathrm{SI}}$ (dBm)")
         ax.set_ylabel("Sensing SINR (dB)")
         ax.xaxis.set_major_locator(MultipleLocator(10.0))
         ax.xaxis.set_minor_locator(AutoMinorLocator(2))
@@ -19283,7 +19346,7 @@ class SystemModelValidationPanel:
             self._float("photocurrent_target_range_m", 1.014), 1e-6
         )
         rho = float(np.clip(self._float("rho", 0.20), 1e-9, 1.0 - 1e-9))
-        rcs_dbsm = self._float("effective_rcs_dbsm", -6.0)
+        rcs_dbsm = self._float("effective_rcs_dbsm", -8.0)
 
         c4, c8 = self._detector_domain_sensing_coefficients(
             rho,
@@ -19569,15 +19632,15 @@ class SystemModelValidationPanel:
             + si_noise_coefficient * si_mw
             + ssbi_coefficient * si_mw ** 2
         )
-        sensing_utilization = float(self._sensing_utilization(rho_v))
+        sensing_utilization = 1.0
         prefactor = sensing_utilization * context["gp"] * 2.0 * m2
 
         def sensing_range_from_quadratic(
             si_power_mw: float, fixed_denominator_mw2: float
         ) -> np.ndarray:
             # With P_ec=C/u, gamma[D0+2NC/u]
-            # =eta*Gp*2m^2[P_SI*C/u+C^2/u^2], where eta=1 for
-            # ideal full-waveform processing and eta=rho for pilot-only.
+            # =Gp*2m^2[P_SI*C/u+C^2/u^2]. Fig. 2 uses ideal eta=1;
+            # practical waveform utilization is handled by the range sweep.
             qa = sensing_threshold * max(fixed_denominator_mw2, 1e-300)
             qb = echo_r4_coefficient * (
                 2.0 * sensing_threshold * rf_noise_mw
@@ -19602,7 +19665,7 @@ class SystemModelValidationPanel:
         comm_threshold = 10.0 ** (comm_threshold_db / 10.0)
         # Eq. (14), with P_rx=C/R^2.  Solving gamma_comm=gamma_c first
         # gives the required received carrier power and then R_max.
-        comm_data_fraction = float(self._comm_data_fraction(rho_v))
+        comm_data_fraction = 1.0
         # |sqrt(P_c)(1+m*s)|^2 has wanted AC power 2*m^2*P_c^2
         # for unit-power complex s. This is the same factor used by the
         # echo self-beat term in the sensing equation.
@@ -20383,6 +20446,7 @@ class SystemModelValidationPanel:
 
     def _sync_theory_params_from_cfg(self, cfg: SimConfig) -> None:
         """Synchronize the deterministic Sec. II link-budget parameters."""
+        tx_output_dbm = calc_thz_tx_output_dbm(cfg)
         waveform_kind = classify_isac_waveform(cfg.waveform)
         bandwidth_hz = max(estimate_waveform_bandwidth_hz(cfg, waveform_kind), 1.0)
         self.params["bandwidth_ghz"].set(f"{bandwidth_hz / 1e9:.6g}")
@@ -20430,7 +20494,7 @@ class SystemModelValidationPanel:
         self.params["theory_omt_il_db"].set(
             f"{float(cfg.omt_il_db):.6g}"
         )
-        self.params["theory_tx_ref_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
+        self.params["theory_tx_ref_dbm"].set(f"{tx_output_dbm:.6g}")
         rcs_dbsm = cfg.target_effective_rcs_dbsm
         if rcs_dbsm is not None and np.isfinite(float(rcs_dbsm)):
             self.params["effective_rcs_dbsm"].set(
@@ -20446,7 +20510,7 @@ class SystemModelValidationPanel:
         link = calc_isac_link_budget(
             distance_m=ref_r,
             rf_ghz=cfg.rf_carrier_ghz,
-            tx_dbm=cfg.utcpd_target_dbm,
+            tx_dbm=tx_output_dbm,
             tx_gain_dbi=cfg.tx_ant_gain_dbi,
             rx_gain_dbi=cfg.rx_ant_gain_dbi,
             rcs_sqm=cfg.target_rcs_sqm,
@@ -20459,7 +20523,7 @@ class SystemModelValidationPanel:
             target_ant_gain_dbi=cfg.target_ant_gain_dbi,
             target_gamma_mag=cfg.target_gamma_mag,
             target_pol_eff=cfg.target_pol_eff,
-            effective_rcs_dbsm=self._float("effective_rcs_dbsm", -6.0),
+            effective_rcs_dbsm=self._float("effective_rcs_dbsm", -8.0),
         )
         self.params["effective_rcs_dbsm"].set(f"{float(link['effective_rcs_dbsm']):.6g}")
         beta_ref = 10.0 ** (-float(link["radar_path_loss_db"]) / 20.0)
@@ -20470,6 +20534,7 @@ class SystemModelValidationPanel:
 
     def _store_detector_reference_from_sim(self, cfg: SimConfig, data: dict) -> None:
         """Store one physical-simulation point for analytical range scaling."""
+        tx_output_dbm = calc_thz_tx_output_dbm(cfg)
         c2m = data.get("c2_band_metrics", {})
         c2rawm = data.get("c2_raw_band_metrics", {})
         values = {
@@ -20497,7 +20562,7 @@ class SystemModelValidationPanel:
         if not np.isfinite(rcs_ref):
             rcs_ref = self._float("effective_rcs_dbsm", float("nan"))
         self.params["detector_ref_range_m"].set(f"{float(cfg.target_dist_m):.9g}")
-        self.params["detector_ref_tx_dbm"].set(f"{float(cfg.utcpd_target_dbm):.9g}")
+        self.params["detector_ref_tx_dbm"].set(f"{tx_output_dbm:.9g}")
         self.params["detector_ref_iso_db"].set(f"{float(cfg.omt_iso_db):.9g}")
         self.params["detector_ref_cspr_db"].set(
             f"{effective_cspr_db(cfg):.9g}"
@@ -20528,7 +20593,7 @@ class SystemModelValidationPanel:
             )
             self.params["comm_sir_ref_db"].set(f"{sir_db:.9g}")
         self.params["comm_detector_ref_range_m"].set(f"{float(cfg.target_dist_m):.9g}")
-        self.params["comm_detector_ref_tx_dbm"].set(f"{float(cfg.utcpd_target_dbm):.9g}")
+        self.params["comm_detector_ref_tx_dbm"].set(f"{tx_output_dbm:.9g}")
         self.params["comm_detector_ref_rho"].set(f"{float(cfg.pilot_rho):.9g}")
         self.params["comm_detector_ref_data_fraction"].set(
             f"{1.0 if is_full_waveform_sensing(cfg.sensing_reference_mode) else max(1.0 - float(cfg.pilot_rho), 1e-12):.9g}"
@@ -20554,6 +20619,7 @@ class SystemModelValidationPanel:
             if self.photonic_source is None or not hasattr(self.photonic_source, "_cfg_from_ui"):
                 return
             cfg = self.photonic_source._cfg_from_ui()
+            tx_output_dbm = calc_thz_tx_output_dbm(cfg)
             self._sync_theory_params_from_cfg(cfg)
             # A cached physical sweep or symbol-rate simulation was generated
             # with the previous Gamma/RCS state and must not be presented as if
@@ -20564,7 +20630,7 @@ class SystemModelValidationPanel:
                 self.symbol_rate_sweep["sim_rate_gbaud"] = np.asarray([], dtype=np.float64)
                 self.symbol_rate_sweep["sim_evm_db"] = np.asarray([], dtype=np.float64)
                 self.symbol_rate_sweep["bound_evm_db"] = np.asarray([], dtype=np.float64)
-            self.params["sweep_tx_power_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
+            self.params["sweep_tx_power_dbm"].set(f"{tx_output_dbm:.6g}")
             self.params["si_on_iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
             self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
             self.params["rho_ref"].set(f"{float(cfg.pilot_rho):.6g}")
@@ -20635,7 +20701,7 @@ class SystemModelValidationPanel:
                 ref_r = max(self._float("ref_range_m", float(cfg.target_dist_m)), 1e-6)
                 cfg.target_dist_m = ref_r
                 self.params["ref_range_m"].set(f"{ref_r:.6g}")
-                self.params["sweep_tx_power_dbm"].set(f"{float(cfg.utcpd_target_dbm):.6g}")
+                self.params["sweep_tx_power_dbm"].set(f"{calc_thz_tx_output_dbm(cfg):.6g}")
                 self.params["si_on_iso_db"].set(f"{float(cfg.omt_iso_db):.6g}")
                 self.params["rho"].set(f"{float(cfg.pilot_rho):.6g}")
                 self.params["rho_ref"].set(f"{float(cfg.pilot_rho):.6g}")
@@ -20823,7 +20889,7 @@ class SystemModelValidationPanel:
         if self.photonic_source is None or not hasattr(self.photonic_source, "_cfg_from_ui"):
             return None
         base_cfg = self.photonic_source._cfg_from_ui()
-        iso_on = self._float("si_on_iso_db", 24.0)
+        iso_on = self._float("si_on_iso_db", 25.0)
         iso_off = self._float("si_off_iso_db", 1000.0)
         sweep_tx_dbm = self._finite_param("sweep_tx_power_dbm")
         sweep_rho = float(np.clip(self._float("rho", float(base_cfg.pilot_rho)), 1e-9, 0.95))
@@ -20840,15 +20906,15 @@ class SystemModelValidationPanel:
                 cfg.target_dist_m = float(dist)
                 cfg.delay_ns = (2.0 * cfg.target_dist_m) / 3e8 * 1e9
                 if np.isfinite(sweep_tx_dbm):
-                    # Hypothetical post-UTC-PD THz-PA operating point.  This
-                    # overrides the 7-mA -> -10-dBm UTC-PD calibration and
-                    # scales the complete transmitted THz waveform once.
+                    # Third-tab sweeps are specified at the final TX reference
+                    # plane, independent of whether the first-tab point used a PA.
                     cfg.utcpd_target_dbm = float(sweep_tx_dbm)
+                    cfg.thz_pa_enable = False
                     cfg.tx_power_dbm = float(sweep_tx_dbm)
                 cfg.pilot_rho = sweep_rho
                 cfg.target_rcs_mode = "direct_effective"
                 cfg.target_effective_rcs_dbsm = self._float(
-                    "effective_rcs_dbsm", -6.0
+                    "effective_rcs_dbsm", -8.0
                 )
                 cfg.omt_iso_db = float(iso)
                 cfg.si_enable = True
@@ -21012,7 +21078,7 @@ class SystemModelValidationPanel:
                 self.sim_sweep = sweep
                 ranges = sweep["range_m"]
                 operating_tx_dbm = self._float(
-                    "sweep_tx_power_dbm", -10.0
+                    "sweep_tx_power_dbm", 0.0
                 )
                 # Use the equalizer-output EVM from the same physical
                 # waveform simulation as the first tab at every range.
@@ -21032,7 +21098,7 @@ class SystemModelValidationPanel:
                 )
                 c4, c8 = self._detector_domain_sensing_coefficients(
                     rho,
-                    self._float("effective_rcs_dbsm", -6.0),
+                    self._float("effective_rcs_dbsm", -8.0),
                     tx_power_dbm=operating_tx_dbm,
                 )
                 range_safe = np.maximum(
@@ -21300,7 +21366,7 @@ class SystemModelValidationPanel:
             self.fig.tight_layout()
             self.canvas.draw_idle()
             rc, rs_on, rs_off, rj_on = self._rmax_vs_effective_rcs(
-                np.asarray([self._float("effective_rcs_dbsm", -6.0)]),
+                np.asarray([self._float("effective_rcs_dbsm", -8.0)]),
                 rho,
             )
             n_evm_meas = sum(
@@ -21345,7 +21411,7 @@ class SystemModelValidationPanel:
                 f"{sensing_diag['model_at_measurement_db']:.2f} dB, "
                 f"meas-model={sensing_diag['measured_minus_model_db']:+.2f} dB, "
                 f"band-est offset={self._float('bandpower_est_offset_db', 0.0):+.2f} dB, "
-                f"SI isolation={self._float('si_on_iso_db', 24.0):.0f} dB  "
+                f"SI isolation={self._float('si_on_iso_db', 25.0):.0f} dB  "
                 f"TX={self._finite_param('sweep_tx_power_dbm'):.1f} dBm  "
                 f"meas EVM/sensing/C2on/off={n_evm_meas}/{n_radar_meas}/{len(self._c2_power_points('on'))}/{len(self._c2_power_points('off'))}  "
                 f"C2 SI-on slope={c2_slope_txt}"

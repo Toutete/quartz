@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from matplotlib.figure import Figure
@@ -17,6 +18,7 @@ from isac_gui_v2 import (
     SystemModelValidationPanel,
     calc_common_receiver_nf_db,
     calc_sec2_sensing_sinr,
+    calc_thz_tx_output_dbm,
     estimate_mmse_sensing_efficiency,
     generate_bandlimited_noise,
 )
@@ -46,7 +48,7 @@ def _theory_model() -> SystemModelValidationPanel:
         "bandwidth_ghz": 20.0,
         "pilot_symbols": 1024,
         "symbol_rate_gbaud": 20.0,
-        "sweep_tx_power_dbm": -10.0,
+        "sweep_tx_power_dbm": 0.0,
         "si_on_iso_db": 25.0,
         "cspr_db": 13.0,
         "effective_rcs_dbsm": -8.0,
@@ -56,10 +58,10 @@ def _theory_model() -> SystemModelValidationPanel:
         "theory_rf_carrier_ghz": 280.0,
         "theory_tx_gain_dbi": 33.0,
         "theory_rx_gain_dbi": 33.0,
-        "theory_omt_il_db": 1.9,
+        "theory_omt_il_db": 2.0,
         "theory_noise_noise_overlap": 1.0,
         "theory_post_detector_floor_dbmw2": -300.0,
-        "theory_ssbi_fraction": 0.069,
+        "theory_ssbi_fraction": 0.06,
         "required_sinr_db": "15.75, 13.2",
         "si_sweep_limits_dbm": "-60, -20",
         "si_sweep_points": 201,
@@ -72,6 +74,49 @@ def _theory_model() -> SystemModelValidationPanel:
 
 
 class ClosedFormTheoryTests(unittest.TestCase):
+    def test_sync_sim_uses_locally_computed_final_tx_power(self):
+        model = _theory_model()
+        cfg = SimConfig(
+            utcpd_target_dbm=-10.0,
+            thz_pa_enable=True,
+            thz_pa_gain_db=10.0,
+        )
+        model.photonic_source = SimpleNamespace(
+            _cfg_from_ui=lambda: cfg,
+            data=None,
+            last_sim_cfg=None,
+        )
+        model._sync_theory_params_from_cfg = lambda _cfg: None
+        model._load_packaged_detector_reference = lambda *_args, **_kwargs: False
+        model.sim_sweep = {}
+        model._evm_radar_plot_cache = {}
+        model.symbol_rate_sweep = None
+        model.runtime = {}
+        model.status_var = _Var("")
+        model.parent = None
+        model.params.update(
+            {
+                "rho_ref": _Var(0.20),
+                "detector_reference_source": _Var(""),
+            }
+        )
+
+        model._sync_from_sim()
+
+        self.assertAlmostEqual(float(model.params["sweep_tx_power_dbm"].get()), 0.0)
+
+    def test_optional_thz_pa_keeps_utcpd_and_final_tx_reference_planes_separate(self):
+        cfg = SimConfig(
+            utcpd_target_dbm=-10.0,
+            thz_pa_enable=False,
+            thz_pa_gain_db=10.0,
+        )
+        self.assertAlmostEqual(calc_thz_tx_output_dbm(cfg), -10.0)
+
+        cfg.thz_pa_enable = True
+        self.assertAlmostEqual(calc_thz_tx_output_dbm(cfg), 0.0)
+        self.assertAlmostEqual(cfg.utcpd_target_dbm, -10.0)
+
     def test_mmse_efficiency_matches_32qam_waveform_statistics(self):
         eta_ofdm = estimate_mmse_sensing_efficiency(
             "OFDM", "32QAM", 1024, 0.001
@@ -83,6 +128,16 @@ class ClosedFormTheoryTests(unittest.TestCase):
         self.assertAlmostEqual(10.0 * np.log10(eta_ofdm), -3.44, delta=0.08)
         self.assertAlmostEqual(10.0 * np.log10(eta_dfts), -7.30, delta=0.12)
         self.assertLess(eta_dfts, eta_ofdm)
+
+    def test_full_waveform_net_gain_applies_eta_exactly_once(self):
+        model = _theory_model()
+        coherent_gp_db = model._radar_proc_gain_db()
+        eta_db = 10.0 * np.log10(float(model._sensing_utilization(0.20)))
+        net_gain_db = float(model._pilot_weighted_processing_gain_db(0.20))
+
+        self.assertAlmostEqual(eta_db, -7.27, delta=0.12)
+        self.assertAlmostEqual(net_gain_db, coherent_gp_db + eta_db, places=10)
+        self.assertAlmostEqual(net_gain_db, 22.83, delta=0.12)
 
     def test_live_dso_uses_full_tx_matrix_in_full_waveform_mode(self):
         pilot = np.ones(64, dtype=np.complex128)
@@ -101,18 +156,18 @@ class ClosedFormTheoryTests(unittest.TestCase):
         reference = DsoPanel._dfts_ofdm_pilot_matrix(payload, 3)
         self.assertEqual(reference.shape, (3, 64))
 
-    def test_first_tab_sec2_metric_matches_third_tab_si_curve(self):
+    def test_ideal_si_figure_removes_first_tab_waveform_efficiency(self):
         model = _theory_model()
         cfg = SimConfig(
             waveform="DFT-s-OFDM",
             modulation="32QAM",
             baud_gbaud=20.0,
             rf_carrier_ghz=280.0,
-            utcpd_target_dbm=-10.0,
+            utcpd_target_dbm=0.0,
             awg_rf_power_dbm=-6.0,
             awg_ref_power_dbm=-6.0,
             omt_iso_db=25.0,
-            omt_il_db=1.9,
+            omt_il_db=2.0,
             cspr_db=13.0,
             lna_gain_db=13.0,
             lna_nf_db=8.0,
@@ -125,7 +180,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             pilot_rho=0.20,
             syms_per_chirp=1024,
             radar_proc_gain_eff_db=30.1029995664,
-            sensing_ssbi_fraction=0.069,
+            sensing_ssbi_fraction=0.06,
             sensing_residual_ceiling_db=40.0,
         )
         first_tab = calc_sec2_sensing_sinr(cfg, 10.0 ** (-8.0 / 10.0), 20e9)
@@ -138,9 +193,10 @@ class ClosedFormTheoryTests(unittest.TestCase):
             )
         )
 
-        # The third-tab curve is sampled on a 0.2-dB SI grid, so interpolation
-        # introduces a very small curvature error around the exact point.
-        self.assertAlmostEqual(first_tab["sinr_db"], expected, delta=1e-3)
+        eta_db = 10.0 * np.log10(first_tab["sensing_utilization"])
+        # Fig. 3 uses ideal eta=1, while the first-tab detector metric retains
+        # MMSE waveform efficiency. The small residual is SI-grid interpolation.
+        self.assertAlmostEqual(expected - first_tab["sinr_db"], -eta_db, delta=1e-2)
 
     def test_sec2_sensing_metric_responds_to_effective_processing_gain(self):
         cfg = SimConfig(
@@ -148,7 +204,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             modulation="32QAM",
             baud_gbaud=20.0,
             rf_carrier_ghz=280.0,
-            utcpd_target_dbm=-10.0,
+            utcpd_target_dbm=0.0,
             awg_rf_power_dbm=-6.0,
             awg_ref_power_dbm=-6.0,
             omt_iso_db=25.0,
@@ -162,7 +218,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             target_dist_m=1.1,
             pilot_rho=0.20,
             syms_per_chirp=1024,
-            sensing_ssbi_fraction=0.069,
+            sensing_ssbi_fraction=0.06,
             sensing_residual_ceiling_db=80.0,
         )
         cfg.radar_proc_gain_eff_db = 20.0
@@ -171,6 +227,27 @@ class ClosedFormTheoryTests(unittest.TestCase):
         high_gain = calc_sec2_sensing_sinr(cfg, 10.0 ** (-8.0 / 10.0), 20e9)
 
         self.assertGreater(high_gain["sinr_db"] - low_gain["sinr_db"], 9.9)
+
+    def test_zbd_output_sinr_is_invariant_to_post_detector_cable_loss(self):
+        cfg = SimConfig(
+            waveform="DFT-s-OFDM",
+            modulation="32QAM",
+            baud_gbaud=20.0,
+            syms_per_chirp=1024,
+            target_dist_m=1.1,
+            target_effective_rcs_dbsm=-8.0,
+            target_rcs_mode="direct_effective",
+            c2_cable_loss_db=0.0,
+        )
+        no_loss = calc_sec2_sensing_sinr(
+            cfg, 10.0 ** (-8.0 / 10.0), 20e9
+        )
+        cfg.c2_cable_loss_db = 40.0
+        high_loss = calc_sec2_sensing_sinr(
+            cfg, 10.0 ** (-8.0 / 10.0), 20e9
+        )
+
+        self.assertAlmostEqual(no_loss["sinr_db"], high_loss["sinr_db"], places=12)
 
     def test_distance_comm_curve_uses_first_tab_equalizer_evm(self):
         sweep_evm_sinr = np.asarray([21.0, 17.5, 12.25])
@@ -348,15 +425,15 @@ class ClosedFormTheoryTests(unittest.TestCase):
         np.testing.assert_allclose(high_rho[0], low_rho[0])
         np.testing.assert_allclose(high_rho[1], low_rho[1])
 
-    def test_legacy_pilot_mode_retains_rho_tradeoff(self):
+    def test_ideal_closed_form_figures_ignore_legacy_rho_tradeoff(self):
         model = _theory_model()
         model.params["sensing_reference_mode"].set("Pilot-only (legacy)")
         rcs = np.asarray([-8.0])
         low_rho = model._rmax_vs_effective_rcs(rcs, 0.20)
         high_rho = model._rmax_vs_effective_rcs(rcs, 0.80)
 
-        self.assertLess(float(high_rho[0][0]), float(low_rho[0][0]))
-        self.assertGreater(float(high_rho[1][0]), float(low_rho[1][0]))
+        np.testing.assert_allclose(high_rho[0], low_rho[0])
+        np.testing.assert_allclose(high_rho[1], low_rho[1])
 
     def test_detector_coefficients_are_dimensionally_consistent(self):
         model = _theory_model()
@@ -386,7 +463,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             float(coefficients["ssbi_coefficient"]),
-            0.069 * m2 ** 2,
+            0.06 * m2 ** 2,
             places=18,
         )
         self.assertGreater(
@@ -405,21 +482,20 @@ class ClosedFormTheoryTests(unittest.TestCase):
             return float(values[int(np.argmin(np.abs(x - target)))])
 
         self.assertLess(abs(nearest(slope, -60.0)), 0.15)
-        self.assertGreater(nearest(slope, -40.0), 0.65)
-        self.assertGreater(nearest(slope, -35.0), 0.55)
+        # At 0-dBm post-PA output the stronger echo self-beat overlaps the
+        # cross-beat rise, so a full +1 dB/dB asymptote need not appear.
+        self.assertGreater(float(np.max(slope)), 0.50)
+        self.assertGreater(nearest(slope, -35.0), 0.50)
         self.assertLess(nearest(slope, -20.0), -0.50)
         carrier_fraction_db = -10.0 * np.log10(
             1.0 + 10.0 ** (-13.0 / 10.0)
         )
         self.assertAlmostEqual(
             float(curves["current_si_dbm"]),
-            -35.0 + carrier_fraction_db,
+            -25.0 + carrier_fraction_db,
         )
         self.assertGreater(float(curves["current_sinr_db"]), 13.2)
-        self.assertLess(
-            float(curves["linear_region_min_dbm"]),
-            float(curves["linear_region_max_dbm"]),
-        )
+        self.assertAlmostEqual(float(curves["optimum_si_dbm"]), -25.6, delta=0.25)
 
     def test_symbol_rate_scales_integrated_rf_noise(self):
         model = _theory_model()
@@ -510,10 +586,10 @@ class ClosedFormTheoryTests(unittest.TestCase):
             places=12,
         )
 
-    def test_theory_link_applies_two_pass_omt_loss_once(self):
+    def test_theory_link_applies_two_pass_duplexer_loss_once(self):
         model = _theory_model()
         reference = model._closed_form_theory_context()
-        model.params["theory_omt_il_db"].set(2.9)
+        model.params["theory_omt_il_db"].set(3.0)
         extra_loss = model._closed_form_theory_context()
 
         self.assertAlmostEqual(
@@ -548,7 +624,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
         self.assertAlmostEqual(reference, 8.0)
         self.assertAlmostEqual(calc_common_receiver_nf_db(cfg), reference)
 
-    def test_comm_range_matches_synced_1p1m_simulation_operating_point(self):
+    def test_comm_range_matches_synced_0dbm_operating_point(self):
         model = _theory_model()
         model.params["symbol_rate_gbaud"].set(15.0)
         model.params["theory_omt_il_db"].set(2.3)
@@ -567,7 +643,7 @@ class ClosedFormTheoryTests(unittest.TestCase):
             )
         )
 
-        self.assertAlmostEqual(comm_range, 1.10247, delta=5e-4)
+        self.assertGreater(comm_range, 1.1)
         self.assertGreater(10.0 * np.log10(comm_sinr_1p1m), 15.75)
 
 

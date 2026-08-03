@@ -1,6 +1,6 @@
 # ISAC Simulation and Theory Model Validation
 
-검증 대상은 `code/isac_gui_v2.py`의 첫 번째 탭 파형 시뮬레이션, 세 번째 탭의 거리 sweep 및 두 closed-form 그림, 그리고 `concepts/sec2.tex`의 수식이다. 수치 예시는 2026-07-28 현재 기본 이론 조건을 사용한다.
+검증 대상은 `code/isac_gui_v2.py`의 첫 번째 탭 파형 시뮬레이션, 세 번째 탭의 거리 sweep 및 두 closed-form 그림, 그리고 `concepts/CURRENT_PAPER_SYSTEM_MODEL.md`의 수식이다. 수치 예시는 2026-08-03의 canonical 이론 조건을 사용한다.
 
 ## 1. 결론
 
@@ -15,16 +15,16 @@
 
 이번 검증에서 코드 오류 네 개를 수정했다.
 
-1. 세 번째 탭 이론 링크에 누락된 OMT 삽입손실 (2L_{\rm OMT}\)를 추가했다.
+1. 세 번째 탭 이론 링크에 누락된 duplexer 삽입손실 (2L_{\rm dup}\)를 추가했다.
 2. GUI의 UTC-PD 전력이 total carrier-plus-sideband power인 점을 반영해, square-law 식에는 carrier power (P_c=P_{t,\rm tot}/(1+m^2))를 사용하도록 통일했다.
 3. ZBD 뒤에 위치한 IF amplifier NF를 RF LNA와 Friis 합성하던 처리를 제거했다. IF amplifier 잡음은 (N)이 아니라 검파 후 고정 바닥 (N_{d,0})에 속한다.
 4. communication square-law desired power에 누락됐던 계수 2를 복원했다. sensing echo self-beat와 마찬가지로 unit-power complex waveform의 desired AC power는 (2m^2P_{\rm rx}^2)이다.
 
-다만 현재 `sec2.tex`는 최신 코드와 동일한 모델이 아니다. 논문은 여전히 pilot power allocation (\rho)를 사용하지만, 코드는 기본적으로 full-waveform MMSE sensing을 사용한다. 또한 논문의 (N_{d,0}=-97.5\) dB(mW\(^2\))는 현재 GUI 기본 NEP로부터 계산되는 (-89.0\) dB(mW\(^2\))와 일치하지 않는다. 이 두 항목은 논문 그림을 확정하기 전에 반드시 하나의 정의로 통일해야 한다.
+Canonical simulation은 UTC-PD output (-10) dBm과 PA off를 기본으로 한다. PA on 및 gain 10 dB를 선택하면 final TX output은 0 dBm이다. 두 경우 모두 full-waveform MMSE sensing, system antenna/lens gain 33 dBi, duplexer loss 2 dB/pass, net isolation 25 dB, effective RCS (-8) dBsm 및 (\kappa=0.06)을 사용한다. (N_{d,0})는 기본적으로 LNA gain과 ZBD NEP에서 이론적으로 유도한다.
 
 ## 2. 기준면과 전력 정의
 
-모든 closed-form RF power는 LNA 입력 기준이다. GUI의 `Operating THz P_t`는 UTC-PD의 total RF output이다.
+모든 closed-form RF power는 LNA 입력 기준이다. 첫 탭은 UTC-PD 출력과 optional PA gain을 분리하고, 세 번째 탭의 `Operating THz P_t`는 그 결과인 final TX reference-plane total RF output을 사용한다.
 
 ### 2.1 Carrier power
 
@@ -35,11 +35,11 @@ m^2=10^{-\mathrm{CSPR}/10},\qquad
 P_c=\frac{P_{t,\rm tot}}{1+m^2}.
 \]
 
-CSPR (=13) dB이면 (m^2=0.05012), carrier fraction은 0.95227 또는 (-0.2124) dB이다. 따라서 total TX가 (-10) dBm이고 net isolation이 25 dB이면 이론식의 SI carrier power는 (-35.212) dBm이다.
+CSPR (=13) dB이면 (m^2=0.05012), carrier fraction은 0.95227 또는 (-0.2124) dB이다. 따라서 total TX가 0 dBm이고 net isolation이 25 dB이면 이론식의 SI carrier power는 (-25.212) dBm이다. 정확히 (-25) dBm의 carrier SI를 원하면 total TX를 약 0.212 dBm으로 두거나 (P_t)를 carrier power로 다시 정의해야 한다.
 
 ### 2.2 SI, echo, communication power
 
-(L_{\rm OMT}=10^{IL_{\rm OMT}/10})을 one-pass power loss라 하면,
+(L_{\rm dup}=10^{IL_{\rm dup}/10})을 one-pass power loss라 하면,
 
 \[
 P_{\rm SI}=P_c10^{-\mathrm{ISO}/10},
@@ -48,16 +48,16 @@ P_{\rm SI}=P_c10^{-\mathrm{ISO}/10},
 \[
 P_{\rm ec}(R)=
 \frac{P_cG_tG_r\lambda^2\sigma_{\rm eff}}
-{(4\pi)^3R^4L_{\rm OMT}^2},
+{(4\pi)^3R^4L_{\rm dup}^2},
 \]
 
 \[
 P_{\rm rx}(R)=
 \frac{P_cG_tG_c\lambda^2}
-{(4\pi)^2R^2L_{\rm OMT}^2}.
+{(4\pi)^2R^2L_{\rm dup}^2}.
 \]
 
-`Net SI isolation`은 이미 TX port에서 LNA input까지 측정된 net 값으로 정의한다. 그러므로 SI 경로에 OMT loss를 다시 더하면 중복이다. 반면 echo와 remote communication은 송신 및 수신 방향으로 OMT를 각각 한 번 통과하므로 (L_{\rm OMT}^{-2}), 즉 (2IL_{\rm OMT}) dB가 필요하다.
+`Net SI isolation`은 이미 TX port에서 LNA input까지 측정된 net 값으로 정의한다. 그러므로 SI 경로에 duplexer loss를 다시 더하면 중복이다. 반면 echo와 remote communication은 송신 및 수신 방향으로 duplexer를 각각 한 번 통과하므로 (L_{\rm dup}^{-2}), 즉 (2IL_{\rm dup}) dB가 필요하다.
 
 ## 3. Detector-output noise model
 
@@ -82,7 +82,7 @@ N_{d,0}=\eta_{nn}N^2+
 \quad [\mathrm{mW}^2]
 \]
 
-이다. 각 항은 detector-output power-product 기준이므로 (N)과 단위가 다르다.
+이다. 각 항은 detector-output power-product 기준이므로 (N)과 단위가 다르다. 즉 (N=-62.965) dBm과 (N_{d,0}=-89.009) dB(mW\(^2\))의 숫자를 직접 비교하여 detector floor가 thermal noise보다 낮다고 판단할 수 없다. 동일 단위의 (N_{d,0})와 (2NP)를 비교해야 한다.
 
 기본값 (G_{\rm LNA}=13) dB, NEP (=5\) pW/\(\sqrt{\rm Hz}\), (B=20) GHz를 사용하면
 
@@ -91,7 +91,7 @@ N_{d,0}=\eta_{nn}N^2+
 - 기본 (N_{\rm post,eq}): 무시할 수 있도록 (-300) dB(mW\(^2\))
 - 합계: (N_{d,0}=-89.009) dB(mW\(^2\))
 
-따라서 `sec2.tex` 표의 (-97.5) dB(mW\(^2\))는 NEP 5 pW/\(\sqrt{\rm Hz}\)와 동시에 성립하지 않는다. 다른 항을 그대로 두면 (-97.5) dB(mW\(^2\))에 해당하는 effective NEP는 약 1.88 pW/\(\sqrt{\rm Hz}\)이다.
+따라서 논문 표에서 (-97.5) dB(mW\(^2\))를 사용한다면 NEP 5 pW/\(\sqrt{\rm Hz}\)로 유도되는 값과 동시에 성립하지 않는다. 다른 항을 그대로 두면 (-97.5) dB(mW\(^2\))에 해당하는 effective NEP는 약 1.88 pW/\(\sqrt{\rm Hz}\)이다.
 
 두 선택 중 하나를 사용해야 한다.
 
@@ -110,6 +110,26 @@ D=N_{d,0}+2N(P_{\rm SI}+P_{\rm ec})
 여기서 (2NP)는 carrier--noise beat, (\kappa m^4P^2)는 in-band residual SSBI 근사이다. echo가 매우 약하므로 echo SSBI와 더 높은 차수의 SI--echo distortion은 생략한다.
 
 IF amplifier와 DSO 잡음은 RF (N)에 Friis 합성할 수 없다. 첫 번째 탭 파형 시뮬레이션은 이들을 ZBD 뒤에서 직접 더한다. 세 번째 탭의 ideal 그림은 기본적으로 (N_{\rm post,eq}\simeq0)으로 두므로 실제 DSO 결과보다 낙관적일 수 있다.
+
+### 3.1 C2 cable loss의 기준면
+
+`C2 Cable Loss`는 ZBD 뒤의 IF/baseband chain에 있으므로 Sec. II의 **ZBD-output ideal SINR**에는 들어가지 않는다. 주파수 비선택적인 voltage gain을 (a)라 하면 ZBD 출력의 신호와 이미 생성된 잡음은 모두 (a)배가 되어
+
+\[
+\frac{|a|^2S_d}{|a|^2N_d}=\frac{S_d}{N_d}
+\]
+
+이므로 scalar cable loss만으로 SINR은 변하지 않는다. 현재 `calc_sec2_sensing_sinr()`도 `c2_cable_loss_db`를 사용하지 않는다.
+
+반면 first-tab waveform/CFR 경로는 DSO 입력 파형을 처리한다. 이 기준면에서는
+
+\[
+\gamma_{\rm DSO}
+=\frac{|a|^2S_d}
+{|a|^2N_d+N_{\rm IF/post}+N_{\rm DSO}}
+\]
+
+이므로 cable 뒤에서 추가되는 IF/DSO 잡음, ADC quantization/clipping이 있으면 loss가 SINR을 낮출 수 있다. Cable의 주파수 응답 (A(f))이 평탄하지 않으면 CFR ripple, effective bandwidth 및 range sidelobe도 바뀐다. 이 영향은 detector-output SINR의 변화가 아니라 **후단 practical receiver SINR의 변화**다. 기존 GUI의 `C2 Detector-output SINR` 표기는 실제로 DSO-input target/noise power에서 계산되어 부정확했으므로 `C2 Practical post-proc SINR`로 변경했고, Sec. II 값은 `C2 ZBD-output ideal SINR`로 명시했다.
 
 ## 4. Full-waveform sensing model
 
@@ -140,7 +160,40 @@ w_k=\frac{|S_k|^2}{|S_k|^2+\varepsilon},\qquad
 - (G_p\): coherent time-bandwidth processing gain. 코드가 (BT\)를 상한으로 적용한다.
 - (\eta_d\): waveform spectrum과 MMSE regularization에 의한 efficiency.
 
-따라서 full-waveform 모드에서는 (\eta_dG_p)를 사용하고 (\rho)를 다시 곱하지 않는다. 단, 실측 (G_p\)를 이미 MMSE 손실까지 포함한 end-to-end 값으로 얻었다면 (\eta_d)를 또 곱하면 중복이다. 현재 GUI의 `Sensing Gp,eff`는 **waveform utilization 이전의 coherent gain**으로 해석해야 한다.
+따라서 full-waveform 모드에서는 (\eta_dG_p)를 사용하고 (\rho)를 다시 곱하지 않는다. 현재 GUI 입력은 혼동을 피하기 위해 `Coherent Gp (pre-util.)`로 표기하며, **waveform utilization 이전의 coherent gain**만 받는다. 화면과 저장 결과의 `Net Waveform Gain`은
+
+\[
+G_{\rm net,dB}=G_{p,\rm dB}+10\log_{10}\eta_d
+\]
+
+이고 legacy pilot-only 모드에서는 (\eta_d) 자리에 (\rho)가 들어간다.
+
+### 4.1 (\eta_d) 이중 계상 점검 결과
+
+현재 코드 경로에는 이중 계상이 없다.
+
+1. 첫 번째/세 번째 탭의 `Coherent Gp (pre-util.)`는 (G_p)만 저장한다.
+2. sensing numerator를 만들 때 코드가 (10\log_{10}\eta_d)를 정확히 한 번 더한다.
+3. 저장된 net gain만 복원할 때는 먼저 (10\log_{10}\eta_d)를 빼서 coherent (G_p)로 되돌린 후 다시 계산하므로 중복되지 않는다.
+4. DSO의 `Estimate Processing Gain`은 legacy Np/rho sweep을 강제하고
+
+\[
+G_{p,\rm dB}=\mathrm{SINR}_{post,\rm dB}
+-\mathrm{SINR}_{pre,\rm dB}-10\log_{10}\rho
+\]
+
+로 (\rho)를 제거한 coherent gain을 저장한다. 따라서 이 버튼으로 얻은 값을 GUI에 넣고 full-waveform (\eta_d)를 적용하는 것도 이중 계상이 아니다.
+
+기본값 (G_p=30.10) dB, (\eta_d=-7.27) dB이면 (G_{\rm net}=22.83) dB이다. 예전 그림의 약 23.1 dB는 (30.10+10\log_{10}0.2=23.11) dB인 legacy pilot-weighted gain이었으며, 별도의 end-to-end (G_p) 측정값이 아니다.
+
+주의할 예외는 사용자가 full-waveform end-to-end 측정값 (G_{\rm E2E}=\mathrm{SINR}_{post}-\mathrm{SINR}_{pre})을 `Coherent Gp (pre-util.)`에 직접 입력하는 경우다. 이때는 (\eta_d)가 중복되므로
+
+\[
+G_{p,\rm dB}=G_{\rm E2E,dB}-10\log_{10}\eta_d
+=G_{\rm E2E,dB}+7.27\ \mathrm{dB}
+\]
+
+로 변환해야 한다. 2026-07-06의 1.1 m NPZ에는 sensing reference mode와 processing-gain 정의가 저장되어 있지 않다. 다만 당시 DFT-s-OFDM 캡처에는 (\rho=0.2)와 ZC pilot이 저장되어 있고, 가장 가까운 초기 코드 이력은 range/CFR reference로 전체 TX가 아니라 (\sqrt{\rho}p(t))를 선택한다. 따라서 과거 캡처는 **full waveform을 송신했지만 sensing reference는 pilot-only였을 가능성이 매우 높다**. 새 저장 파일에는 `processing_gain_definition=coherent_before_waveform_utilization`을 명시한다.
 
 ## 5. Sensing SINR
 
@@ -156,7 +209,7 @@ w_k=\frac{|S_k|^2}{|S_k|^2+\varepsilon},\qquad
 }.
 \]
 
-legacy pilot-only 모드에서만 (\eta_d\) 대신 (\rho)가 들어간다. `Practical ceiling`은 첫/세 번째 탭의 practical range curve에 병렬 SINR ceiling으로 적용될 수 있지만, ideal Fig. 3 raw 식에는 적용하지 않는다.
+첫 번째 탭 및 measurement-matching range curve는 selected waveform의 (\eta_d), 또는 legacy pilot-only의 (\rho)를 사용한다. 반면 ideal Fig. 2/3은 이를 (\eta=1)로 치환한다. `Practical ceiling`도 ideal Fig. 2/3에는 적용하지 않는다.
 
 SI가 없으면
 
@@ -241,36 +294,46 @@ full-waveform에서는 (f_d=1), legacy 모드에서는 (f_d=1-\rho)이다. 코�
 3. carrier--noise beat 지배: numerator와 denominator가 모두 (P_{\rm SI})에 비례해 포화한다.
 4. SSBI 지배: denominator가 (P_{\rm SI}^2)이므로 약 (-1) dB/dB로 감소한다.
 
-수정된 기본값, (R_0=1.1) m와 (\sigma=-8) dBsm에서:
+Fig. 3은 ideal $\eta=1$을 사용한다. PA-on scenario, (P_{t,\rm tot}=0) dBm, (R_0=1.1) m와 (\sigma=-8) dBsm에서:
 
-- (P_{\rm ec}=-50.05) dBm
-- operating (P_{\rm SI}=-35.21) dBm
-- ideal power-ratio homodyne gain: 14.84 dB
-- no-SI SINR: 1.72 dB
-- operating sensing SINR: 15.72 dB
-- 실제 curve gain: 약 14.00 dB
+- (P_{\rm ec}=-40.25) dBm
+- operating (P_{\rm SI}=-25.21) dBm
+- ideal power-ratio homodyne gain: 15.04 dB
+- no-SI SINR: 28.30 dB
+- operating sensing SINR: 37.18 dB
+- 실제 curve gain: 약 8.88 dB
 - carrier--noise transition: 약 (-29.05) dBm
-- SSBI transition: 약 (-25.70) dBm
-- curve maximum: 약 (-25.8) dBm에서 19.91 dB
+- SSBI transition: 약 (-25.40) dBm
+- curve maximum: 약 (-25.6) dBm에서 37.18 dB
 
-operating point의 denominator 비율은 fixed floor 79.1%, carrier--noise beat 19.2%, echo--noise 0.63%, SSBI 1.00%이다. 따라서 이 기본 조건은 아직 주로 fixed-floor/noise-limited이며, (\kappa=0.069)의 SSBI가 operating point를 지배하지 않는다.
+operating point의 denominator 비율은 fixed floor 21.74%, carrier--noise beat 52.82%, echo--noise 1.65%, SSBI 23.79%이다. 따라서 이 조건에서는 carrier--noise beat가 가장 크고 fixed floor와 SSBI도 무시할 수 없다. (\kappa=0.06)의 SSBI만이 지배적이지는 않지만, 더 이상 미미한 항도 아니다.
 
-Fig. 3에 표시된 LNA (P_{1\rm dB})는 유효 범위 경계일 뿐이다. closed-form 식과 파형 시뮬레이션 모두 실제 gain compression 곡선을 계산하지 않는다. 경계를 넘은 곡선은 물리적인 예측값으로 사용하면 안 된다.
+0-dBm 조건에서는 echo self-beat가 커져 low-SI floor 자체가 높고, cross-beat가 충분히 지배하기 전에 carrier--noise와 SSBI 전이가 시작된다. 따라서 기존 (-10)-dBm 그림처럼 명확한 (+1) dB/dB linear region이 나타나지 않는 것이 식과 일치한다. 이는 계산 오류가 아니라 TX power를 올릴 때 echo와 SI가 함께 변하는 결과다.
+
+Fig. 3에 표시된 LNA (P_{1\rm dB})는 유효 범위 경계일 뿐이다. 평균 SI (-25.21) dBm은 (-20) dBm 경계보다 약 5.2 dB 낮지만, high-PAPR waveform peak는 이 여유를 소진할 수 있다. closed-form 식과 파형 시뮬레이션 모두 실제 gain compression 곡선을 계산하지 않으므로 peak compression은 별도로 측정해야 한다.
 
 ## 8. Fig. 2: ISAC range vs effective RCS
 
-기본값 (P_{t,\rm tot}=-10) dBm, CSPR 13 dB, (G_t=G_r=33) dBi, OMT 1.9 dB/pass, (N_{d,0}=-89.01) dB(mW\(^2\)), (kappa=0.069), (\sigma=-8) dBsm에서:
+Fig. 2도 ideal $\eta=1$을 사용한다. PA-off final TX 조건인 (P_{t,\rm tot}=-10) dBm에서는:
 
-- (R_{\max}^{\rm comm}=1.104) m
-- (R_{\max}^{\rm sens}\), with SI (=1.268) m
-- (R_{\max}^{\rm sens}\), without SI (=0.788) m
-- (R_{\max}^{\rm ISAC}=1.104) m
+- (P_{\rm SI}=-35.21) dBm, operating sensing SINR 22.79 dB
+- (R_{\max}^{\rm comm}=1.082) m
+- (R_{\max}^{\rm sens}\), with SI (=1.900) m
+- (R_{\max}^{\rm sens}\), without SI (=0.963) m
+- (R_{\max}^{\rm ISAC}=1.082) m
 
-이 값은 square-law communication desired power의 계수 2와 OMT two-pass loss를 모두 적용한 결과다. 계수 2를 누락한 이전 코드는 0.857 m를 표시했지만, 동일한 15-GBd simulation 조건과 OMT 2.3 dB/pass를 적용하면 corrected closed-form range는 1.102 m이며 1.1 m waveform EVM 결과와 일치한다.
+PA-on 10-dB-gain scenario, 즉 (P_{t,\rm tot}=0) dBm에서:
 
-한편 (N_{d,0}=-97.5) dB(mW\(^2\))를 독립적인 calibrated floor로 사용하면 동일한 20-GBd 기본 link의 통신 range는 약 1.46 m가 된다. 따라서 이 floor를 사용하려면 실제 receiver bandwidth와 EVM 결과에 맞춰 다른 noise 항도 함께 재보정해야 한다.
+- (R_{\max}^{\rm comm}=3.423) m
+- (R_{\max}^{\rm sens}\), with SI (=4.358) m
+- (R_{\max}^{\rm sens}\), without SI (=1.712) m
+- (R_{\max}^{\rm ISAC}=3.423) m
 
-full-waveform 모드에서는 (\rho)가 통신 및 sensing range에 영향을 주지 않는 것이 의도된 결과다. legacy pilot-only 모드에서만 communication의 (1-\rho)와 sensing의 (\rho) trade-off가 남는다.
+이 값은 square-law communication desired power의 계수 2와 duplexer two-pass loss를 모두 적용한 결과다. (-10)-dBm UTC-PD-only 조건에서 약 1.1 m였던 통신 범위가 0-dBm ideal post-PA 조건에서 약 3.42 m로 늘어나는 것은 fixed-floor 부근의 (P_t^2R^{-4}) scaling과 일치한다. 다만 이 수치는 PA와 수신기가 선형이고 추가 PA 잡음이 없다는 이상적 bound다.
+
+한편 (N_{d,0}=-97.5) dB(mW\(^2\))를 독립적인 calibrated floor로 사용하면 범위가 더 늘어난다. 이 floor를 사용하려면 실제 receiver bandwidth와 EVM 결과에 맞춰 다른 noise 항도 함께 재보정해야 하며 NEP-derived 항을 중복 추가하면 안 된다.
+
+Ideal Fig. 2/3에서는 (\rho)를 사용하지 않는다. Legacy pilot-only의 communication (1-\rho)와 sensing (\rho) trade-off는 첫 번째 탭과 measurement-matching range 분석에서만 유지한다.
 
 ## 9. 첫 번째 탭 파형 시뮬레이션
 
@@ -280,9 +343,9 @@ full-waveform 모드에서는 (\rho)가 통신 및 sensing range에 영향을 �
 
 - QAM/OFDM/DFT-s-OFDM waveform과 AWG DAC quantization
 - MZM third-order Taylor model, EO bandwidth, CSPR calibration
-- optical tones와 UTC-PD photomixing, total THz output normalization
+- optical tones와 UTC-PD photomixing, optional ideal PA 이후 total THz output normalization
 - laser linewidth와 선택적 carrier wander
-- one-way Friis 및 monostatic radar link, OMT two-pass loss
+- one-way Friis 및 monostatic radar link, duplexer two-pass loss
 - net SI isolation
 - complex LNA thermal noise와 LNA gain
 - memoryless ZBD square-law detection
@@ -292,14 +355,16 @@ full-waveform 모드에서는 (\rho)가 통신 및 sensing range에 영향을 �
 
 따라서 첫 번째 탭의 `Comm. SINR (= -EVM)`과 세 번째 탭의 closed-form communication SINR는 같은 물리량을 목표로 하지만 같은 계산은 아니다. 첫 번째 탭은 waveform realization과 DSP를 포함하고, Fig. 2는 ideal detector-output bound를 사용한다.
 
+20-GBd, 1.1-m deterministic check에서 PA off는 EVM (-16.29) dB, waveform-$\eta$ 적용 detector SINR 15.51 dB, practical SINR 9.32 dB, CFR target/floor 17.41 dB를 냈다. 같은 UTC-PD 출력에 10-dB PA를 켠 0-dBm scenario는 EVM (-25.99) dB, waveform-$\eta$ 적용 detector SINR 29.906 dB, practical SINR 27.58 dB, CFR target/floor 33.42 dB를 냈다. 반면 PA-on Fig. 3 ideal 식은 $\eta=1$이므로 37.178 dB다. 두 값의 약 7.27-dB 차이는 DFT-s-OFDM MMSE utilization이며 의도적인 simulation/theory 구분이다.
+
 ### 9.2 주의할 차이
 
-1. **C2 detector-output SINR와 CFR contrast는 다른 metric이다.** 전자는 분리한 target band power와 receiver-noise power에 (\eta_dG_p)를 적용한 phase-averaged link metric이다. 후자는 실제 range profile의 peak-to-floor 또는 peak-to-sidelobe contrast다. 둘이 같은 dB가 될 필요가 없다.
+1. **C2 ZBD-output ideal SINR, DSO-input practical SINR, CFR contrast는 서로 다른 metric이다.** 첫 번째는 Sec. II detector-output power-product 식이고 post-detector cable loss와 무관하다. 두 번째는 DSO 입력에서 분리한 target/noise power에 (\eta_dG_p)를 적용하므로 후단 고정 잡음이 있으면 cable loss의 영향을 받는다. 세 번째는 실제 range profile의 peak-to-floor 또는 peak-to-sidelobe contrast다. 세 값이 같은 dB가 될 필요가 없다.
 2. **Cross-beat carrier phase를 평균한다.** single capture에서는 SI--echo 상대 위상에 따라 target power가 변할 수 있다. phase-averaged 값은 range law를 검증하기 위한 envelope이지 한 번의 DSO trace를 그대로 예측하는 값이 아니다.
 3. **Communication DSP가 낙관적이다.** 저장된 TX data를 알고 있고 여러 timing lag 중 최적 NMSE를 선택한다. 이는 oracle/offline equalization에 가깝다. 실제 remote receiver에는 별도 preamble/DMRS, synchronization overhead와 estimation error가 필요하다.
 4. **CFR processing grid가 완전히 동일하지 않다.** DSO full-waveform CFR은 complete DFT-s-OFDM block에 rectangular FFT를 사용하지만, 첫 번째 탭의 표시용 CFR profile은 whole-record Hann FFT를 사용한다. 따라서 이론 (\eta_d), DSO CFR, simulation CFR의 sidelobe와 deep-null noise enhancement가 정확히 같지 않다.
 5. **DSO ADC clipping/quantization은 미구현이다.** AWG quantization과 DSO analog noise는 있지만, DSO full-scale clipping 및 ENOB quantization은 직접 적용하지 않는다.
-6. **LNA/ZBD compression은 미구현이다.** (P_{1\rm dB})는 이론 그림의 경계선일 뿐이며 시뮬레이션 LNA는 선형이다.
+6. **THz PA와 LNA/ZBD compression은 미구현이다.** PA는 requested post-PA output으로 이상적으로 정규화되며 AM-AM/AM-PM, added noise/phase noise와 spectral regrowth가 없다. (P_{1\rm dB})는 이론 그림의 경계선일 뿐이며 시뮬레이션 LNA는 선형이다.
 
 ## 10. SI-referenced CFR의 중요한 가정
 
@@ -311,7 +376,7 @@ H(f)/\overline H_{\rm SI}-1
 
 을 계산한다. 이는 common scalar gain/phase는 제거하지만 frequency-dependent (A(f))는 제거하지 못한다.
 
-따라서 `sec2.tex`의 다음 주장은 현재 single-capture 코드만으로는 일반적으로 성립하지 않는다.
+따라서 논문 원고에 다음 주장을 쓸 경우 현재 single-capture 코드만으로는 일반적으로 성립하지 않는다.
 
 - band averaging만으로 (H_{\rm SI}(f)=A(f)e^{j\phi}\sqrt{P_{\rm SI}}) 전체를 얻는다는 주장
 - frequency-selective (A(f))의 group delay까지 완전히 제거해 absolute range를 얻는다는 주장
@@ -324,7 +389,7 @@ H(f)/\overline H_{\rm SI}-1
 
 현재 DSO 코드의 differential CFR/zero-reference 경로는 두 번째 방법을 지원한다. 신뢰도 높은 absolute range에는 absorber target-off reference를 사용하는 것이 가장 안전하다.
 
-## 11. `sec2.tex`와 코드의 불일치
+## 11. 논문 원고 반영 체크리스트
 
 논문을 최신 코드에 맞추려면 다음을 수정해야 한다.
 
@@ -333,7 +398,7 @@ H(f)/\overline H_{\rm SI}-1
 3. communication 식의 (1-\rho)를 full-waveform 기본식에서 제거한다.
 4. unregularized (Y/S) 대신 MMSE (YS^*/(|S|^2+\varepsilon))를 기술한다.
 5. (P_t)가 total인지 carrier인지 명시한다. total이면 (P_c=P_t/(1+m^2)) 변환이 필요하다.
-6. echo와 communication Friis 식에 OMT two-pass loss를 넣거나, (P_t)를 post-OMT power로 다시 정의한다.
+6. echo와 communication Friis 식에 duplexer two-pass loss를 넣거나, (P_t)를 post-duplexer power로 다시 정의한다.
 7. sensing denominator에 코드가 포함하는 (2NP_{\rm ec})를 추가하거나 weak-echo 생략임을 명시한다.
 8. (N_{d,0}=-97.5) dB(mW\(^2\))와 NEP 기반 (-89.0) dB(mW\(^2\)) 중 하나를 선택하고 산출 근거를 표에 적는다.
 9. scalar SI normalization으로 제거 가능한 것은 common scalar phase/gain뿐임을 명시하고, (A(f)) 제거에는 target-off calibration이 필요하다고 수정한다.
@@ -343,16 +408,17 @@ H(f)/\overline H_{\rm SI}-1
 
 | 항목 | 현재 처리 | 영향/권고 |
 |---|---|---|
-| (\kappa) | C1/C2에 같은 0.069 사용 | waveform, filter, branch별로 (\kappa_{\rm comm},\kappa_{\rm sens})를 별도 측정하는 것이 정확함 |
+| (\kappa) | C1/C2에 같은 0.06 사용 | waveform, filter, branch별로 (\kappa_{\rm comm},\kappa_{\rm sens})를 별도 측정하는 것이 정확함 |
 | noise--noise overlap | (\eta_{nn}=1) | detector/IF bandwidth convolution에 따른 계수이므로 보수적 상한에 가까움 |
 | (N_{\rm post,eq}) | ideal figure에서 사실상 0 | IF amp/DSO를 포함하는 practical curve에는 별도 calibration 필요 |
 | RCS | direct scalar (\sigma_{\rm eff}) | aspect, polarization, coherent structural/antenna-mode phase를 포함하지 않음 |
 | multipath/clutter | ideal figure에 없음 | target-off 및 여러 range background 측정 필요 |
 | atmospheric absorption | 없음 | 1 m에서는 대체로 작지만 정확한 280-GHz link budget에는 습도 기반 흡수 추가 가능 |
-| antenna/OMT frequency response | scalar gain/loss | 20-GHz-wide CFR의 group delay와 ripple에는 measured S-parameter가 필요 |
+| antenna/duplexer frequency response | scalar gain/loss | 20-GHz-wide CFR의 group delay와 ripple에는 measured S-parameter가 필요 |
 | LNA/ZBD nonlinearity | 경계만 표시 | high-SI curve에는 measured AM/AM 또는 compression model 필요 |
 | phase noise | simulation에 Wiener model | 실제 common/non-common laser 구성 및 measured linewidth로 검증 필요 |
 | ordinary comm training | oracle TX reference 사용 | full-waveform sensing과 별개로 remote comm preamble overhead 필요 |
+| THz PA | ideal post-PA power scaling | AM-AM/AM-PM, added noise/phase noise, PAPR와 spectral regrowth 측정 필요 |
 
 ## 13. 자동 검증 항목
 
@@ -360,11 +426,11 @@ H(f)/\overline H_{\rm SI}-1
 
 - first-tab Sec. II metric과 third-tab SI curve의 동일 조건 일치
 - communication square-law desired term의 계수 (2m^2P_{\rm rx}^2)
-- OMT loss 1 dB/pass 증가 시 echo 및 communication coefficient가 각각 2 dB 감소
-- net SI power에는 OMT loss가 중복 적용되지 않음
+- duplexer loss 1 dB/pass 증가 시 echo 및 communication coefficient가 각각 2 dB 감소
+- net SI power에는 duplexer loss가 중복 적용되지 않음
 - IF amplifier NF 변화가 LNA-input RF (N)을 바꾸지 않음
 - full-waveform range가 legacy (\rho)와 무관함
-- legacy mode의 (\rho/(1-\rho)) trade-off 유지
+- ideal Fig. 2/3의 (\eta=1) 및 (\rho) 불변성
 - sensing range의 (\sigma^{1/4}) scaling
 - processing gain이 sensing range에만 작용함
 - symbol rate에 대해 (N\propto B), (N^2\propto B^2), NEP term (\propto B)
