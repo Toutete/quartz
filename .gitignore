@@ -21,3 +21,12 @@ quartz/cli/tui/dist/
 *.hdf5
 *.mat
 *.pkl
+
+# FSO AI receiver generated artifacts
+content/Home/projects/FSO_Link/code/_ai_pd_verify*/
+content/Home/projects/FSO_Link/code/ai_pd_data/
+content/Home/projects/FSO_Link/code/ai_pd_runs/
+content/Home/projects/FSO_Link/code/*.pt
+content/Home/projects/FSO_Link/code/*.onnx
+content/Home/projects/FSO_Link/code/*.npy
+content/Home/projects/FSO_Link/code/*.npz
