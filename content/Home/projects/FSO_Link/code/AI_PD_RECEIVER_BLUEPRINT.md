@@ -94,3 +94,26 @@ Run prediction from measured/simulated traces:
 - The final combiner coefficients can be represented as unsigned Q1.15 values.
 - Start with host-side AI inference and FPGA-side weighted combining. Move inference onto FPGA only after validating latency and accuracy.
 
+## PINN + Zernike Extension
+
+The first milestone should remain `PD power window -> future power/combining
+weights`, because that is the most direct path to FPGA validation. A more
+physics-aware model can be added after the baseline is stable:
+
+1. Save received aperture phase from the split-step simulator.
+2. Fit low-order Zernike coefficients with `zernike_tools.py`.
+3. Add a Zernike auxiliary head to the CNN.
+4. Add weak physics losses from `physics_losses.py`, such as total-power
+   consistency and temporal smoothness of combining weights.
+
+Recommended main target:
+
+```text
+PD power window -> combining weights
+```
+
+Recommended auxiliary targets:
+
+```text
+log10(Cn2), range, wind speed, beam waist, r0, Rytov variance, low-order Zernike coefficients
+```
