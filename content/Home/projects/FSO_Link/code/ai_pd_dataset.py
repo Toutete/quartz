@@ -4,21 +4,22 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy.constants import pi
 
-from fso_engine import Receiver_Array, SSFM_Channel
+from colleague_multi_pd_link import ColleagueMultiPDConfig, simulate_colleague_multi_pd_sequence
 
 
 @dataclass
 class DatasetConfig:
     rows: int = 2
     cols: int = 4
-    spacing_mm: float = 20.0
+    spacing_mm: float = 1.0
     origin_x_mm: float = 0.0
     origin_y_mm: float = 0.0
-    lens_radius_mm: float = 20.0
-    pd_active_radius_um: float = 30.0
-    focal_len_mm: float = 50.0
+    lens_radius_mm: float = 25.0
+    beam_reducer_ratio: float = 10.0
+    pd_active_radius_um: float = 250.0
+    microlens_enabled: bool = False
+    microlens_efficiency: float = 0.85
     time_window: int = 12
     horizon: int = 1
     frames: int = 24
@@ -26,32 +27,18 @@ class DatasetConfig:
     n_screens: int = 5
     wavelength_nm: float = 1550.0
     tx_power_dbm: float = 10.0
-    pupil_full_width_cm: float = 120.0
     cn2_log10_min: float = -16.0
     cn2_log10_max: float = -13.5
     distance_min_m: float = 400.0
     distance_max_m: float = 2000.0
     wind_min_m_s: float = 1.0
     wind_max_m_s: float = 40.0
-    w0_min_mm: float = 1.0
-    w0_max_mm: float = 30.0
+    w0_min_mm: float = 20.0
+    w0_max_mm: float = 55.0
     l0_m: float = 0.005
     L0_m: float = 50.0
     delta_t_s: float = 0.5e-3
     noise_std_db: float = 0.15
-
-
-def pd_grid_positions(rows, cols, spacing_mm, origin_x_mm=0.0, origin_y_mm=0.0):
-    spacing_m = spacing_mm / 1000.0
-    x0_m = origin_x_mm / 1000.0
-    y0_m = origin_y_mm / 1000.0
-    x_offset = (cols - 1) * spacing_m * 0.5
-    y_offset = (rows - 1) * spacing_m * 0.5
-    coords = []
-    for r in range(rows):
-        for c in range(cols):
-            coords.append((x0_m + c * spacing_m - x_offset, y0_m + r * spacing_m - y_offset))
-    return coords
 
 
 def sample_physics(rng, cfg):
@@ -69,63 +56,39 @@ def sample_physics(rng, cfg):
     }
 
 
-def simulation_width_m(physics, cfg):
-    lam = cfg.wavelength_nm * 1e-9
-    w0 = physics["w0_m"]
-    L = physics["L"]
-    beam_spot = w0 * np.sqrt(1.0 + (lam * L / (pi * w0**2)) ** 2)
-    k0 = 2.0 * pi / lam
-    rho0 = (0.423 * (k0**2) * physics["Cn2"] * L) ** (-0.6)
-    turb_spread = L * lam / rho0
-    return max(cfg.pupil_full_width_cm / 100.0, 4.0 * np.sqrt(beam_spot**2 + turb_spread**2))
-
-
 def simulate_pd_traces(physics, cfg):
-    lam = cfg.wavelength_nm * 1e-9
-    d_obs = simulation_width_m(physics, cfg)
-    params = {
-        "N_screens": cfg.n_screens,
-        "lam": lam,
-        "w0": physics["w0_m"],
-        "l0": cfg.l0_m,
-        "L0": cfg.L0_m,
-        "L": physics["L"],
-        "Cn2": physics["Cn2"],
-        "wind_speed": physics["wind_speed"],
-        "D_obs": d_obs,
-        "delta_t": cfg.delta_t_s,
-        "n_frames": cfg.frames,
-        "N": cfg.grid_n,
-    }
-    channel = SSFM_Channel(params)
-    fields, x_arr, r0_total, _rytov_dz = channel.generate_spatiotemporal_beams()
-
-    dx = d_obs / cfg.grid_n
-    tx_power_w = 10 ** ((cfg.tx_power_dbm - 30.0) / 10.0)
-    frame_power = np.sum(np.abs(fields) ** 2, axis=(0, 1)) * (dx**2) + 1e-30
-    fields_watt = fields * np.sqrt(tx_power_w / frame_power)[None, None, :]
-
-    pd_positions = pd_grid_positions(cfg.rows, cfg.cols, cfg.spacing_mm, cfg.origin_x_mm, cfg.origin_y_mm)
-    receiver = Receiver_Array(
-        pd_positions,
-        cfg.lens_radius_mm / 1000.0,
-        cfg.pd_active_radius_um * 1e-6,
-        cfg.focal_len_mm / 1000.0,
-        x_arr,
-        lam,
+    grid_mode = "small" if cfg.grid_n <= 256 else "medium" if cfg.grid_n <= 384 else "large"
+    sim_cfg = ColleagueMultiPDConfig(
+        hv57_ground_cn2_A=physics["Cn2"],
+        wavelength_m=cfg.wavelength_nm * 1e-9,
+        link_distance_m=physics["L"],
+        tx_beam_waist_ratio=physics["w0_m"] / 0.06,
+        outer_scale_m=cfg.L0_m,
+        inner_scale_m=cfg.l0_m,
+        n_screens=cfg.n_screens,
+        grid_mode=grid_mode,
+        n_time_frames=cfg.frames,
+        frame_interval_s=cfg.delta_t_s,
+        wind_speed_mps=physics["wind_speed"],
+        tx_power_dbm=cfg.tx_power_dbm,
+        rx_lens_diameter_m=2.0 * cfg.lens_radius_mm * 1e-3,
+        beam_reducer_ratio=cfg.beam_reducer_ratio,
+        pd_rows=cfg.rows,
+        pd_cols=cfg.cols,
+        pd_spacing_m=cfg.spacing_mm * 1e-3,
+        pd_radius_m=cfg.pd_active_radius_um * 1e-6,
+        microlens_enabled=cfg.microlens_enabled,
+        microlens_efficiency=cfg.microlens_efficiency,
+        cnn_epochs=0,
     )
-    _norm, _combined, traces_abs, _combined_abs = receiver.compute_focal_coupling(
-        fields_watt, normalize=True, return_absolute=True
-    )
-    traces = np.asarray(traces_abs, dtype=np.float64).reshape(cfg.rows, cfg.cols, cfg.frames)
-    k0 = 2.0 * pi / lam
-    rytov_total = 1.23 * physics["Cn2"] * (k0 ** (7.0 / 6.0)) * (physics["L"] ** (11.0 / 6.0))
+    result = simulate_colleague_multi_pd_sequence(sim_cfg)
+    traces = result["pd_rx_power_w"].T.reshape(cfg.rows, cfg.cols, cfg.frames)
     return traces, {
-        "r0_m": float(r0_total),
-        "rytov_total": float(rytov_total),
-        "d_obs_m": float(d_obs),
-        "dx_m": float(dx),
-        "engine_px_per_w0": float(getattr(channel, "px_per_w0", np.nan)),
+        "r0_m": float(result["r0_m"]),
+        "rytov_total": float(result["rytov_variance"]),
+        "d_obs_m": float(result["coords_receiver"][-1] - result["coords_receiver"][0]),
+        "dx_m": float(result["dx_receiver"]),
+        "engine_px_per_w0": float(physics["w0_m"] / result["bpm_dx_m"]),
     }
 
 

@@ -1,163 +1,110 @@
-# AI-Assisted Multi-Aperture PD Receiver Blueprint
+# Colleague FSO Multi-PD Receiver
 
-## Goal
+## Purpose
 
-Build a ground-satellite FSO receiver that reduces turbulence-induced fading by placing multiple photodiodes in the receiver pupil/focal geometry, digitizing each PD as an independent FPGA channel, and using a CNN predictor to assign adaptive combining weights.
+This folder contains one FSO simulation path. The optical propagation engine is
+the locally installed colleague simulator under `external/FSO-simulator`; the
+former standalone SSFM GUIs and simplified channel engine have been removed.
 
-## Signal Chain
-
-1. Optical front-end
-   - Receiver aperture or lens array collects the distorted wavefront.
-   - PDs are placed at predefined spatial coordinates.
-   - Each PD produces one electrical channel.
-
-2. FPGA/DSP front-end
-   - Per-channel TIA/ADC samples are aligned in time.
-   - DC removal, gain calibration, and optional matched filtering are applied.
-   - A short window of recent channel powers is formed:
-     `(time_window, pd_rows, pd_cols)`.
-
-3. AI estimator
-   - CNN input: log-normalized recent PD powers.
-   - Output A: next-step/future PD power map.
-   - Output B: physical state estimate such as `log10(Cn2)`, range, wind speed, beam waist, `r0`, and Rytov variance.
-
-4. Adaptive combiner
-   - Predicted future powers are converted to nonnegative weights.
-   - FPGA applies Q1.15 fixed-point weights to PD channels.
-   - Baseline rule is MRC-like weighting:
-     `w_i = P_i_hat / sum(P_hat)`.
-
-## Training Stage
-
-1. Generate many simulated turbulence cases.
-   - Randomize `Cn2`, range, wind speed, waist, and phase-screen seeds.
-   - Use the current `fso_engine.py` first.
-   - Later replace the simulator boundary with HCIPy/AOtools/LightPipes if higher fidelity is needed.
-
-2. Save supervised samples.
-   - Input: recent PD power window.
-   - Label 1: future PD power map.
-   - Label 2: optimal combining weight map.
-   - Label 3: physical parameters.
-
-3. Train CNN.
-   - Loss = future-power MSE + weight-map MSE + physical-parameter MSE.
-   - The saved checkpoint includes normalization statistics.
-
-## Prediction Stage
-
-1. FPGA or host accumulates the latest PD power window.
-2. CNN predicts future channel powers and turbulence state.
-3. Predicted powers are normalized into weights.
-4. Weights are quantized to Q1.15 for FPGA DSP.
-5. Weighted channels are summed.
-
-## Commands
-
-Install AI dependencies:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-ai.txt
-```
-
-Generate a small dataset:
-
-```powershell
-.\.venv\Scripts\python.exe .\ai_pd_dataset.py --out ai_pd_data --num-sims 20 --grid-n 256
-```
-
-Train:
-
-```powershell
-.\.venv\Scripts\python.exe .\train_ai_pd.py --data ai_pd_data --epochs 30
-```
-
-Export for FPGA toolchains:
-
-```powershell
-.\.venv\Scripts\python.exe .\export_ai_pd_onnx.py --checkpoint ai_pd_runs\best_ai_pd.pt
-```
-
-Run prediction from measured/simulated traces:
-
-```powershell
-.\.venv\Scripts\python.exe .\predict_ai_pd_weights.py --checkpoint ai_pd_runs\best_ai_pd.pt --input traces.npy
-```
-
-`traces.npy` shape must be `(pd_rows, pd_cols, frames)`.
-
-Launch the integrated simulation/training GUI:
-
-```powershell
-.\run_fso_ai_training_gui.ps1
-```
-
-The GUI visualizes one SSFM run, the pupil-plane power/phase maps, PD placement,
-PD power traces, CNN training progress, SNR-proxy improvement, and the predicted
-combining weights.
-
-Launch the colleague-simulator-based Multi-PD link/ADC/CNN evaluation GUI:
-
-```powershell
-.\run_multi_pd_link_gui.ps1
-```
-
-This GUI is for feasibility testing before FPGA implementation. The default
-case is a single 800 m FSO link at one user-selected `Cn2`, not a `Cn2` sweep.
-For short links it uses the colleague FSO simulator's BPM path to generate a
-time sequence at the receive plane, applies a configurable receive lens and
-beam reducer, maps the reduced beam onto a configurable Multi-PD array, converts
-each PD optical power trace into photocurrent, applies per-channel ADC
-quantization, and trains a temporal CNN to predict the next PD intensity/power
-pattern. The predicted pattern is converted into combining weights and compared
-against single-PD, selection, EGC, and oracle MRC with EVM, BER, outage
-probability, required fade margin, and average received power. Runtime errors
-are shown in the GUI Log tab rather than as pop-up dialogs.
-
-The colleague FSO simulator can be installed locally under:
+The integrated receiver evaluates this chain:
 
 ```text
-code/external/FSO-simulator
+colleague von Karman phase screens + split-step BPM
+    -> receiver-plane optical intensity
+    -> circular receiver-lens aperture
+    -> power-preserving beam reduction
+    -> Multi-PD or PD-array collection
+    -> responsivity, current noise, and per-channel ADC
+    -> temporal CNN next-frame prediction
+    -> digital combining
+    -> SNR, EVM, BER, outage probability, and fade margin
 ```
 
-Install or update it with:
+## Time-Domain Physics
+
+One set of colleague von Karman phase screens is generated for each run. The
+screens are shifted between frames according to the configured wind speed,
+wind direction, and frame interval. This is a discrete-grid Taylor frozen-flow
+model, so adjacent frames are physically correlated rather than independent
+random-seed realizations.
+
+The GUI reports Fried parameter, Greenwood frequency, Rytov variance, Strehl
+ratio, aperture capture, scintillation index, lag-one temporal correlation, and
+split-step power-conservation error.
+
+## Receiver Optics
+
+The first GUI tab shows two synchronized optical planes for the selected time
+frame:
+
+1. Receiver-plane intensity before aperture clipping. The receiver lens is a
+   green dashed circle.
+2. The power-preserving reduced plane after clipping and demagnification. The
+   reduced pupil is a green dashed circle and each PD active area is a cyan
+   dashed circle.
+
+When the microlens option is enabled, dotted square collection cells show the
+area redirected to each PD. Microlens efficiency is limited to 0 through 1, so
+the model cannot create optical power.
+
+## CNN and Combining
+
+The temporal CNN receives per-PD power reconstructed from quantized ADC
+currents, not ideal simulator power. It predicts the next normalized PD power
+map and derives nonnegative combining weights from that map.
+
+The training objective contains:
+
+- next-frame log-power error;
+- an electrical-SNR proxy based on the predicted weights; and
+- a total-power consistency term.
+
+The communication comparison includes a center PD, selection combining, EGC,
+oracle MRC, and the predictive CNN. Electrical SNR includes detector NEP,
+configured current noise, shot noise, and ADC quantization noise. BER uses the
+standard Gray-coded square M-QAM approximation.
+
+`Additional optical loss` represents losses not contained in the normalized
+wave-optics propagation, such as lens transmission, filter loss, coupling loss,
+and deliberate attenuation before the TIA. Its default is 30 dB so the 37 dBm,
+800 m example does not immediately saturate the default 50 uA ADC range.
+
+## Install and Run
+
+Install or update the colleague simulator:
 
 ```powershell
 .\install_colleague_fso_simulator.ps1
 ```
 
-The Multi-PD GUI detects that folder and can open the colleague baseline GUI
-from the same screen. The external simulator folder is ignored by git because it
-is a local dependency checkout, not source owned by this project.
+Install Python dependencies:
 
-## FPGA Notes
-
-- Keep the first model small. The included CNN uses depthwise separable convolutions and fixed output sizes.
-- Export ONNX, then quantize with the FPGA vendor flow or convert weights manually.
-- The final combiner coefficients can be represented as unsigned Q1.15 values.
-- Start with host-side AI inference and FPGA-side weighted combining. Move inference onto FPGA only after validating latency and accuracy.
-
-## PINN + Zernike Extension
-
-The first milestone should remain `PD power window -> future power/combining
-weights`, because that is the most direct path to FPGA validation. A more
-physics-aware model can be added after the baseline is stable:
-
-1. Save received aperture phase from the split-step simulator.
-2. Fit low-order Zernike coefficients with `zernike_tools.py`.
-3. Add a Zernike auxiliary head to the CNN.
-4. Add weak physics losses from `physics_losses.py`, such as total-power
-   consistency and temporal smoothness of combining weights.
-
-Recommended main target:
-
-```text
-PD power window -> combining weights
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-ai.txt
 ```
 
-Recommended auxiliary targets:
+Run the single integrated GUI:
 
-```text
-log10(Cn2), range, wind speed, beam waist, r0, Rytov variance, low-order Zernike coefficients
+```powershell
+.\run_multi_pd_link_gui.ps1
 ```
+
+The default experiment is an 800 m link at one selected `Cn2`. Use the frame
+slider or Play control to inspect the synchronized receiver plane, reduced
+plane, PD map, and PD power traces.
+
+## Offline Dataset and FPGA Export
+
+`ai_pd_dataset.py` now calls the same colleague-based physical engine used by
+the GUI. The remaining offline flow is:
+
+```powershell
+.\.venv\Scripts\python.exe .\ai_pd_dataset.py --out ai_pd_data --num-sims 20
+.\.venv\Scripts\python.exe .\train_ai_pd.py --data ai_pd_data --epochs 30
+.\.venv\Scripts\python.exe .\eval_ai_pd.py --data ai_pd_data --checkpoint ai_pd_runs\best_ai_pd.pt
+.\.venv\Scripts\python.exe .\export_ai_pd_onnx.py --checkpoint ai_pd_runs\best_ai_pd.pt
+```
+
+For FPGA deployment, start with Q1.15 combining weights and host-side inference.
+Move the compact CNN into the FPGA only after the optical and communication
+metrics are validated against measured PD traces.

@@ -24,7 +24,10 @@ quartz/cli/tui/dist/
 
 # FSO AI receiver generated artifacts
 content/Home/projects/FSO_Link/code/_ai_pd_verify*/
+content/Home/projects/FSO_Link/code/_gui_smoke_data/
 content/Home/projects/FSO_Link/code/ai_pd_data/
+content/Home/projects/FSO_Link/code/ai_pd_data_test/
+content/Home/projects/FSO_Link/code/ai_pd_gui_runs/
 content/Home/projects/FSO_Link/code/ai_pd_runs/
 content/Home/projects/FSO_Link/code/*.pt
 content/Home/projects/FSO_Link/code/*.onnx

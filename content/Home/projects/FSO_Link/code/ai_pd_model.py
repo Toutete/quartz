@@ -56,7 +56,9 @@ class AIPDNet(nn.Module):
 
 
 def weights_from_power_log(power_log, temperature=1.0):
-    """Differentiable normalized combiner weights from predicted log power."""
+    """Convert predicted log10 power to normalized, nonnegative weights."""
     b = power_log.shape[0]
-    flat = power_log.reshape(b, -1) / max(float(temperature), 1e-6)
-    return torch.softmax(flat, dim=1).reshape_as(power_log)
+    flat_log10 = power_log.reshape(b, -1) / max(float(temperature), 1e-6)
+    flat_power = torch.pow(10.0, torch.clamp(flat_log10, -12.0, 12.0))
+    weights = flat_power / torch.clamp(flat_power.sum(dim=1, keepdim=True), min=1e-12)
+    return weights.reshape_as(power_log)

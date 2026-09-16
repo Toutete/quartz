@@ -1,1 +1,3 @@
-.\.venv\Scripts\python.exe .\multi_pd_link_gui.py
+$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $PSScriptRoot
+& ".\.venv\Scripts\python.exe" ".\multi_pd_link_gui.py"
