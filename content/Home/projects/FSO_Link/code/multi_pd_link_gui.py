@@ -115,9 +115,9 @@ class MultiPDLinkGUI:
 
         btns = ttk.Frame(self.side)
         btns.pack(fill=tk.X, pady=(8, 4))
-        self.run_btn = ttk.Button(btns, text="Run FSO + Multi-PD + CNN", command=self.run)
+        self.run_btn = ttk.Button(btns, text="Run", command=self.run)
         self.run_btn.pack(fill=tk.X, ipady=4)
-        ttk.Button(btns, text="Open Colleague Baseline GUI", command=self.open_external_gui).pack(fill=tk.X, pady=3)
+        ttk.Button(btns, text="Open Original Simulator (separate)", command=self.open_external_gui).pack(fill=tk.X, pady=3)
         ttk.Button(btns, text="Export Metrics CSV", command=self.export_metrics).pack(fill=tk.X)
 
         self.progress = ttk.Progressbar(self.side, mode="indeterminate")
@@ -147,8 +147,10 @@ class MultiPDLinkGUI:
         self.notebook.add(self.tab_log, text="Log")
 
         self.fig_plane = Figure(figsize=(10.8, 7.0), dpi=100)
-        self.ax_plane = self.fig_plane.add_subplot(1, 2, 1)
-        self.ax_heat = self.fig_plane.add_subplot(1, 2, 2)
+        self.ax_rx_plane = self.fig_plane.add_subplot(2, 2, 1)
+        self.ax_plane = self.fig_plane.add_subplot(2, 2, 3)
+        self.ax_heat = self.fig_plane.add_subplot(2, 2, 2)
+        self.ax_pd_trace = self.fig_plane.add_subplot(2, 2, 4)
         self.canvas_plane = FigureCanvasTkAgg(self.fig_plane, master=self.tab_plane)
         self.canvas_plane.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -239,8 +241,10 @@ class MultiPDLinkGUI:
 
     def _draw_empty(self):
         for ax in [
+            self.ax_rx_plane,
             self.ax_plane,
             self.ax_heat,
+            self.ax_pd_trace,
             self.ax_current,
             self.ax_codes,
             self.ax_evm,
@@ -344,24 +348,56 @@ class MultiPDLinkGUI:
     def _plot_plane(self):
         r = self.result
         self.fig_plane.clear()
-        self.ax_plane = self.fig_plane.add_subplot(1, 2, 1)
-        self.ax_heat = self.fig_plane.add_subplot(1, 2, 2)
+        self.ax_rx_plane = self.fig_plane.add_subplot(2, 2, 1)
+        self.ax_heat = self.fig_plane.add_subplot(2, 2, 2)
+        self.ax_plane = self.fig_plane.add_subplot(2, 2, 3)
+        self.ax_pd_trace = self.fig_plane.add_subplot(2, 2, 4)
+
+        rx_seq = r["receiver_intensity_seq"]
         intensity_seq = r["intensity_seq"]
-        x = r["coords_out"] * 100.0
+        x_rx = r["coords_receiver"] * 1e3
+        x = r["coords_out"] * 1e3
         power = r["pd_power"].T
         frame = intensity_seq.shape[0] // 2
+        rx_intensity = rx_seq[frame]
         intensity = intensity_seq[frame]
+        extent_rx = [x_rx[0], x_rx[-1], x_rx[0], x_rx[-1]]
         extent = [x[0], x[-1], x[0], x[-1]]
+
+        self.ax_rx_plane.clear()
+        im_rx = self.ax_rx_plane.imshow(rx_intensity, extent=extent_rx, origin="lower", cmap="magma")
+        lens_r_mm = r["rx_lens_radius_m"] * 1e3
+        self.ax_rx_plane.add_patch(
+            Circle((0.0, 0.0), lens_r_mm, fill=False, ec="lime", lw=1.5, ls="--")
+        )
+        self.ax_rx_plane.set_title("Receiver Plane Optical Intensity")
+        self.ax_rx_plane.set_xlabel("x (mm)")
+        self.ax_rx_plane.set_ylabel("y (mm)")
+        self.ax_rx_plane.set_aspect("equal", adjustable="box")
+        rx_zoom = min(max(lens_r_mm * 2.5, 10.0), max(abs(x_rx[0]), abs(x_rx[-1])))
+        self.ax_rx_plane.set_xlim(-rx_zoom, rx_zoom)
+        self.ax_rx_plane.set_ylim(-rx_zoom, rx_zoom)
+        self.fig_plane.colorbar(im_rx, ax=self.ax_rx_plane, fraction=0.046, pad=0.04)
 
         self.ax_plane.clear()
         im = self.ax_plane.imshow(intensity, extent=extent, origin="lower", cmap="magma")
+        self.ax_plane.add_patch(
+            Circle((0.0, 0.0), lens_r_mm / r["beam_reducer_ratio"], fill=False, ec="lime", lw=1.5, ls="--")
+        )
         for idx, (px, py) in enumerate(r["pd_positions"]):
-            circ = Circle((px * 100.0, py * 100.0), r["cfg"].pd_radius_m * 100.0, fill=False, ec="cyan", lw=1.2)
+            circ = Circle((px * 1e3, py * 1e3), r["cfg"].pd_radius_m * 1e3, fill=False, ec="cyan", lw=1.2, ls="--")
             self.ax_plane.add_patch(circ)
-            self.ax_plane.text(px * 100.0, py * 100.0, str(idx), color="white", ha="center", va="center", fontsize=8)
-        self.ax_plane.set_title("Reduced Beam Plane Intensity + PD Array")
-        self.ax_plane.set_xlabel("x (cm)")
-        self.ax_plane.set_ylabel("y (cm)")
+        self.ax_plane.set_title("After Beam Reducer + PD Array")
+        self.ax_plane.set_xlabel("x (mm)")
+        self.ax_plane.set_ylabel("y (mm)")
+        self.ax_plane.set_aspect("equal", adjustable="box")
+        pd_extent_mm = max(
+            r["rx_lens_radius_m"] * 1e3 / r["beam_reducer_ratio"],
+            max(max(abs(px), abs(py)) for px, py in r["pd_positions"]) * 1e3 + r["cfg"].pd_radius_m * 1e3,
+        )
+        pd_zoom = min(max(pd_extent_mm * 1.35, 1.0), max(abs(x[0]), abs(x[-1])))
+        self.ax_plane.set_xlim(-pd_zoom, pd_zoom)
+        self.ax_plane.set_ylim(-pd_zoom, pd_zoom)
         self.fig_plane.colorbar(im, ax=self.ax_plane, fraction=0.046, pad=0.04)
 
         self.ax_heat.clear()
@@ -374,6 +410,16 @@ class MultiPDLinkGUI:
         self.ax_heat.set_xlabel("PD column")
         self.ax_heat.set_ylabel("PD row")
         self.fig_plane.colorbar(hm, ax=self.ax_heat, fraction=0.046, pad=0.04)
+
+        self.ax_pd_trace.clear()
+        t = np.arange(power.shape[1])
+        for i in range(min(power.shape[0], 8)):
+            self.ax_pd_trace.plot(t, w_to_dbm(power[i]), lw=1.0, label=f"PD{i}")
+        self.ax_pd_trace.set_title("PD Power Trace vs Time")
+        self.ax_pd_trace.set_xlabel("Frame")
+        self.ax_pd_trace.set_ylabel("Power (dBm)")
+        self.ax_pd_trace.grid(alpha=0.25)
+        self.ax_pd_trace.legend(ncol=4, fontsize=7)
         self.fig_plane.tight_layout()
         self.canvas_plane.draw()
 
@@ -506,7 +552,8 @@ class MultiPDLinkGUI:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         subprocess.Popen([sys.executable, str(gui)], cwd=str(EXTERNAL_FSO), env=env)
-        self.status.set("Opened colleague FSO baseline GUI.")
+        self.status.set("Opened original simulator separately.")
+        self._append_log("Opened the original colleague simulator in a separate window. Its verification figures are not the integrated Multi-PD receiver view.")
 
 
 def main():

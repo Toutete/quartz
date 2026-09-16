@@ -201,11 +201,15 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         n_out = 128
         dx_out = span_out / n_out
         coords_out = (np.arange(n_out) - (n_out - 1) / 2.0) * dx_out
+        coords_receiver = coords_out * reducer
+        dx_receiver = dx_out * reducer
         out_mode = "far-field Zoom-DFT + reducer coordinates"
     else:
         n_out = n
         coords_out = coords / reducer
         dx_out = dx / reducer
+        coords_receiver = coords
+        dx_receiver = dx
         out_mode = "receiver-plane BPM + beam reducer"
     positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m)
 
@@ -223,6 +227,7 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         i_ref = (np.abs(field_ref[0, :, :, 0]) ** 2) * lens_mask_in * reducer**2
     ref_pd_power, pd_masks = _pd_power_from_intensity(i_ref, coords_out, dx_out, positions, cfg.pd_radius_m)
 
+    receiver_intensity_seq = np.zeros((cfg.n_time_frames, n_out, n_out), dtype=np.float32)
     intensity_seq = np.zeros((cfg.n_time_frames, n_out, n_out), dtype=np.float32)
     pd_power = np.zeros((cfg.n_time_frames, len(positions)), dtype=np.float64)
     wander_xy = np.zeros((cfg.n_time_frames, 2), dtype=np.float64)
@@ -237,9 +242,12 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
             e_ff = fso._propagate_far_field_zoom(
                 field_t[0, :, :, 0] * phase_fres, dx, dx_out, n_out, z_vac, lam
             )
+            receiver_inten = np.abs(e_ff) ** 2 / reducer**2
             inten = np.abs(e_ff) ** 2
         else:
-            inten = (np.abs(field_t[0, :, :, 0]) ** 2) * lens_mask_in * reducer**2
+            receiver_inten = np.abs(field_t[0, :, :, 0]) ** 2
+            inten = receiver_inten * lens_mask_in * reducer**2
+        receiver_intensity_seq[i] = receiver_inten.astype(np.float32)
         intensity_seq[i] = inten.astype(np.float32)
         pd_power[i], _ = _pd_power_from_intensity(inten, coords_out, dx_out, positions, cfg.pd_radius_m)
         pd_power[i] *= max(float(cfg.microlens_gain), 0.0)
@@ -255,9 +263,12 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         "spatial_grid": sg,
         "coords_out": coords_out,
         "dx_out": dx_out,
+        "coords_receiver": coords_receiver,
+        "dx_receiver": dx_receiver,
         "pd_positions": positions,
         "pd_masks": pd_masks,
         "ref_pd_power": ref_pd_power,
+        "receiver_intensity_seq": receiver_intensity_seq,
         "intensity_seq": intensity_seq,
         "pd_power": pd_power,
         "wander_xy_m": wander_xy,
@@ -273,6 +284,7 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         "output_plane_mode": out_mode,
         "beam_reducer_ratio": reducer,
         "rx_lens_diameter_m": cfg.rx_lens_diameter_m,
+        "rx_lens_radius_m": r_lens,
     }
 
 
