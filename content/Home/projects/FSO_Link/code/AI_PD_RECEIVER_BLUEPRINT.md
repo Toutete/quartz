@@ -87,6 +87,44 @@ Run prediction from measured/simulated traces:
 
 `traces.npy` shape must be `(pd_rows, pd_cols, frames)`.
 
+Launch the integrated simulation/training GUI:
+
+```powershell
+.\run_fso_ai_training_gui.ps1
+```
+
+The GUI visualizes one SSFM run, the pupil-plane power/phase maps, PD placement,
+PD power traces, CNN training progress, SNR-proxy improvement, and the predicted
+combining weights.
+
+Launch the Multi-PD link/ADC evaluation GUI:
+
+```powershell
+.\run_multi_pd_link_gui.ps1
+```
+
+This GUI is for feasibility testing before CNN training. It runs an SSFM
+turbulence realization, maps the received field onto a configurable PD array,
+converts each PD optical power trace into photocurrent, applies per-channel ADC
+quantization, and compares single-PD, selection, EGC, MRC, and oracle combining
+with EVM, outage probability, required fade margin, and average received power.
+
+The colleague FSO simulator can be installed locally under:
+
+```text
+code/external/FSO-simulator
+```
+
+Install or update it with:
+
+```powershell
+.\install_colleague_fso_simulator.ps1
+```
+
+The Multi-PD GUI detects that folder and can open the colleague baseline GUI
+from the same screen. The external simulator folder is ignored by git because it
+is a local dependency checkout, not source owned by this project.
+
 ## FPGA Notes
 
 - Keep the first model small. The included CNN uses depthwise separable convolutions and fixed output sizes.
