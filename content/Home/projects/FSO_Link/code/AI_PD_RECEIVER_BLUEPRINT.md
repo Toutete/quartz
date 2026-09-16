@@ -97,17 +97,20 @@ The GUI visualizes one SSFM run, the pupil-plane power/phase maps, PD placement,
 PD power traces, CNN training progress, SNR-proxy improvement, and the predicted
 combining weights.
 
-Launch the Multi-PD link/ADC evaluation GUI:
+Launch the colleague-simulator-based Multi-PD link/ADC/CNN evaluation GUI:
 
 ```powershell
 .\run_multi_pd_link_gui.ps1
 ```
 
-This GUI is for feasibility testing before CNN training. It runs an SSFM
-turbulence realization, maps the received field onto a configurable PD array,
-converts each PD optical power trace into photocurrent, applies per-channel ADC
-quantization, and compares single-PD, selection, EGC, MRC, and oracle combining
-with EVM, outage probability, required fade margin, and average received power.
+This GUI is for feasibility testing before FPGA implementation. It uses the
+colleague FSO simulator's uplink BPM and Zoom-DFT path to generate a
+satellite-plane intensity sequence, maps that sequence onto a configurable
+Multi-PD array, converts each PD optical power trace into photocurrent, applies
+per-channel ADC quantization, and trains a temporal CNN to predict the next
+PD intensity/power pattern. The predicted pattern is converted into combining
+weights and compared against single-PD, selection, EGC, and oracle MRC with
+EVM, BER, outage probability, required fade margin, and average received power.
 
 The colleague FSO simulator can be installed locally under:
 

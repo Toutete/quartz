@@ -18,7 +18,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle
 
-from multi_pd_link import MultiPDConfig, run_multi_pd_link, w_to_dbm
+from colleague_multi_pd_link import ColleagueMultiPDConfig, run_colleague_multi_pd_link, w_to_dbm
 
 
 HERE = Path(__file__).resolve().parent
@@ -28,7 +28,7 @@ EXTERNAL_FSO = HERE / "external" / "FSO-simulator"
 class MultiPDLinkGUI:
     def __init__(self, master):
         self.master = master
-        self.master.title("Multi-PD FSO Receiver Link GUI")
+        self.master.title("Colleague FSO + Multi-PD CNN Receiver GUI")
         self.master.geometry("1640x940")
         self.inputs = {}
         self.queue = queue.Queue()
@@ -44,7 +44,7 @@ class MultiPDLinkGUI:
 
         ttk.Label(
             self.side,
-            text="Multi-PD FSO Receiver",
+            text="Colleague FSO + Multi-PD CNN Receiver",
             font=("Segoe UI", 12, "bold"),
         ).pack(anchor=tk.W)
         status = "connected" if (EXTERNAL_FSO / "fso_simulator.py").exists() else "not found"
@@ -67,18 +67,16 @@ class MultiPDLinkGUI:
         self.control_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._add_group(
-            "SSFM turbulence",
+            "Colleague FSO uplink",
             [
-                ("distance_m", "Distance L (m)", "800"),
-                ("cn2", "Cn2", "1e-15"),
+                ("hv57_ground_cn2_A", "HV57 ground Cn2 A", "5e-14"),
                 ("n_screens", "Phase screens", "5"),
-                ("wind_speed_m_s", "Wind speed (m/s)", "15"),
-                ("beam_waist_mm", "Beam waist w0 (mm)", "1.0"),
-                ("grid_n", "Grid N", "128"),
-                ("frames", "Frames", "32"),
-                ("display_width_cm", "Plane width (cm)", "120"),
-                ("tx_power_dbm", "Tx power (dBm)", "10"),
-                ("seed", "Random seed", "42"),
+                ("grid_mode", "Grid mode", "medium"),
+                ("n_time_frames", "Time frames", "24"),
+                ("seed_base", "Seed base", "42"),
+                ("zenith_angle_deg", "Zenith angle (deg)", "0"),
+                ("tx_power_dbm", "OGS Tx power (dBm)", "37"),
+                ("datarate_gbps", "Data rate (Gbps)", "10"),
             ],
         )
         self._add_group(
@@ -86,10 +84,8 @@ class MultiPDLinkGUI:
             [
                 ("pd_rows", "PD rows", "2"),
                 ("pd_cols", "PD columns", "4"),
-                ("pd_spacing_mm", "PD spacing (mm)", "20"),
-                ("lens_radius_mm", "Lens radius (mm)", "20"),
-                ("pd_active_radius_um", "PD active radius (um)", "30"),
-                ("focal_length_mm", "Focal length (mm)", "50"),
+                ("pd_spacing_cm", "PD spacing (cm)", "4"),
+                ("pd_radius_cm", "PD aperture radius (cm)", "2"),
                 ("fair_total_aperture", "Fixed total aperture? (0/1)", "0"),
             ],
         )
@@ -98,22 +94,24 @@ class MultiPDLinkGUI:
             [
                 ("responsivity_a_w", "Responsivity (A/W)", "0.9"),
                 ("adc_bits", "ADC bits", "8"),
-                ("adc_full_scale_ua", "ADC full-scale (uA)", "5"),
-                ("samples_per_symbol", "Input samples/symbol", "8"),
-                ("num_symbols", "Symbols", "1024"),
+                ("adc_full_scale_ua", "ADC full-scale (uA)", "50"),
+                ("samples_per_frame", "ADC samples/frame", "16"),
                 ("modulation_order", "QAM order", "4"),
-                ("modulation_depth", "IM/DD modulation depth", "0.35"),
-                ("current_noise_na", "Current noise RMS (nA)", "5"),
-                ("snr_ref_db", "Reference SNR (dB)", "25"),
+                ("current_noise_na", "Current noise RMS (nA)", "20"),
                 ("evm_floor_pct", "EVM floor (%)", "2"),
                 ("outage_evm_pct", "Outage EVM threshold (%)", "20"),
                 ("fade_outage_pct", "Fade outage target (%)", "1"),
+                ("cnn_time_window", "CNN time window", "6"),
+                ("cnn_epochs", "CNN epochs", "8"),
+                ("cnn_width", "CNN width", "16"),
+                ("cnn_lr", "CNN learning rate", "2e-3"),
+                ("cnn_snr_weight", "CNN SNR loss weight", "0.2"),
             ],
         )
 
         btns = ttk.Frame(self.side)
         btns.pack(fill=tk.X, pady=(8, 4))
-        self.run_btn = ttk.Button(btns, text="Run Multi-PD + ADC", command=self.run)
+        self.run_btn = ttk.Button(btns, text="Run FSO + Multi-PD + CNN", command=self.run)
         self.run_btn.pack(fill=tk.X, ipady=4)
         ttk.Button(btns, text="Open Colleague Baseline GUI", command=self.open_external_gui).pack(fill=tk.X, pady=3)
         ttk.Button(btns, text="Export Metrics CSV", command=self.export_metrics).pack(fill=tk.X)
@@ -140,7 +138,7 @@ class MultiPDLinkGUI:
         self.notebook.add(self.tab_plane, text="Plane and PD Array")
         self.notebook.add(self.tab_adc, text="PD Current and ADC")
         self.notebook.add(self.tab_metrics, text="EVM / Outage / Fade Margin")
-        self.notebook.add(self.tab_constellation, text="DSP Constellation")
+        self.notebook.add(self.tab_constellation, text="CNN Predictor")
 
         self.fig_plane = Figure(figsize=(10.8, 7.0), dpi=100)
         self.ax_plane = self.fig_plane.add_subplot(1, 2, 1)
@@ -189,36 +187,34 @@ class MultiPDLinkGUI:
         return int(float(self.inputs[key].get().strip()))
 
     def _config_from_inputs(self):
-        return MultiPDConfig(
-            distance_m=self._get_float("distance_m"),
-            cn2=self._get_float("cn2"),
+        return ColleagueMultiPDConfig(
+            hv57_ground_cn2_A=self._get_float("hv57_ground_cn2_A"),
             n_screens=self._get_int("n_screens"),
-            wind_speed_m_s=self._get_float("wind_speed_m_s"),
-            beam_waist_m=self._get_float("beam_waist_mm") * 1e-3,
-            grid_n=self._get_int("grid_n"),
-            frames=self._get_int("frames"),
-            display_width_m=self._get_float("display_width_cm") / 100.0,
+            grid_mode=self.inputs["grid_mode"].get().strip(),
+            n_time_frames=self._get_int("n_time_frames"),
+            seed_base=self._get_int("seed_base"),
+            zenith_angle_deg=self._get_float("zenith_angle_deg"),
             tx_power_dbm=self._get_float("tx_power_dbm"),
-            seed=self._get_int("seed"),
+            datarate_bps=self._get_float("datarate_gbps") * 1e9,
             pd_rows=self._get_int("pd_rows"),
             pd_cols=self._get_int("pd_cols"),
-            pd_spacing_m=self._get_float("pd_spacing_mm") * 1e-3,
-            lens_radius_m=self._get_float("lens_radius_mm") * 1e-3,
-            pd_active_radius_m=self._get_float("pd_active_radius_um") * 1e-6,
-            focal_length_m=self._get_float("focal_length_mm") * 1e-3,
+            pd_spacing_m=self._get_float("pd_spacing_cm") * 1e-2,
+            pd_radius_m=self._get_float("pd_radius_cm") * 1e-2,
             fair_total_aperture=bool(self._get_int("fair_total_aperture")),
             responsivity_a_w=self._get_float("responsivity_a_w"),
             adc_bits=self._get_int("adc_bits"),
             adc_full_scale_a=self._get_float("adc_full_scale_ua") * 1e-6,
-            samples_per_symbol=self._get_int("samples_per_symbol"),
-            num_symbols=self._get_int("num_symbols"),
-            modulation_order=self._get_int("modulation_order"),
-            modulation_depth=self._get_float("modulation_depth"),
+            samples_per_frame=self._get_int("samples_per_frame"),
+            qam_order=self._get_int("modulation_order"),
             current_noise_rms_a=self._get_float("current_noise_na") * 1e-9,
-            snr_ref_db=self._get_float("snr_ref_db"),
             evm_floor_pct=self._get_float("evm_floor_pct"),
             outage_evm_pct=self._get_float("outage_evm_pct"),
             fade_outage_pct=self._get_float("fade_outage_pct"),
+            cnn_time_window=self._get_int("cnn_time_window"),
+            cnn_epochs=self._get_int("cnn_epochs"),
+            cnn_width=self._get_int("cnn_width"),
+            cnn_lr=self._get_float("cnn_lr"),
+            cnn_snr_weight=self._get_float("cnn_snr_weight"),
         )
 
     def _draw_empty(self):
@@ -256,11 +252,11 @@ class MultiPDLinkGUI:
         self._busy = True
         self.run_btn.configure(state=tk.DISABLED)
         self.progress.start(12)
-        self.status.set("Running SSFM turbulence, PD array, ADC, and DSP metrics...")
+        self.status.set("Running colleague FSO BPM/Zoom-DFT, Multi-PD ADC, and temporal CNN...")
 
         def worker():
             try:
-                self.queue.put(("result", run_multi_pd_link(cfg)))
+                self.queue.put(("result", run_colleague_multi_pd_link(cfg)))
             except Exception:
                 self.queue.put(("error", traceback.format_exc()))
 
@@ -299,13 +295,15 @@ class MultiPDLinkGUI:
             self.tree.delete(item)
         r = self.result
         rows = [
-            ("r0 total", f"{r['r0_total_m'] * 100:.2f} cm"),
-            ("Rytov per screen", f"{r['rytov_dz']:.3e}"),
-            ("Propagation", r["propagation_mode"]),
-            ("Substeps/screen", str(r["substeps_per_screen"])),
-            ("Alias metric", f"{r['alias_metric']:.3f}"),
+            ("r0", f"{r['r0_m'] * 100:.2f} cm"),
+            ("Greenwood freq.", f"{r['greenwood_hz']:.1f} Hz"),
+            ("Link distance", f"{r['link_distance_m'] / 1e3:.1f} km"),
+            ("BPM grid", f"N={r['bpm_n']}, dx={r['bpm_dx_m']*1e3:.2f} mm"),
+            ("Satellite plane", f"N={r['far_n']}, dx={r['far_dx_m']*100:.2f} cm"),
         ]
-        for name in ("Single center PD", "MRC", "Oracle"):
+        for name in ("Single center PD", "MRC oracle", "CNN predicted"):
+            if name not in r["metrics"]:
+                continue
             m = r["metrics"][name]
             rows.append((f"{name} EVM mean", f"{m['mean_evm_pct']:.2f} %"))
             rows.append((f"{name} outage", f"{100*m['outage_probability']:.2f} %"))
@@ -317,20 +315,20 @@ class MultiPDLinkGUI:
         self.fig_plane.clear()
         self.ax_plane = self.fig_plane.add_subplot(1, 2, 1)
         self.ax_heat = self.fig_plane.add_subplot(1, 2, 2)
-        fields = r["fields"]
-        x = r["x_arr"] * 100.0
-        power = r["power_w"]
-        frame = fields.shape[2] // 2
-        intensity = np.abs(fields[:, :, frame]) ** 2
+        intensity_seq = r["intensity_seq"]
+        x = r["coords_out"] * 100.0
+        power = r["pd_power"].T
+        frame = intensity_seq.shape[0] // 2
+        intensity = intensity_seq[frame]
         extent = [x[0], x[-1], x[0], x[-1]]
 
         self.ax_plane.clear()
         im = self.ax_plane.imshow(intensity, extent=extent, origin="lower", cmap="magma")
         for idx, (px, py) in enumerate(r["pd_positions"]):
-            circ = Circle((px * 100.0, py * 100.0), r["cfg"].lens_radius_m * 100.0, fill=False, ec="cyan", lw=1.2)
+            circ = Circle((px * 100.0, py * 100.0), r["cfg"].pd_radius_m * 100.0, fill=False, ec="cyan", lw=1.2)
             self.ax_plane.add_patch(circ)
             self.ax_plane.text(px * 100.0, py * 100.0, str(idx), color="white", ha="center", va="center", fontsize=8)
-        self.ax_plane.set_title("Receiver Plane Intensity + PD Apertures")
+        self.ax_plane.set_title("Colleague FSO Satellite-Plane Intensity + PD Array")
         self.ax_plane.set_xlabel("x (cm)")
         self.ax_plane.set_ylabel("y (cm)")
         self.fig_plane.colorbar(im, ax=self.ax_plane, fraction=0.046, pad=0.04)
@@ -350,9 +348,9 @@ class MultiPDLinkGUI:
 
     def _plot_adc(self):
         r = self.result
-        sig = r["signal"]
+        sig = r["adc"]
         n_plot = min(8, sig["current_a"].shape[0])
-        t = np.arange(sig["current_a"].shape[1]) / max(r["cfg"].samples_per_symbol, 1)
+        t = np.arange(sig["current_a"].shape[1]) / max(r["cfg"].samples_per_frame, 1)
 
         self.ax_current.clear()
         for i in range(n_plot):
@@ -400,25 +398,40 @@ class MultiPDLinkGUI:
 
     def _plot_constellation(self):
         r = self.result
-        sig = r["signal"]
-        tx = sig["tx_symbols"]
-        single = sig["rx_symbols"]["Single center PD"]
-        mrc = sig["rx_symbols"]["MRC"]
-        n = min(1200, len(tx))
+        cnn = r["cnn"]
+        self.fig_const.clear()
+        self.ax_single = self.fig_const.add_subplot(1, 2, 1)
+        self.ax_mrc = self.fig_const.add_subplot(1, 2, 2)
+        self.ax_single.clear()
+        self.ax_mrc.clear()
+        if cnn.get("history"):
+            epochs = [h["epoch"] for h in cnn["history"]]
+            loss = [h["loss"] for h in cnn["history"]]
+            mse = [h["mse"] for h in cnn["history"]]
+            snr = [h["snr_proxy"] for h in cnn["history"]]
+            self.ax_single.plot(epochs, loss, marker="o", label="total loss")
+            self.ax_single.plot(epochs, mse, marker="s", label="next-intensity MSE")
+            self.ax_single.set_title("Temporal CNN Training")
+            self.ax_single.set_xlabel("Epoch")
+            self.ax_single.set_ylabel("Loss")
+            self.ax_single.grid(alpha=0.25)
+            self.ax_single.legend()
+            ax_snr = self.ax_single.twinx()
+            ax_snr.plot(epochs, snr, color="tab:green", marker="^", label="SNR proxy")
+            ax_snr.set_ylabel("SNR proxy")
 
-        for ax, rx, title in [
-            (self.ax_single, single, "Single Center PD DSP Output"),
-            (self.ax_mrc, mrc, "MRC Multi-PD DSP Output"),
-        ]:
-            ax.clear()
-            ax.scatter(np.real(rx[:n]), np.imag(rx[:n]), s=8, alpha=0.35, label="Rx")
-            ax.scatter(np.real(tx[:n]), np.imag(tx[:n]), s=16, marker="x", color="black", label="Tx ideal")
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_title(title)
-            ax.set_xlabel("I")
-            ax.set_ylabel("Q")
-            ax.grid(alpha=0.25)
-            ax.legend(loc="upper right")
+            weights = cnn.get("weights")
+            if weights is not None and len(weights):
+                last = weights[-1].reshape(r["cfg"].pd_rows, r["cfg"].pd_cols)
+                hm = self.ax_mrc.imshow(last, cmap="viridis", origin="lower", vmin=0)
+                self.ax_mrc.set_title("Last CNN-Predicted Combining Weights")
+                for rr in range(r["cfg"].pd_rows):
+                    for cc in range(r["cfg"].pd_cols):
+                        self.ax_mrc.text(cc, rr, f"{last[rr, cc]:.2f}", ha="center", va="center", color="white", fontsize=9)
+                self.fig_const.colorbar(hm, ax=self.ax_mrc, fraction=0.046, pad=0.04)
+        else:
+            self.ax_single.text(0.5, 0.5, cnn.get("error", "CNN was not trained."), ha="center", va="center", transform=self.ax_single.transAxes)
+            self.ax_mrc.text(0.5, 0.5, "Increase time frames or install PyTorch.", ha="center", va="center", transform=self.ax_mrc.transAxes)
         self.fig_const.tight_layout()
         self.canvas_const.draw()
 
@@ -436,12 +449,13 @@ class MultiPDLinkGUI:
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["method", "mean_evm_pct", "p95_evm_pct", "outage_probability", "required_fade_margin_db", "mean_rx_power_dbm", "mean_snr_db"])
+            writer.writerow(["method", "mean_evm_pct", "p95_evm_pct", "mean_ber", "outage_probability", "required_fade_margin_db", "mean_rx_power_dbm", "mean_snr_db"])
             for name, m in self.result["metrics"].items():
                 writer.writerow([
                     name,
                     m["mean_evm_pct"],
                     m["p95_evm_pct"],
+                    m.get("mean_ber", np.nan),
                     m["outage_probability"],
                     m["required_fade_margin_db"],
                     m["mean_rx_power_dbm"],
