@@ -201,7 +201,7 @@ class MultiPDLinkGUI:
             pd_spacing_m=self._get_float("pd_spacing_cm") * 1e-2,
             pd_radius_m=self._get_float("pd_radius_cm") * 1e-2,
             fair_total_aperture=bool(self._get_int("fair_total_aperture")),
-            responsivity_a_w=self._get_float("responsivity_a_w"),
+            receiver_responsivity=self._get_float("responsivity_a_w"),
             adc_bits=self._get_int("adc_bits"),
             adc_full_scale_a=self._get_float("adc_full_scale_ua") * 1e-6,
             samples_per_frame=self._get_int("samples_per_frame"),
