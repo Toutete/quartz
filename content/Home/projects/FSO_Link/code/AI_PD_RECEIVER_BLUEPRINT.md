@@ -103,14 +103,17 @@ Launch the colleague-simulator-based Multi-PD link/ADC/CNN evaluation GUI:
 .\run_multi_pd_link_gui.ps1
 ```
 
-This GUI is for feasibility testing before FPGA implementation. It uses the
-colleague FSO simulator's uplink BPM and Zoom-DFT path to generate a
-satellite-plane intensity sequence, maps that sequence onto a configurable
-Multi-PD array, converts each PD optical power trace into photocurrent, applies
-per-channel ADC quantization, and trains a temporal CNN to predict the next
-PD intensity/power pattern. The predicted pattern is converted into combining
-weights and compared against single-PD, selection, EGC, and oracle MRC with
-EVM, BER, outage probability, required fade margin, and average received power.
+This GUI is for feasibility testing before FPGA implementation. The default
+case is a single 800 m FSO link at one user-selected `Cn2`, not a `Cn2` sweep.
+For short links it uses the colleague FSO simulator's BPM path to generate a
+time sequence at the receive plane, applies a configurable receive lens and
+beam reducer, maps the reduced beam onto a configurable Multi-PD array, converts
+each PD optical power trace into photocurrent, applies per-channel ADC
+quantization, and trains a temporal CNN to predict the next PD intensity/power
+pattern. The predicted pattern is converted into combining weights and compared
+against single-PD, selection, EGC, and oracle MRC with EVM, BER, outage
+probability, required fade margin, and average received power. Runtime errors
+are shown in the GUI Log tab rather than as pop-up dialogs.
 
 The colleague FSO simulator can be installed locally under:
 

@@ -36,13 +36,16 @@ except Exception:
 class ColleagueMultiPDConfig:
     hv57_ground_cn2_A: float = 5e-14
     wavelength_m: float = 1550e-9
+    link_distance_m: float = 800.0
     zenith_angle_deg: float = 0.0
     ground_altitude_m: float = 0.0
-    leo_altitude_m: float = 500e3
+    leo_altitude_m: float = 800.0
     ogs_aperture_diameter_m: float = 0.60
     ogs_tx_eff_diameter_m: float = 0.12
     leo_aperture_diameter_m: float = 0.08
     rx_exit_pupil_diameter_m: float = 0.010
+    rx_lens_diameter_m: float = 0.05
+    beam_reducer_ratio: float = 10.0
     tx_beam_waist_ratio: float = 0.7
     outer_scale_m: float = 100.0
     inner_scale_m: float = 0.01
@@ -58,8 +61,9 @@ class ColleagueMultiPDConfig:
     datarate_bps: float = 10e9
     pd_rows: int = 2
     pd_cols: int = 4
-    pd_spacing_m: float = 0.04
-    pd_radius_m: float = 0.02
+    pd_spacing_m: float = 1.0e-3
+    pd_radius_m: float = 0.25e-3
+    microlens_gain: float = 1.0
     adc_bits: int = 8
     adc_full_scale_a: float = 50e-6
     current_noise_rms_a: float = 20e-9
@@ -98,7 +102,7 @@ def pd_grid_positions(rows: int, cols: int, spacing_m: float):
 def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
     base = SpatialGrid(
         tx_aperture_m=cfg.ogs_aperture_diameter_m,
-        rx_aperture_m=cfg.leo_aperture_diameter_m,
+        rx_aperture_m=cfg.rx_lens_diameter_m,
         fried_parameter_m=tc.fried_parameter_m,
     )
     mode = cfg.grid_mode.lower().strip()
@@ -109,7 +113,7 @@ def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
     else:
         span_factor, min_span, cap_n = 3.0, 0.30, 256
     dx = base.x_step_m
-    r_ap = cfg.leo_aperture_diameter_m / 2.0
+    r_ap = cfg.rx_lens_diameter_m / 2.0
     span = max(span_factor * tc.fried_parameter_m, 6.0 * r_ap, min_span)
     n = min(max(64, int(np.ceil(span / dx))), cap_n)
     return SpatialGrid.from_span_step(n * dx, dx)
@@ -118,7 +122,7 @@ def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
 def _build_channel(cfg: ColleagueMultiPDConfig):
     geo = LinkGeometry(
         tx_altitude_m=cfg.ground_altitude_m,
-        rx_altitude_m=cfg.leo_altitude_m,
+        rx_altitude_m=cfg.ground_altitude_m + cfg.link_distance_m,
         zenith_angle_deg=cfg.zenith_angle_deg,
     )
     tc = TurbulenceConfig(
@@ -137,7 +141,7 @@ def _build_channel(cfg: ColleagueMultiPDConfig):
         beam_waist_m=cfg.tx_beam_waist_ratio * (cfg.ogs_tx_eff_diameter_m / 2.0),
     )
     rx_optics = RxOptics(
-        aperture_diameter_m=cfg.leo_aperture_diameter_m,
+        aperture_diameter_m=cfg.rx_lens_diameter_m,
         exit_pupil_diameter_m=cfg.rx_exit_pupil_diameter_m,
     )
     fso = FSOChannel(tx_optics=tx_optics, rx_optics=rx_optics, turbulence=tc, geometry=geo)
@@ -160,7 +164,7 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
     sg = _make_spatial_grid(cfg, tc)
 
     lam = tc.wavelength_m
-    z_total = geo.link_distance_m
+    z_total = cfg.link_distance_m
     z_atm = min(z_total, tc.z_turbulence_m)
     z_vac = max(0.0, z_total - z_atm)
     w0 = tx_optics.beam_waist_m
@@ -176,7 +180,7 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
     x, y = np.meshgrid(coords, coords, indexing="ij")
     r2 = x**2 + y**2
     r = np.sqrt(r2)
-    phase_fres = np.exp(1j * np.pi * r2 / (lam * z_vac))
+    phase_fres = np.exp(1j * np.pi * r2 / (lam * z_vac)) if z_vac > 1e-9 else None
 
     r_tx = tx_optics.aperture_diameter_m / 2.0
     e_raw = np.exp(-r2 / w0**2)
@@ -187,22 +191,36 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
     field_in[0, :, :, 0] = e_in
     field_in[1, :, :, 0] = e_in
 
+    reducer = max(float(cfg.beam_reducer_ratio), 1.0)
     array_half = max(cfg.pd_rows, cfg.pd_cols) * cfg.pd_spacing_m * 0.5 + 2.2 * cfg.pd_radius_m
-    r_sat = rx_optics.aperture_diameter_m / 2.0
-    span_out = max(4.0 * r_sat, 2.0 * array_half)
-    n_out = 128
-    dx_out = span_out / n_out
-    coords_out = (np.arange(n_out) - (n_out - 1) / 2.0) * dx_out
+    r_lens = cfg.rx_lens_diameter_m / 2.0
+    positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m)
+
+    if z_vac > 1e-9:
+        span_out = max(4.0 * r_lens / reducer, 2.0 * array_half)
+        n_out = 128
+        dx_out = span_out / n_out
+        coords_out = (np.arange(n_out) - (n_out - 1) / 2.0) * dx_out
+        out_mode = "far-field Zoom-DFT + reducer coordinates"
+    else:
+        n_out = n
+        coords_out = coords / reducer
+        dx_out = dx / reducer
+        out_mode = "receiver-plane BPM + beam reducer"
     positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m)
 
     tc_vac = dataclasses.replace(tc, n_screens=0)
     field_ref, _ = fso._propagate_numerical_segment_full_field(
         field_in, z_atm, n, dx, lam, tc_vac, geo
     )
-    e_ref = fso._propagate_far_field_zoom(
-        field_ref[0, :, :, 0] * phase_fres, dx, dx_out, n_out, z_vac, lam
-    )
-    i_ref = np.abs(e_ref) ** 2
+    lens_mask_in = (r <= r_lens)
+    if z_vac > 1e-9:
+        e_ref = fso._propagate_far_field_zoom(
+            field_ref[0, :, :, 0] * phase_fres, dx, dx_out, n_out, z_vac, lam
+        )
+        i_ref = np.abs(e_ref) ** 2
+    else:
+        i_ref = (np.abs(field_ref[0, :, :, 0]) ** 2) * lens_mask_in * reducer**2
     ref_pd_power, pd_masks = _pd_power_from_intensity(i_ref, coords_out, dx_out, positions, cfg.pd_radius_m)
 
     intensity_seq = np.zeros((cfg.n_time_frames, n_out, n_out), dtype=np.float32)
@@ -215,12 +233,16 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         field_t, _ = fso._propagate_numerical_segment_full_field(
             field_in, z_atm, n, dx, lam, tc, geo, seed=cfg.seed_base + i
         )
-        e_ff = fso._propagate_far_field_zoom(
-            field_t[0, :, :, 0] * phase_fres, dx, dx_out, n_out, z_vac, lam
-        )
-        inten = np.abs(e_ff) ** 2
+        if z_vac > 1e-9:
+            e_ff = fso._propagate_far_field_zoom(
+                field_t[0, :, :, 0] * phase_fres, dx, dx_out, n_out, z_vac, lam
+            )
+            inten = np.abs(e_ff) ** 2
+        else:
+            inten = (np.abs(field_t[0, :, :, 0]) ** 2) * lens_mask_in * reducer**2
         intensity_seq[i] = inten.astype(np.float32)
         pd_power[i], _ = _pd_power_from_intensity(inten, coords_out, dx_out, positions, cfg.pd_radius_m)
+        pd_power[i] *= max(float(cfg.microlens_gain), 0.0)
         norm = float(np.sum(inten) * dx_out**2) + 1e-30
         wander_xy[i, 0] = float(np.sum(xo * inten) * dx_out**2 / norm)
         wander_xy[i, 1] = float(np.sum(yo * inten) * dx_out**2 / norm)
@@ -243,10 +265,14 @@ def _simulate_colleague_uplink_sequence(cfg: ColleagueMultiPDConfig):
         "r0_m": tc.fried_parameter_m,
         "greenwood_hz": tc.greenwood_freq_hz,
         "link_distance_m": geo.link_distance_m,
+        "configured_link_distance_m": cfg.link_distance_m,
         "bpm_n": n,
         "bpm_dx_m": dx,
         "far_n": n_out,
         "far_dx_m": dx_out,
+        "output_plane_mode": out_mode,
+        "beam_reducer_ratio": reducer,
+        "rx_lens_diameter_m": cfg.rx_lens_diameter_m,
     }
 
 

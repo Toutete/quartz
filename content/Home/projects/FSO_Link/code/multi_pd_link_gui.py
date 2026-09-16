@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 import matplotlib
 
@@ -67,11 +67,12 @@ class MultiPDLinkGUI:
         self.control_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._add_group(
-            "Colleague FSO uplink",
+            "FSO channel",
             [
+                ("link_distance_m", "FSO distance (m)", "800"),
                 ("hv57_ground_cn2_A", "HV57 ground Cn2 A", "5e-14"),
-                ("n_screens", "Phase screens", "5"),
-                ("grid_mode", "Grid mode", "medium"),
+                ("n_screens", "Phase screens", "3"),
+                ("grid_mode", "Grid mode", "small"),
                 ("n_time_frames", "Time frames", "24"),
                 ("seed_base", "Seed base", "42"),
                 ("zenith_angle_deg", "Zenith angle (deg)", "0"),
@@ -80,12 +81,15 @@ class MultiPDLinkGUI:
             ],
         )
         self._add_group(
-            "Photodetector array",
+            "Rx optics and PD array",
             [
+                ("rx_lens_diameter_cm", "Rx lens diameter (cm)", "5"),
+                ("beam_reducer_ratio", "Beam reducer ratio", "10"),
                 ("pd_rows", "PD rows", "2"),
                 ("pd_cols", "PD columns", "4"),
-                ("pd_spacing_cm", "PD spacing (cm)", "4"),
-                ("pd_radius_cm", "PD aperture radius (cm)", "2"),
+                ("pd_spacing_mm", "PD spacing (mm)", "1"),
+                ("pd_radius_mm", "PD radius (mm)", "0.25"),
+                ("microlens_gain", "Microlens gain", "1.0"),
                 ("fair_total_aperture", "Fixed total aperture? (0/1)", "0"),
             ],
         )
@@ -135,10 +139,12 @@ class MultiPDLinkGUI:
         self.tab_adc = ttk.Frame(self.notebook)
         self.tab_metrics = ttk.Frame(self.notebook)
         self.tab_constellation = ttk.Frame(self.notebook)
+        self.tab_log = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_plane, text="Plane and PD Array")
         self.notebook.add(self.tab_adc, text="PD Current and ADC")
         self.notebook.add(self.tab_metrics, text="EVM / Outage / Fade Margin")
         self.notebook.add(self.tab_constellation, text="CNN Predictor")
+        self.notebook.add(self.tab_log, text="Log")
 
         self.fig_plane = Figure(figsize=(10.8, 7.0), dpi=100)
         self.ax_plane = self.fig_plane.add_subplot(1, 2, 1)
@@ -166,6 +172,10 @@ class MultiPDLinkGUI:
         self.canvas_const = FigureCanvasTkAgg(self.fig_const, master=self.tab_constellation)
         self.canvas_const.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        self.log_text = tk.Text(self.tab_log, height=20, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self._append_log("Ready. Errors and run details will appear here instead of pop-up dialogs.")
+
         self._draw_empty()
 
     def _add_group(self, title, rows):
@@ -186,8 +196,15 @@ class MultiPDLinkGUI:
     def _get_int(self, key):
         return int(float(self.inputs[key].get().strip()))
 
+    def _append_log(self, text):
+        if not hasattr(self, "log_text"):
+            return
+        self.log_text.insert(tk.END, text.rstrip() + "\n")
+        self.log_text.see(tk.END)
+
     def _config_from_inputs(self):
         return ColleagueMultiPDConfig(
+            link_distance_m=self._get_float("link_distance_m"),
             hv57_ground_cn2_A=self._get_float("hv57_ground_cn2_A"),
             n_screens=self._get_int("n_screens"),
             grid_mode=self.inputs["grid_mode"].get().strip(),
@@ -196,10 +213,13 @@ class MultiPDLinkGUI:
             zenith_angle_deg=self._get_float("zenith_angle_deg"),
             tx_power_dbm=self._get_float("tx_power_dbm"),
             datarate_bps=self._get_float("datarate_gbps") * 1e9,
+            rx_lens_diameter_m=self._get_float("rx_lens_diameter_cm") * 1e-2,
+            beam_reducer_ratio=self._get_float("beam_reducer_ratio"),
             pd_rows=self._get_int("pd_rows"),
             pd_cols=self._get_int("pd_cols"),
-            pd_spacing_m=self._get_float("pd_spacing_cm") * 1e-2,
-            pd_radius_m=self._get_float("pd_radius_cm") * 1e-2,
+            pd_spacing_m=self._get_float("pd_spacing_mm") * 1e-3,
+            pd_radius_m=self._get_float("pd_radius_mm") * 1e-3,
+            microlens_gain=self._get_float("microlens_gain"),
             fair_total_aperture=bool(self._get_int("fair_total_aperture")),
             receiver_responsivity=self._get_float("responsivity_a_w"),
             adc_bits=self._get_int("adc_bits"),
@@ -247,12 +267,18 @@ class MultiPDLinkGUI:
         try:
             cfg = self._config_from_inputs()
         except Exception as exc:
-            messagebox.showerror("Input error", str(exc))
+            self.status.set("Input error. See Log tab.")
+            self._append_log("Input error:\n" + "".join(traceback.format_exception_only(type(exc), exc)))
+            self.notebook.select(self.tab_log)
             return
         self._busy = True
         self.run_btn.configure(state=tk.DISABLED)
         self.progress.start(12)
         self.status.set("Running colleague FSO BPM/Zoom-DFT, Multi-PD ADC, and temporal CNN...")
+        self._append_log(
+            f"Run started: L={cfg.link_distance_m:g} m, Cn2={cfg.hv57_ground_cn2_A:.3e}, "
+            f"frames={cfg.n_time_frames}, PD={cfg.pd_rows}x{cfg.pd_cols}, reducer={cfg.beam_reducer_ratio:g}x"
+        )
 
         def worker():
             try:
@@ -272,13 +298,15 @@ class MultiPDLinkGUI:
                     self.run_btn.configure(state=tk.NORMAL)
                     self.progress.stop()
                     self.status.set("Done")
+                    self._append_log("Run finished successfully.")
                     self._update_all()
                 elif kind == "error":
                     self._busy = False
                     self.run_btn.configure(state=tk.NORMAL)
                     self.progress.stop()
-                    self.status.set("Error")
-                    messagebox.showerror("Error", payload)
+                    self.status.set("Error. See Log tab.")
+                    self._append_log("Run error:\n" + payload)
+                    self.notebook.select(self.tab_log)
         except queue.Empty:
             pass
         self.master.after(120, self._poll_queue)
@@ -297,9 +325,12 @@ class MultiPDLinkGUI:
         rows = [
             ("r0", f"{r['r0_m'] * 100:.2f} cm"),
             ("Greenwood freq.", f"{r['greenwood_hz']:.1f} Hz"),
-            ("Link distance", f"{r['link_distance_m'] / 1e3:.1f} km"),
+            ("Link distance", f"{r['configured_link_distance_m']:.1f} m"),
+            ("Output plane", r["output_plane_mode"]),
+            ("Beam reducer", f"{r['beam_reducer_ratio']:.1f}x"),
+            ("Rx lens diameter", f"{r['rx_lens_diameter_m'] * 100:.1f} cm"),
             ("BPM grid", f"N={r['bpm_n']}, dx={r['bpm_dx_m']*1e3:.2f} mm"),
-            ("Satellite plane", f"N={r['far_n']}, dx={r['far_dx_m']*100:.2f} cm"),
+            ("PD plane", f"N={r['far_n']}, dx={r['far_dx_m']*1e3:.3f} mm"),
         ]
         for name in ("Single center PD", "MRC oracle", "CNN predicted"):
             if name not in r["metrics"]:
@@ -328,7 +359,7 @@ class MultiPDLinkGUI:
             circ = Circle((px * 100.0, py * 100.0), r["cfg"].pd_radius_m * 100.0, fill=False, ec="cyan", lw=1.2)
             self.ax_plane.add_patch(circ)
             self.ax_plane.text(px * 100.0, py * 100.0, str(idx), color="white", ha="center", va="center", fontsize=8)
-        self.ax_plane.set_title("Colleague FSO Satellite-Plane Intensity + PD Array")
+        self.ax_plane.set_title("Reduced Beam Plane Intensity + PD Array")
         self.ax_plane.set_xlabel("x (cm)")
         self.ax_plane.set_ylabel("y (cm)")
         self.fig_plane.colorbar(im, ax=self.ax_plane, fraction=0.046, pad=0.04)
@@ -437,7 +468,9 @@ class MultiPDLinkGUI:
 
     def export_metrics(self):
         if self.result is None:
-            messagebox.showinfo("No result", "Run a simulation first.")
+            self.status.set("No result to export. See Log tab.")
+            self._append_log("Export skipped: run a simulation first.")
+            self.notebook.select(self.tab_log)
             return
         path = filedialog.asksaveasfilename(
             title="Save metrics CSV",
@@ -466,7 +499,9 @@ class MultiPDLinkGUI:
     def open_external_gui(self):
         gui = EXTERNAL_FSO / "fso_simulator_gui.py"
         if not gui.exists():
-            messagebox.showerror("Missing simulator", f"Cannot find {gui}")
+            self.status.set("Missing colleague simulator. See Log tab.")
+            self._append_log(f"Cannot find colleague simulator GUI: {gui}")
+            self.notebook.select(self.tab_log)
             return
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"

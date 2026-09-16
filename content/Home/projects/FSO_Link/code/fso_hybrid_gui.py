@@ -665,7 +665,7 @@ class HybridFSOGUI:
         self.ax_dso_spec.grid(alpha=0.3)
 
         self.ax_dso_const.scatter(np.real(dso["rx_sym"]), np.imag(dso["rx_sym"]), s=12, alpha=0.45, color="#2e7d32")
-        self.ax_dso_const.scatter(np.real(dso["tx_sym"]), np.imag(dso["tx_sym"]), s=24, marker="x", color="#000000")
+        self.ax_dso_const.scatter(np.real(dso["tx_sym"]), np.imag(dso["tx_sym"]), s=9, marker="x", linewidths=0.8, color="#000000")
         self.ax_dso_const.set_title("Constellation (Tx vs Rx)")
         self.ax_dso_const.set_xlabel("I")
         self.ax_dso_const.set_ylabel("Q")
