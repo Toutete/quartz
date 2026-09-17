@@ -28,7 +28,7 @@ class DatasetConfig:
     rx_lens_diameter_mm: float = 203.2
     collimated_pupil_mm: float = 7.5
     relay_output_pupil_mm: float = 1.0
-    central_obstruction_ratio: float = 0.31
+    central_obstruction_ratio: float = 0.0
     integrated_lens_diameter_um: float = 100.0
     active_junction_diameter_um: float = 25.0
     external_mla_enabled: bool = False

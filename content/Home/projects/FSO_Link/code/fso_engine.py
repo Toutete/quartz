@@ -67,7 +67,7 @@ class FSOEngineConfig:
     rx_lens_diameter_m: float = 0.2032
     rx_antenna_gain_db: float = 112.3
     telescope_focal_length_m: float = 2.032
-    central_obstruction_ratio: float = 0.31
+    central_obstruction_ratio: float = 0.0
     collimator_focal_length_m: float = 0.075
     collimated_pupil_diameter_m: float = 7.5e-3
     pupil_relay_output_diameter_m: float = 1.0e-3
@@ -90,7 +90,7 @@ class FSOEngineConfig:
     outage_evm_pct: float = 20.0
     fade_outage_pct: float = 1.0
     cnn_time_window: int = 6
-    cnn_epochs: int = 8
+    cnn_epochs: int = 30
     cnn_width: int = 16
     cnn_lr: float = 2e-3
     cnn_snr_weight: float = 0.2
@@ -370,11 +370,11 @@ def simulate_fso_sequence(cfg: FSOEngineConfig):
     dx_receiver = receiver_span / n_receiver
     coords_receiver = (np.arange(n_receiver) - (n_receiver - 1) / 2.0) * dx_receiver
     if direction == "uplink" and z_vac > 1e-9:
-        output_mode = "uplink: atmospheric BPM -> vacuum Zoom-DFT -> annular pupil relay"
+        output_mode = "uplink: atmospheric BPM -> vacuum Zoom-DFT -> circular pupil relay"
     elif direction == "downlink" and z_vac > 1e-9:
-        output_mode = "downlink: analytic vacuum -> atmospheric BPM -> annular pupil relay"
+        output_mode = "downlink: analytic vacuum -> atmospheric BPM -> circular pupil relay"
     else:
-        output_mode = f"{direction}: split-step atmospheric BPM -> annular pupil relay"
+        output_mode = f"{direction}: split-step atmospheric BPM -> circular pupil relay"
     coords_out = coords_receiver / reducer
     dx_out = dx_receiver / reducer
     xr, yr = np.meshgrid(coords_receiver, coords_receiver, indexing="ij")

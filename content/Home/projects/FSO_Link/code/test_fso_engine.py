@@ -137,7 +137,8 @@ class FSOEngineTests(unittest.TestCase):
         self.assertEqual((cfg.pd_rows, cfg.pd_cols), (4, 4))
         self.assertAlmostEqual(cfg.pd_pitch_m, 250e-6)
         self.assertAlmostEqual(cfg.pupil_relay_output_diameter_m, 1e-3)
-        self.assertAlmostEqual(cfg.central_obstruction_ratio, 0.31)
+        self.assertAlmostEqual(cfg.central_obstruction_ratio, 0.0)
+        self.assertEqual(cfg.cnn_epochs, 30)
 
         allocation = _waterfill_power_allocation(np.asarray([10.0, 2.0, 0.5, 0.0]))
         self.assertAlmostEqual(float(np.sum(allocation)), 1.0)

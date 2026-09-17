@@ -8,7 +8,7 @@ receiver, ADC, CNN, and communication evaluation:
 
 ```text
 von Karman phase screens + split-step BPM + Taylor frozen flow
-    -> annular 203.2 mm telescope entrance pupil
+    -> unobstructed 203.2 mm circular entrance pupil
     -> 7.5 mm collimated pupil
     -> adjustable pupil relay (1.0 mm nominal output)
     -> 4x4 APD array and optional external MLA
@@ -26,7 +26,7 @@ von Karman phase screens + split-step BPM + Taylor frozen flow
 - TX full-angle divergence: 28 urad
 - TX/RX antenna gain cross-check: 103.1/112.3 dB
 - RX telescope: EdgeHD 8, 203.2 mm aperture, 2032 mm focal length
-- Central obstruction: 31% by diameter
+- Central obstruction: disabled in the current research model
 
 The GUI can also run the reverse uplink geometry. Specified antenna gains are
 reported only as a scalar link-budget cross-check; the wave-optics power is not
@@ -49,9 +49,10 @@ lens. This gives a 12.6% geometric fill factor, approximately 9 dB below a full
 250 um square cell. With the MLA enabled, the clear square lenslet area is
 collected with the configured optical efficiency.
 
-The central telescope obstruction is modeled as an annular mask before pupil
-reduction. It therefore appears in the reduced pupil and changes the individual
-APD powers instead of being represented only by a scalar loss.
+The current GUI and dataset intentionally use an unobstructed circular pupil,
+so no central shadow is applied to the reduced pupil or individual APD powers.
+The engine retains an optional obstruction-ratio parameter only for later
+sensitivity studies against the physical telescope.
 
 ## Stable Time Display
 
@@ -75,6 +76,12 @@ distance, and seed values. The offline dataset already includes `r0` in its
 physics labels. Each sample also carries a simulation ID, and `train_ai_pd.py`
 splits training and validation by complete simulation rather than mixing time
 windows from one realization. `eval_ai_pd.py` reports `r0` MAE and MAPE.
+
+The GUI uses 30 epochs as a practical exploratory default. For one-condition
+GUI runs, 20-30 epochs is normally sufficient; use 50 only when the loss is
+still decreasing. Offline multi-condition training should use validation-based
+early stopping, typically allowing 50-100 maximum epochs rather than selecting
+one fixed epoch count blindly.
 
 ## Diversity and Multiplexing
 
@@ -105,7 +112,7 @@ Offline training and FPGA export remain:
 
 ```powershell
 .\.venv\Scripts\python.exe .\ai_pd_dataset.py --out ai_pd_data --num-sims 20
-.\.venv\Scripts\python.exe .\train_ai_pd.py --data ai_pd_data --epochs 30
+.\.venv\Scripts\python.exe .\train_ai_pd.py --data ai_pd_data --epochs 100 --patience 10
 .\.venv\Scripts\python.exe .\eval_ai_pd.py --data ai_pd_data --checkpoint ai_pd_runs\best_ai_pd.pt
 .\.venv\Scripts\python.exe .\export_ai_pd_onnx.py --checkpoint ai_pd_runs\best_ai_pd.pt
 ```

@@ -80,7 +80,9 @@ def main():
     parser = argparse.ArgumentParser(description="Train CNN predictor for PD-array FSO combining.")
     parser.add_argument("--data", default="ai_pd_data")
     parser.add_argument("--out", default="ai_pd_runs")
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--patience", type=int, default=8)
+    parser.add_argument("--min-delta", type=float, default=1e-5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--val-frac", type=float, default=0.15)
@@ -143,6 +145,7 @@ def main():
     config_path = Path(args.data) / "config.json"
     data_config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
     best_val = float("inf")
+    epochs_without_improvement = 0
     log_path = out_dir / "history.csv"
     with log_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
@@ -197,8 +200,9 @@ def main():
                 "val_phys": va["phys"],
                 "lr": lr_now,
             })
-        if va["loss"] < best_val:
+        if va["loss"] < best_val - args.min_delta:
             best_val = va["loss"]
+            epochs_without_improvement = 0
             ckpt = {
                 "model": model.state_dict(),
                 "model_args": {
@@ -214,6 +218,14 @@ def main():
                 "best_val": best_val,
             }
             torch.save(ckpt, out_dir / "best_ai_pd.pt")
+        else:
+            epochs_without_improvement += 1
+            if args.patience > 0 and epochs_without_improvement >= args.patience:
+                print(
+                    f"early stopping at epoch {epoch}: validation loss did not improve "
+                    f"for {args.patience} epochs"
+                )
+                break
 
 
 if __name__ == "__main__":

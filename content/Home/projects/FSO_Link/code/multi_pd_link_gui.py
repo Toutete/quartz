@@ -97,7 +97,6 @@ class MultiPDLinkGUI:
                 ("rx_lens_diameter_mm", "RX lens diameter (mm)", "203.2"),
                 ("rx_antenna_gain_db", "RX antenna gain (dB)", "112.3"),
                 ("telescope_focal_length_mm", "Telescope focal length (mm)", "2032"),
-                ("central_obstruction_pct", "Central obstruction (diameter %)", "31"),
                 ("collimator_focal_length_mm", "Collimator focal length (mm)", "75"),
                 ("collimated_pupil_mm", "Collimated pupil diameter (mm)", "7.5"),
                 ("relay_output_pupil_mm", "Relay output pupil (mm)", "1.0"),
@@ -126,7 +125,7 @@ class MultiPDLinkGUI:
                 ("outage_evm_pct", "Outage EVM threshold (%)", "20"),
                 ("fade_outage_pct", "Fade outage target (%)", "1"),
                 ("cnn_time_window", "CNN time window", "6"),
-                ("cnn_epochs", "CNN epochs", "8"),
+                ("cnn_epochs", "CNN epochs", "30"),
                 ("cnn_width", "CNN width", "16"),
                 ("cnn_lr", "CNN learning rate", "2e-3"),
                 ("cnn_snr_weight", "CNN SNR loss weight", "0.2"),
@@ -261,7 +260,7 @@ class MultiPDLinkGUI:
             rx_lens_diameter_m=self._get_float("rx_lens_diameter_mm") * 1e-3,
             rx_antenna_gain_db=self._get_float("rx_antenna_gain_db"),
             telescope_focal_length_m=self._get_float("telescope_focal_length_mm") * 1e-3,
-            central_obstruction_ratio=self._get_float("central_obstruction_pct") / 100.0,
+            central_obstruction_ratio=0.0,
             collimator_focal_length_m=self._get_float("collimator_focal_length_mm") * 1e-3,
             collimated_pupil_diameter_m=self._get_float("collimated_pupil_mm") * 1e-3,
             pupil_relay_output_diameter_m=self._get_float("relay_output_pupil_mm") * 1e-3,
@@ -498,13 +497,14 @@ class MultiPDLinkGUI:
                 (0.0, 0.0), lens_radius_mm, fill=False, edgecolor="lime",
                 linewidth=1.6, linestyle="--", label="203.2 mm entrance pupil",
             ))
-            ax_rx.add_patch(Circle(
-                (0.0, 0.0), obstruction_radius_mm, fill=False, edgecolor="cyan",
-                linewidth=1.3, linestyle="--", label="31% central obstruction",
-            ))
+            if obstruction_radius_mm > 0.0:
+                ax_rx.add_patch(Circle(
+                    (0.0, 0.0), obstruction_radius_mm, fill=False, edgecolor="cyan",
+                    linewidth=1.3, linestyle="--", label="Optional central obstruction",
+                ))
             rx_zoom = min(lens_radius_mm * 1.18, max(abs(x_rx[0]), abs(x_rx[-1])))
             ax_rx.set(xlim=(-rx_zoom, rx_zoom), ylim=(-rx_zoom, rx_zoom), xlabel="x (mm)", ylabel="y (mm)")
-            ax_rx.set_title("1. Receiver plane with annular telescope aperture")
+            ax_rx.set_title("1. Receiver plane with unobstructed circular aperture")
             ax_rx.set_aspect("equal", adjustable="box")
             ax_rx.legend(loc="upper right", fontsize=7)
             self.fig_optics.colorbar(
@@ -524,10 +524,11 @@ class MultiPDLinkGUI:
                 (0.0, 0.0), reduced_radius_mm, fill=False, edgecolor="lime",
                 linewidth=1.6, linestyle="--", label="1.0 mm reduced pupil",
             ))
-            ax_reduced.add_patch(Circle(
-                (0.0, 0.0), reduced_obstruction_mm, fill=False, edgecolor="cyan",
-                linewidth=1.3, linestyle="--", label="Reduced central obstruction",
-            ))
+            if reduced_obstruction_mm > 0.0:
+                ax_reduced.add_patch(Circle(
+                    (0.0, 0.0), reduced_obstruction_mm, fill=False, edgecolor="cyan",
+                    linewidth=1.3, linestyle="--", label="Optional reduced obstruction",
+                ))
             pitch_mm = cfg.pd_pitch_m * 1e3
             lens_radius_pd_mm = cfg.pd_integrated_lens_diameter_m * 0.5e3
             junction_radius_mm = cfg.pd_active_junction_diameter_m * 0.5e3
@@ -602,7 +603,7 @@ class MultiPDLinkGUI:
             ax_trace.legend(ncol=4, fontsize=7)
 
             self.fig_optics.suptitle(
-                f"{r['link_direction'].upper()}: annular entrance pupil -> 7.5 mm collimated pupil -> 1.0 mm 4x4 APD plane",
+                f"{r['link_direction'].upper()}: circular entrance pupil -> 7.5 mm collimated pupil -> 1.0 mm 4x4 APD plane",
                 fontsize=12,
             )
             self._optical_artists = {
