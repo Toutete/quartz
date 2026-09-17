@@ -5,36 +5,50 @@ from pathlib import Path
 
 import numpy as np
 
-from colleague_multi_pd_link import ColleagueMultiPDConfig, simulate_colleague_multi_pd_sequence
+from fso_engine import FSOEngineConfig, simulate_fso_sequence
+
+
+PHYSICS_LABELS = [
+    "log10_cn2",
+    "distance_km",
+    "wind_over_50_mps",
+    "beam_waist_over_50_mm",
+    "r0_m",
+    "rytov_variance",
+]
 
 
 @dataclass
 class DatasetConfig:
-    rows: int = 2
+    rows: int = 4
     cols: int = 4
-    spacing_mm: float = 1.0
+    pitch_um: float = 250.0
     origin_x_mm: float = 0.0
     origin_y_mm: float = 0.0
-    lens_radius_mm: float = 25.0
-    beam_reducer_ratio: float = 10.0
-    pd_active_radius_um: float = 250.0
-    microlens_enabled: bool = False
-    microlens_efficiency: float = 0.85
+    rx_lens_diameter_mm: float = 203.2
+    collimated_pupil_mm: float = 7.5
+    relay_output_pupil_mm: float = 1.0
+    central_obstruction_ratio: float = 0.31
+    integrated_lens_diameter_um: float = 100.0
+    active_junction_diameter_um: float = 25.0
+    external_mla_enabled: bool = False
+    external_mla_fill_factor: float = 0.95
+    external_mla_efficiency: float = 0.85
     time_window: int = 12
     horizon: int = 1
     frames: int = 24
     grid_n: int = 256
     n_screens: int = 5
     wavelength_nm: float = 1550.0
-    tx_power_dbm: float = 10.0
+    tx_power_dbm: float = 20.0
     cn2_log10_min: float = -16.0
     cn2_log10_max: float = -13.5
-    distance_min_m: float = 400.0
-    distance_max_m: float = 2000.0
+    distance_min_m: float = 20_000.0
+    distance_max_m: float = 20_000.0
     wind_min_m_s: float = 1.0
     wind_max_m_s: float = 40.0
-    w0_min_mm: float = 20.0
-    w0_max_mm: float = 55.0
+    w0_min_mm: float = 35.0
+    w0_max_mm: float = 35.0
     l0_m: float = 0.005
     L0_m: float = 50.0
     delta_t_s: float = 0.5e-3
@@ -58,7 +72,7 @@ def sample_physics(rng, cfg):
 
 def simulate_pd_traces(physics, cfg):
     grid_mode = "small" if cfg.grid_n <= 256 else "medium" if cfg.grid_n <= 384 else "large"
-    sim_cfg = ColleagueMultiPDConfig(
+    sim_cfg = FSOEngineConfig(
         link_direction="downlink",
         hv57_ground_cn2_A=physics["Cn2"],
         wavelength_m=cfg.wavelength_nm * 1e-9,
@@ -75,17 +89,21 @@ def simulate_pd_traces(physics, cfg):
         frame_interval_s=cfg.delta_t_s,
         wind_speed_mps=physics["wind_speed"],
         tx_power_dbm=cfg.tx_power_dbm,
-        rx_lens_diameter_m=2.0 * cfg.lens_radius_mm * 1e-3,
-        beam_reducer_ratio=cfg.beam_reducer_ratio,
+        rx_lens_diameter_m=cfg.rx_lens_diameter_mm * 1e-3,
+        central_obstruction_ratio=cfg.central_obstruction_ratio,
+        collimated_pupil_diameter_m=cfg.collimated_pupil_mm * 1e-3,
+        pupil_relay_output_diameter_m=cfg.relay_output_pupil_mm * 1e-3,
         pd_rows=cfg.rows,
         pd_cols=cfg.cols,
-        pd_spacing_m=cfg.spacing_mm * 1e-3,
-        pd_radius_m=cfg.pd_active_radius_um * 1e-6,
-        microlens_enabled=cfg.microlens_enabled,
-        microlens_efficiency=cfg.microlens_efficiency,
+        pd_pitch_m=cfg.pitch_um * 1e-6,
+        pd_integrated_lens_diameter_m=cfg.integrated_lens_diameter_um * 1e-6,
+        pd_active_junction_diameter_m=cfg.active_junction_diameter_um * 1e-6,
+        external_mla_enabled=cfg.external_mla_enabled,
+        external_mla_fill_factor=cfg.external_mla_fill_factor,
+        external_mla_efficiency=cfg.external_mla_efficiency,
         cnn_epochs=0,
     )
-    result = simulate_colleague_multi_pd_sequence(sim_cfg)
+    result = simulate_fso_sequence(sim_cfg)
     traces = result["pd_rx_power_w"].T.reshape(cfg.rows, cfg.cols, cfg.frames)
     return traces, {
         "r0_m": float(result["r0_m"]),
@@ -134,9 +152,11 @@ def make_supervised_samples(traces, physics, meta, cfg, rng):
 def generate_dataset(out_dir, num_sims, shard_size, seed, cfg):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "config.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    config_payload = asdict(cfg)
+    config_payload["physics_labels"] = PHYSICS_LABELS
+    (out / "config.json").write_text(json.dumps(config_payload, indent=2), encoding="utf-8")
     rng = np.random.default_rng(seed)
-    buffers = {"x": [], "y_power_log": [], "y_weight": [], "y_phys": []}
+    buffers = {"x": [], "y_power_log": [], "y_weight": [], "y_phys": [], "sim_id": []}
     shard_idx = 0
 
     def flush():
@@ -146,7 +166,7 @@ def generate_dataset(out_dir, num_sims, shard_size, seed, cfg):
         path = out / f"shard_{shard_idx:04d}.npz"
         np.savez_compressed(path, **{k: np.asarray(v) for k, v in buffers.items()})
         shard_idx += 1
-        buffers = {"x": [], "y_power_log": [], "y_weight": [], "y_phys": []}
+        buffers = {"x": [], "y_power_log": [], "y_weight": [], "y_phys": [], "sim_id": []}
 
     for i in range(num_sims):
         physics = sample_physics(rng, cfg)
@@ -156,6 +176,7 @@ def generate_dataset(out_dir, num_sims, shard_size, seed, cfg):
         buffers["y_power_log"].extend(y_power)
         buffers["y_weight"].extend(y_weight)
         buffers["y_phys"].extend(y_phys)
+        buffers["sim_id"].extend([i] * len(xs))
         if len(buffers["x"]) >= shard_size:
             flush()
         print(f"[{i + 1}/{num_sims}] logCn2={physics['log_cn2']:.2f}, L={physics['L']:.0f} m, samples={len(xs)}")
@@ -168,7 +189,7 @@ def main():
     parser.add_argument("--num-sims", type=int, default=20)
     parser.add_argument("--shard-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--rows", type=int, default=2)
+    parser.add_argument("--rows", type=int, default=4)
     parser.add_argument("--cols", type=int, default=4)
     parser.add_argument("--frames", type=int, default=24)
     parser.add_argument("--time-window", type=int, default=12)

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from tqdm import tqdm
 
 from ai_pd_model import AIPDNet, weights_from_power_log
@@ -22,6 +22,10 @@ class NPZPDDataset(Dataset):
         self.y_power_log = np.concatenate([a["y_power_log"] for a in arrays], axis=0).astype(np.float32)
         self.y_weight = np.concatenate([a["y_weight"] for a in arrays], axis=0).astype(np.float32)
         self.y_phys = np.concatenate([a["y_phys"] for a in arrays], axis=0).astype(np.float32)
+        if all("sim_id" in a.files for a in arrays):
+            self.sim_id = np.concatenate([a["sim_id"] for a in arrays], axis=0).astype(np.int64)
+        else:
+            self.sim_id = None
 
     def __len__(self):
         return self.x.shape[0]
@@ -89,13 +93,33 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = NPZPDDataset(args.data)
-    n_val = max(1, int(len(dataset) * args.val_frac))
-    n_train = len(dataset) - n_val
-    train_ds, val_ds = random_split(
-        dataset,
-        [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),
+    unique_simulations = (
+        np.unique(dataset.sim_id) if dataset.sim_id is not None else np.asarray([])
     )
+    if len(unique_simulations) >= 2:
+        split_rng = np.random.default_rng(args.seed)
+        shuffled = split_rng.permutation(unique_simulations)
+        n_val_simulations = min(
+            len(shuffled) - 1,
+            max(1, int(round(len(shuffled) * args.val_frac))),
+        )
+        val_simulations = set(shuffled[:n_val_simulations].tolist())
+        val_indices = np.flatnonzero(np.isin(dataset.sim_id, list(val_simulations))).tolist()
+        train_indices = np.flatnonzero(~np.isin(dataset.sim_id, list(val_simulations))).tolist()
+        train_ds = Subset(dataset, train_indices)
+        val_ds = Subset(dataset, val_indices)
+        print(
+            f"group split: {len(unique_simulations) - n_val_simulations} training simulations, "
+            f"{n_val_simulations} validation simulations"
+        )
+    else:
+        n_val = max(1, int(len(dataset) * args.val_frac))
+        n_train = len(dataset) - n_val
+        train_ds, val_ds = random_split(
+            dataset,
+            [n_train, n_val],
+            generator=torch.Generator().manual_seed(args.seed),
+        )
 
     rows, cols = dataset.x.shape[2], dataset.x.shape[3]
     time_window = dataset.x.shape[1]

@@ -1,130 +1,107 @@
-# Colleague FSO Multi-PD Receiver
+# Physics-Informed FSO 4x4 APD Receiver
 
-## Purpose
+## Integrated Flow
 
-This folder contains one FSO simulation path. The optical propagation engine is
-the locally installed colleague simulator under `external/FSO-simulator`; the
-former standalone SSFM GUIs and simplified channel engine have been removed.
-
-The integrated receiver evaluates this chain:
+`fso_engine.py` is the single simulation API used by the GUI, dataset generator,
+and tests. It integrates the installed split-step wave-optics modules with the
+receiver, ADC, CNN, and communication evaluation:
 
 ```text
-colleague von Karman phase screens + split-step BPM
-    -> receiver-plane optical intensity
-    -> circular receiver-lens aperture
-    -> power-preserving beam reduction
-    -> Multi-PD or PD-array collection
-    -> responsivity, current noise, and per-channel ADC
-    -> temporal CNN next-frame prediction
-    -> digital combining
-    -> SNR, EVM, BER, outage probability, and fade margin
+von Karman phase screens + split-step BPM + Taylor frozen flow
+    -> annular 203.2 mm telescope entrance pupil
+    -> 7.5 mm collimated pupil
+    -> adjustable pupil relay (1.0 mm nominal output)
+    -> 4x4 APD array and optional external MLA
+    -> per-channel photocurrent and ADC
+    -> temporal CNN next-frame power and r0 heads
+    -> diversity combining and communication metrics
 ```
 
-## Time-Domain Physics
-
-One set of colleague von Karman phase screens is generated for each run. The
-screens are shifted between frames according to the configured wind speed,
-wind direction, and frame interval. This is a discrete-grid Taylor frozen-flow
-model, so adjacent frames are physically correlated rather than independent
-random-seed realizations.
-
-The GUI reports Fried parameter, Greenwood frequency, Rytov variance, Strehl
-ratio, aperture capture, scintillation index, lag-one temporal correlation, and
-split-step power-conservation error.
-
-## Link Direction and Default Downlink
-
-The GUI can run either direction. `downlink` places the transmitter at the
-configured upper altitude and the receiver at ground level; `uplink` reverses
-those endpoints. The order of the altitude-dependent phase screens is also
-reversed, so this is not only a plot label.
-
-The default downlink is:
+## Default Downlink
 
 - TX power: 20 dBm
-- vertical distance: 20 km
-- wavelength: 1550 nm
-- TX lens diameter: 70 mm
+- Distance: 20 km
+- Wavelength: 1550 nm
+- TX aperture: 70 mm
 - TX full-angle divergence: 28 urad
-- TX antenna gain: 103.1 dB
-- RX lens diameter: 203.2 mm
-- RX antenna gain: 112.3 dB
+- TX/RX antenna gain cross-check: 103.1/112.3 dB
+- RX telescope: EdgeHD 8, 203.2 mm aperture, 2032 mm focal length
+- Central obstruction: 31% by diameter
 
-The 28 urad value is interpreted as full-angle Gaussian divergence. The 70 mm
-aperture clips the inferred 35.24 mm waist to 35.00 mm, giving a modeled full
-angle of 28.19 urad. The ideal gains calculated from `20 log10(pi D/lambda)` are
-103.04 dB and 112.29 dB, consistent with the specified link-budget gains.
-Specified antenna gains are used only for the scalar link-budget cross-check;
-they are not multiplied into the wave-optics result, where diffraction and
-aperture collection are already modeled explicitly.
+The GUI can also run the reverse uplink geometry. Specified antenna gains are
+reported only as a scalar link-budget cross-check; the wave-optics power is not
+multiplied by those gains a second time.
 
-## Receiver Optics
+## Receiver PoC Specification
 
-The first GUI tab shows two synchronized optical planes for the selected time
-frame:
+The default receiver follows
+`../concepts/FSO_OGS_APD_Array_Receiver_PoC_Spec_2026-09-17.md`:
 
-1. Receiver-plane intensity before aperture clipping. The receiver lens is a
-   green dashed circle.
-2. The power-preserving reduced plane after clipping and demagnification. The
-   reduced pupil is a green dashed circle and each PD active area is a cyan
-   dashed circle.
+- AC254-075-C-class 75 mm collimator and approximately 7.5 mm pupil;
+- 7.5:1 adjustable pupil relay with 1.0 mm nominal output;
+- 4x4 APD20D1-class InGaAs array;
+- 250 um pitch, 100 um integrated lens, and 25 um nominal junction;
+- 20 GHz electrical bandwidth and 28 Gbaud/channel target;
+- optional 250 um-pitch external MLA with at least 95% fill factor.
 
-When the microlens option is enabled, dotted square collection cells show the
-area redirected to each PD. Microlens efficiency is limited to 0 through 1, so
-the model cannot create optical power.
+Without the external MLA, each channel collects through its 100 um integrated
+lens. This gives a 12.6% geometric fill factor, approximately 9 dB below a full
+250 um square cell. With the MLA enabled, the clear square lenslet area is
+collected with the configured optical efficiency.
 
-## CNN and Combining
+The central telescope obstruction is modeled as an annular mask before pupil
+reduction. It therefore appears in the reduced pupil and changes the individual
+APD powers instead of being represented only by a scalar loss.
 
-The temporal CNN receives per-PD power reconstructed from quantized ADC
-currents, not ideal simulator power. It predicts the next normalized PD power
-map and derives nonnegative combining weights from that map.
+## Stable Time Display
 
-The training objective contains:
+Receiver-plane and reduced-pupil plots use physical power density in W/m2. A
+single scale is calculated for the complete run from TX power, modeled optical
+loss, the no-turbulence reference, and the run-wide intensity distribution.
+The APD heatmap and trace axes are likewise fixed for the complete run. Moving
+the frame slider updates existing image artists; it does not recreate axes or
+colorbars.
 
-- next-frame log-power error;
-- an electrical-SNR proxy based on the predicted weights; and
-- a total-power consistency term.
+## CNN and Fried Parameter
 
-The communication comparison includes a center PD, selection combining, EGC,
-oracle MRC, and the predictive CNN. Electrical SNR includes detector NEP,
-configured current noise, shot noise, and ADC quantization noise. BER uses the
-standard Gray-coded square M-QAM approximation.
+The temporal CNN receives power reconstructed from quantized APD currents. It
+predicts the next normalized 4x4 power map, produces predictive combining
+weights, and has an auxiliary output for `log10(r0 / Dsub)`.
 
-`Additional optical loss` represents losses not contained in the normalized
-wave-optics propagation, such as lens transmission, filter loss, coupling loss,
-and deliberate attenuation before the TIA. Its default is 30 dB so the
-high-optical-power 20 km example does not immediately saturate the default
-50 uA ADC range.
+The GUI trains at one selected turbulence condition, so its displayed `r0`
+estimate is a supervised single-condition calibration check. A useful estimator
+must be trained and validated with `ai_pd_dataset.py` over multiple `Cn2`, wind,
+distance, and seed values. The offline dataset already includes `r0` in its
+physics labels. Each sample also carries a simulation ID, and `train_ai_pd.py`
+splits training and validation by complete simulation rather than mixing time
+windows from one realization. `eval_ai_pd.py` reports `r0` MAE and MAPE.
 
-## Install and Run
+## Diversity and Multiplexing
 
-Install or update the colleague simulator:
+The equivalent 4x4 telescope subaperture is 203.2/4 = 50.8 mm. The engine uses
+`r0 / 50.8 mm` to report a regime:
+
+- below 1: strong turbulence; emphasize outage-robust or predictive MRC;
+- 1 to 2: transition; keep diversity and test mode independence;
+- above 2: weak turbulence; spatial multiplexing may be investigated.
+
+The current optical model sends one beam carrying one data stream. Its 16 APD
+outputs therefore demonstrate spatial diversity, not spatial multiplexing. The
+GUI reports both the one-stream MRC capacity and a water-filled independent-
+channel capacity proxy. This proxy is not a bound and may be lower than MRC at
+low SNR. It becomes an achievable multiplexing
+metric only after independent TX spatial modes and a measured/simulated MIMO
+channel matrix are added.
+
+## Run
 
 ```powershell
-.\install_colleague_fso_simulator.ps1
-```
-
-Install Python dependencies:
-
-```powershell
+.\install_fso_engine_dependency.ps1
 .\.venv\Scripts\python.exe -m pip install -r requirements-ai.txt
-```
-
-Run the single integrated GUI:
-
-```powershell
 .\run_multi_pd_link_gui.ps1
 ```
 
-The default experiment is the 20 km downlink above at one selected `Cn2`. Use
-the direction selector for uplink, and use the frame slider or Play control to
-inspect the synchronized receiver plane, reduced plane, PD map, and PD power
-traces.
-
-## Offline Dataset and FPGA Export
-
-`ai_pd_dataset.py` now calls the same colleague-based physical engine used by
-the GUI. The remaining offline flow is:
+Offline training and FPGA export remain:
 
 ```powershell
 .\.venv\Scripts\python.exe .\ai_pd_dataset.py --out ai_pd_data --num-sims 20
@@ -132,7 +109,3 @@ the GUI. The remaining offline flow is:
 .\.venv\Scripts\python.exe .\eval_ai_pd.py --data ai_pd_data --checkpoint ai_pd_runs\best_ai_pd.pt
 .\.venv\Scripts\python.exe .\export_ai_pd_onnx.py --checkpoint ai_pd_runs\best_ai_pd.pt
 ```
-
-For FPGA deployment, start with Q1.15 combining weights and host-side inference.
-Move the compact CNN into the FPGA only after the optical and communication
-metrics are validated against measured PD traces.

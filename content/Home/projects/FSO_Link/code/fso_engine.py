@@ -37,8 +37,8 @@ except Exception:
 
 
 @dataclass
-class ColleagueMultiPDConfig:
-    """Configuration for the colleague-FSO-based Multi-PD receiver."""
+class FSOEngineConfig:
+    """Wave-optics, APD-array, ADC, and communication configuration."""
 
     link_direction: str = "downlink"
     hv57_ground_cn2_A: float = 5e-14
@@ -66,13 +66,21 @@ class ColleagueMultiPDConfig:
     datarate_bps: float = 10e9
     rx_lens_diameter_m: float = 0.2032
     rx_antenna_gain_db: float = 112.3
-    beam_reducer_ratio: float = 10.0
+    telescope_focal_length_m: float = 2.032
+    central_obstruction_ratio: float = 0.31
+    collimator_focal_length_m: float = 0.075
+    collimated_pupil_diameter_m: float = 7.5e-3
+    pupil_relay_output_diameter_m: float = 1.0e-3
     pd_rows: int = 4
     pd_cols: int = 4
-    pd_spacing_m: float = 5.0e-3
-    pd_radius_m: float = 1.5e-3
-    microlens_enabled: bool = True
-    microlens_efficiency: float = 0.85
+    pd_pitch_m: float = 250e-6
+    pd_integrated_lens_diameter_m: float = 100e-6
+    pd_active_junction_diameter_m: float = 25e-6
+    external_mla_enabled: bool = False
+    external_mla_fill_factor: float = 0.95
+    external_mla_efficiency: float = 0.85
+    apd_bandwidth_hz: float = 20e9
+    apd_symbol_rate_baud: float = 28e9
     adc_bits: int = 8
     adc_full_scale_a: float = 50e-6
     current_noise_rms_a: float = 20e-9
@@ -87,6 +95,7 @@ class ColleagueMultiPDConfig:
     cnn_lr: float = 2e-3
     cnn_snr_weight: float = 0.2
     cnn_physics_weight: float = 0.05
+    cnn_r0_weight: float = 0.1
 
 
 def dbm_to_w(dbm: float) -> float:
@@ -103,7 +112,7 @@ def aperture_gain_db(diameter_m: float, wavelength_m: float) -> float:
     return float(20.0 * np.log10(np.pi * diameter_m / wavelength_m))
 
 
-def tx_beam_waist_m(cfg: ColleagueMultiPDConfig) -> float:
+def tx_beam_waist_m(cfg: FSOEngineConfig) -> float:
     """Gaussian waist implied by the configured full-angle divergence."""
 
     divergence_waist = 2.0 * cfg.wavelength_m / (
@@ -133,7 +142,7 @@ def pd_grid_positions(rows: int, cols: int, spacing_m: float):
     return [(c * spacing_m - x0, r * spacing_m - y0) for r in range(rows) for c in range(cols)]
 
 
-def _validate_config(cfg: ColleagueMultiPDConfig):
+def _validate_config(cfg: FSOEngineConfig):
     direction = cfg.link_direction.lower().strip()
     if direction not in {"downlink", "uplink"}:
         raise ValueError("Link direction must be downlink or uplink.")
@@ -144,9 +153,11 @@ def _validate_config(cfg: ColleagueMultiPDConfig):
         "TX full-angle divergence": cfg.tx_divergence_full_angle_rad,
         "frame interval": cfg.frame_interval_s,
         "receiver lens diameter": cfg.rx_lens_diameter_m,
-        "beam reducer ratio": cfg.beam_reducer_ratio,
-        "PD spacing": cfg.pd_spacing_m,
-        "PD radius": cfg.pd_radius_m,
+        "collimated pupil diameter": cfg.collimated_pupil_diameter_m,
+        "pupil relay output diameter": cfg.pupil_relay_output_diameter_m,
+        "PD pitch": cfg.pd_pitch_m,
+        "PD integrated lens diameter": cfg.pd_integrated_lens_diameter_m,
+        "PD active junction diameter": cfg.pd_active_junction_diameter_m,
         "ADC full scale": cfg.adc_full_scale_a,
         "data rate": cfg.datarate_bps,
     }
@@ -159,12 +170,19 @@ def _validate_config(cfg: ColleagueMultiPDConfig):
         raise ValueError("At least three time frames are required.")
     if cfg.n_screens < 0:
         raise ValueError("The number of phase screens cannot be negative.")
-    if not 0.0 <= cfg.microlens_efficiency <= 1.0:
-        raise ValueError("Microlens efficiency must be between 0 and 1.")
+    if not 0.0 <= cfg.central_obstruction_ratio < 1.0:
+        raise ValueError("Central obstruction ratio must be in [0, 1).")
+    if not 0.0 < cfg.external_mla_fill_factor <= 1.0:
+        raise ValueError("External MLA fill factor must be in (0, 1].")
+    if not 0.0 <= cfg.external_mla_efficiency <= 1.0:
+        raise ValueError("External MLA efficiency must be between 0 and 1.")
+    array_width = max(cfg.pd_rows, cfg.pd_cols) * cfg.pd_pitch_m
+    if array_width > 1.05 * cfg.pupil_relay_output_diameter_m:
+        raise ValueError("The APD grid is wider than the configured reduced pupil.")
     qam_ber_from_snr(np.asarray([1.0]), cfg.qam_order)
 
 
-def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
+def _make_spatial_grid(cfg: FSOEngineConfig, tc: TurbulenceConfig):
     mode = cfg.grid_mode.lower().strip()
     if mode == "small":
         n = 256
@@ -186,7 +204,7 @@ def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
     return SpatialGrid.from_span_step(span, span / n)
 
 
-def _build_channel(cfg: ColleagueMultiPDConfig):
+def _build_channel(cfg: FSOEngineConfig):
     direction = cfg.link_direction.lower().strip()
     lower_altitude = cfg.ground_altitude_m
     upper_altitude = cfg.ground_altitude_m + cfg.link_distance_m
@@ -218,7 +236,7 @@ def _build_channel(cfg: ColleagueMultiPDConfig):
     )
     rx_optics = RxOptics(
         aperture_diameter_m=cfg.rx_lens_diameter_m,
-        exit_pupil_diameter_m=cfg.rx_lens_diameter_m / cfg.beam_reducer_ratio,
+        exit_pupil_diameter_m=cfg.pupil_relay_output_diameter_m,
     )
     fso = FSOChannel(tx_optics=tx_optics, rx_optics=rx_optics, turbulence=tc, geometry=geo)
     return fso, geo, tc, tx_optics
@@ -229,14 +247,17 @@ def _pd_power_from_intensity(intensity, coords, dx_out, positions, cfg):
     powers = []
     active_masks = []
     collection_masks = []
-    half_pitch = cfg.pd_spacing_m * 0.5
+    half_pitch = cfg.pd_pitch_m * 0.5
+    integrated_lens_radius = cfg.pd_integrated_lens_diameter_m * 0.5
+    junction_radius = cfg.pd_active_junction_diameter_m * 0.5
     for px, py in positions:
-        active = ((x - px) ** 2 + (y - py) ** 2) <= cfg.pd_radius_m**2
-        if cfg.microlens_enabled:
-            collection = (np.abs(x - px) < half_pitch) & (np.abs(y - py) < half_pitch)
-            efficiency = cfg.microlens_efficiency
+        active = ((x - px) ** 2 + (y - py) ** 2) <= junction_radius**2
+        if cfg.external_mla_enabled:
+            half_clear = half_pitch * np.sqrt(cfg.external_mla_fill_factor)
+            collection = (np.abs(x - px) <= half_clear) & (np.abs(y - py) <= half_clear)
+            efficiency = cfg.external_mla_efficiency
         else:
-            collection = active
+            collection = ((x - px) ** 2 + (y - py) ** 2) <= integrated_lens_radius**2
             efficiency = 1.0
         powers.append(float(np.sum(intensity * collection) * dx_out**2 * efficiency))
         active_masks.append(active)
@@ -254,7 +275,7 @@ def _propagate_with_frozen_screens(
     dx,
     wavelength,
 ):
-    """Use the colleague split-step BPM with Taylor-shifted phase screens."""
+    """Apply split-step BPM with Taylor-shifted frozen-flow phase screens."""
 
     if z_prop_length <= 0:
         return field_in.copy(), 0.0
@@ -300,7 +321,7 @@ def _resample_complex_plane(field, source_coords, target_coords):
     return real + 1j * imag
 
 
-def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
+def simulate_fso_sequence(cfg: FSOEngineConfig):
     """Generate a time-correlated optical sequence and Multi-PD powers."""
 
     _validate_config(cfg)
@@ -338,25 +359,27 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
     field_in[0, :, :, 0] = e_in
     field_in[1, :, :, 0] = e_in
 
-    reducer = float(cfg.beam_reducer_ratio)
+    reducer = float(cfg.rx_lens_diameter_m / cfg.pupil_relay_output_diameter_m)
     r_lens = cfg.rx_lens_diameter_m / 2.0
-    positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m)
-    array_radius = max(max(abs(px), abs(py)) for px, py in positions) + cfg.pd_spacing_m
+    r_obstruction = cfg.central_obstruction_ratio * r_lens
+    positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_pitch_m)
+    array_radius = max(max(abs(px), abs(py)) for px, py in positions) + cfg.pd_pitch_m
 
     n_receiver = 256
     receiver_span = max(2.4 * r_lens, 2.2 * array_radius * reducer)
     dx_receiver = receiver_span / n_receiver
     coords_receiver = (np.arange(n_receiver) - (n_receiver - 1) / 2.0) * dx_receiver
     if direction == "uplink" and z_vac > 1e-9:
-        output_mode = "uplink: colleague atmospheric BPM -> vacuum Zoom-DFT -> Rx reducer"
+        output_mode = "uplink: atmospheric BPM -> vacuum Zoom-DFT -> annular pupil relay"
     elif direction == "downlink" and z_vac > 1e-9:
-        output_mode = "downlink: analytic vacuum -> colleague atmospheric BPM -> Rx reducer"
+        output_mode = "downlink: analytic vacuum -> atmospheric BPM -> annular pupil relay"
     else:
-        output_mode = f"{direction}: colleague split-step atmospheric BPM -> Rx reducer"
+        output_mode = f"{direction}: split-step atmospheric BPM -> annular pupil relay"
     coords_out = coords_receiver / reducer
     dx_out = dx_receiver / reducer
     xr, yr = np.meshgrid(coords_receiver, coords_receiver, indexing="ij")
-    lens_mask_receiver = (xr**2 + yr**2) <= r_lens**2
+    radius_receiver = np.sqrt(xr**2 + yr**2)
+    lens_mask_receiver = (radius_receiver <= r_lens) & (radius_receiver >= r_obstruction)
 
     def to_receiver_plane(field_atmosphere):
         if direction == "uplink" and z_vac > 1e-9:
@@ -448,6 +471,20 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
 
     tx_power_w = dbm_to_w(cfg.tx_power_dbm)
     system_transmission = 10.0 ** (-cfg.active_system_loss_db / 10.0)
+    available_power_w = tx_power_w * system_transmission
+    receiver_power_density_seq = receiver_seq.astype(np.float64) * available_power_w
+    reduced_power_density_seq = reduced_seq.astype(np.float64) * available_power_w
+    reference_rx_scale = float(np.max(reference_intensity) * available_power_w)
+    receiver_scale_max = max(
+        reference_rx_scale,
+        float(np.max(receiver_power_density_seq)),
+        1e-30,
+    )
+    reduced_scale_max = max(
+        reference_rx_scale * reducer**2,
+        float(np.max(reduced_power_density_seq)),
+        1e-30,
+    )
     pd_rx_power_w = pd_fraction * tx_power_w * system_transmission
     total_pd_power = np.sum(pd_rx_power_w, axis=1)
     scintillation_index = float(np.var(total_pd_power) / (np.mean(total_pd_power) ** 2 + 1e-30))
@@ -482,6 +519,10 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
         "pd_collection_masks": collection_masks,
         "receiver_intensity_seq": receiver_seq,
         "intensity_seq": reduced_seq,
+        "receiver_power_density_w_m2": receiver_power_density_seq,
+        "reduced_power_density_w_m2": reduced_power_density_seq,
+        "receiver_power_density_scale_max_w_m2": receiver_scale_max,
+        "reduced_power_density_scale_max_w_m2": reduced_scale_max,
         "pd_power_fraction": pd_fraction,
         "pd_rx_power_w": pd_rx_power_w,
         "pd_power": pd_rx_power_w,
@@ -517,14 +558,20 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
         "far_n": n_receiver,
         "far_dx_m": dx_out,
         "output_plane_mode": output_mode,
-        "beam_reducer_ratio": reducer,
+        "total_pupil_reduction_ratio": reducer,
+        "pupil_relay_ratio": cfg.collimated_pupil_diameter_m / cfg.pupil_relay_output_diameter_m,
+        "collimated_pupil_diameter_m": cfg.collimated_pupil_diameter_m,
+        "pupil_relay_output_diameter_m": cfg.pupil_relay_output_diameter_m,
         "rx_lens_diameter_m": cfg.rx_lens_diameter_m,
         "rx_lens_radius_m": r_lens,
+        "rx_obstruction_radius_m": r_obstruction,
         "reduced_lens_radius_m": r_lens / reducer,
+        "reduced_obstruction_radius_m": r_obstruction / reducer,
+        "equivalent_subaperture_m": cfg.rx_lens_diameter_m / max(cfg.pd_rows, cfg.pd_cols),
     }
 
 
-def _adc_from_pd_power(power_w: np.ndarray, cfg: ColleagueMultiPDConfig, rng):
+def _adc_from_pd_power(power_w: np.ndarray, cfg: FSOEngineConfig, rng):
     p = np.asarray(power_w, dtype=float)
     n_frames, _n_pd = p.shape
     samples = max(1, int(cfg.samples_per_frame))
@@ -549,7 +596,12 @@ def _adc_from_pd_power(power_w: np.ndarray, cfg: ColleagueMultiPDConfig, rng):
     }
 
 
-def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
+def train_temporal_cnn(
+    power_w: np.ndarray,
+    cfg: FSOEngineConfig,
+    r0_m: float | None = None,
+    equivalent_subaperture_m: float | None = None,
+):
     if torch is None or AIPDNet is None or weights_from_power_log is None:
         return {"available": False, "history": [], "weights": None, "error": "PyTorch is not available."}
 
@@ -578,12 +630,33 @@ def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
     torch.manual_seed(cfg.seed_base)
     model = AIPDNet(time_window=tw, rows=rows, cols=cols, phys_dim=1, width=cfg.cnn_width)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.cnn_lr)
-    loader = DataLoader(TensorDataset(x, y, true_p), batch_size=min(16, len(x)), shuffle=True)
+    subaperture_m = float(equivalent_subaperture_m or 1.0)
+    r0_target = None
+    if r0_m is not None and r0_m > 0.0:
+        r0_target = torch.full(
+            (len(x), 1),
+            float(np.log10(r0_m / max(subaperture_m, 1e-30))),
+            dtype=torch.float32,
+        )
+    else:
+        r0_target = torch.zeros((len(x), 1), dtype=torch.float32)
+    loader = DataLoader(
+        TensorDataset(x, y, true_p, r0_target),
+        batch_size=min(16, len(x)),
+        shuffle=True,
+    )
     history = []
     for epoch in range(max(1, int(cfg.cnn_epochs))):
-        totals = {"loss": 0.0, "mse": 0.0, "snr": 0.0, "physics": 0.0, "count": 0}
-        for xb, yb, pb in loader:
-            pred, _ = model(xb)
+        totals = {
+            "loss": 0.0,
+            "mse": 0.0,
+            "snr": 0.0,
+            "physics": 0.0,
+            "r0": 0.0,
+            "count": 0,
+        }
+        for xb, yb, pb, r0b in loader:
+            pred, pred_phys = model(xb)
             mse = nn.functional.mse_loss(pred, yb)
             weights = weights_from_power_log(pred).reshape(pred.shape[0], -1)
             signal = pb.reshape(pb.shape[0], -1)
@@ -595,7 +668,13 @@ def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
             physics_loss = nn.functional.mse_loss(
                 pred_power.mean(dim=(1, 2)), pb.mean(dim=(1, 2))
             )
-            loss = mse + cfg.cnn_snr_weight * snr_loss + cfg.cnn_physics_weight * physics_loss
+            r0_loss = nn.functional.mse_loss(pred_phys[:, :1], r0b)
+            loss = (
+                mse
+                + cfg.cnn_snr_weight * snr_loss
+                + cfg.cnn_physics_weight * physics_loss
+                + cfg.cnn_r0_weight * r0_loss
+            )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -605,6 +684,7 @@ def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
             totals["mse"] += float(mse.detach()) * batch_size
             totals["snr"] += float(torch.mean(snr_proxy).detach()) * batch_size
             totals["physics"] += float(physics_loss.detach()) * batch_size
+            totals["r0"] += float(r0_loss.detach()) * batch_size
             totals["count"] += batch_size
         count = max(totals["count"], 1)
         history.append({
@@ -613,13 +693,16 @@ def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
             "mse": totals["mse"] / count,
             "snr_proxy": totals["snr"] / count,
             "physics_loss": totals["physics"] / count,
+            "r0_loss": totals["r0"] / count,
         })
 
     model.eval()
     with torch.no_grad():
-        pred, _ = model(x)
+        pred, pred_phys = model(x)
         weights = weights_from_power_log(pred).reshape(pred.shape[0], -1).cpu().numpy()
         pred_log = pred.cpu().numpy()
+        r0_log_ratio = pred_phys[:, 0].cpu().numpy()
+    estimated_r0_m = float(subaperture_m * 10.0 ** np.mean(r0_log_ratio))
     return {
         "available": True,
         "history": history,
@@ -628,11 +711,17 @@ def train_temporal_cnn(power_w: np.ndarray, cfg: ColleagueMultiPDConfig):
         "pred_norm_power": 10.0 ** np.clip(pred_log, -6.0, 6.0),
         "true_norm_power": np.asarray(true_power),
         "time_window": tw,
+        "estimated_r0_m": estimated_r0_m,
+        "predicted_r0_m": subaperture_m * 10.0 ** r0_log_ratio,
+        "r0_target_m": float(r0_m) if r0_m is not None else float("nan"),
+        "r0_estimation_scope": (
+            "single-condition supervised calibration; general r0 estimation requires the offline multi-Cn2 dataset"
+        ),
     }
 
 
-def _receiver_noise_variance(signal_current_a: np.ndarray, cfg: ColleagueMultiPDConfig):
-    bandwidth_hz = max(cfg.datarate_bps * 0.75, 1.0)
+def _receiver_noise_variance(signal_current_a: np.ndarray, cfg: FSOEngineConfig):
+    bandwidth_hz = max(min(cfg.datarate_bps * 0.75, cfg.apd_bandwidth_hz), 1.0)
     nep_current_rms = cfg.receiver_responsivity * cfg.receiver_nep_density * np.sqrt(bandwidth_hz)
     quant_rms = cfg.adc_full_scale_a / (2 ** max(cfg.adc_bits, 1) - 1) / np.sqrt(12.0)
     shot_var = 2.0 * elementary_charge * np.maximum(signal_current_a, 0.0) * bandwidth_hz
@@ -641,7 +730,7 @@ def _receiver_noise_variance(signal_current_a: np.ndarray, cfg: ColleagueMultiPD
 
 def _method_weights(signal_current, measured_power, noise_var, cfg, cnn):
     n_frames, n_pd = signal_current.shape
-    positions = np.asarray(pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m))
+    positions = np.asarray(pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_pitch_m))
     center_idx = int(np.argmin(np.sum(positions**2, axis=1)))
 
     single = np.zeros((n_frames, n_pd), dtype=float)
@@ -650,11 +739,17 @@ def _method_weights(signal_current, measured_power, noise_var, cfg, cnn):
     selection[np.arange(n_frames), np.argmax(measured_power, axis=1)] = 1.0
     egc = np.ones_like(single)
     mrc = signal_current / np.maximum(noise_var, 1e-30)
+    robust_signal = np.percentile(signal_current, cfg.fade_outage_pct, axis=0)
+    robust_noise = np.percentile(noise_var, cfg.fade_outage_pct, axis=0)
+    robust = np.broadcast_to(
+        robust_signal / np.maximum(robust_noise, 1e-30), signal_current.shape
+    ).copy()
     methods = {
         "Single center PD": single,
         "Selection": selection,
         "EGC": egc,
         "MRC oracle": mrc,
+        "Robust fixed MRC": robust,
     }
     if cnn.get("available") and cnn.get("weights") is not None:
         predictive = np.full_like(single, np.nan)
@@ -711,11 +806,97 @@ def _link_performance(pd_rx_power_w, adc, cnn, cfg):
     return metrics, traces, center_idx, total_power_dbm
 
 
-def run_colleague_multi_pd_link(cfg: ColleagueMultiPDConfig):
+def _waterfill_power_allocation(channel_snr: np.ndarray) -> np.ndarray:
+    """Allocate one normalized transmit-power budget across independent channels."""
+
+    gamma = np.maximum(np.asarray(channel_snr, dtype=float), 0.0)
+    if not np.any(gamma > 0.0):
+        return np.full_like(gamma, 1.0 / max(gamma.size, 1))
+    inverse_gain = 1.0 / np.maximum(gamma, 1e-30)
+    order = np.argsort(inverse_gain)
+    sorted_inverse = inverse_gain[order]
+    level = sorted_inverse[0] + 1.0
+    for active_count in range(1, gamma.size + 1):
+        level = (1.0 + np.sum(sorted_inverse[:active_count])) / active_count
+        if active_count == gamma.size or level <= sorted_inverse[active_count]:
+            break
+    allocation = np.maximum(level - inverse_gain, 0.0)
+    return allocation / (np.sum(allocation) + 1e-30)
+
+
+def _normalized_weight(weight: np.ndarray) -> np.ndarray:
+    value = np.maximum(np.asarray(weight, dtype=float), 0.0)
+    return value / (np.sum(value) + 1e-30)
+
+
+def _spatial_strategy(pd_rx_power_w, cfg, r0_m, equivalent_subaperture_m):
+    signal_current = cfg.receiver_responsivity * np.asarray(pd_rx_power_w, dtype=float)
+    noise_var = _receiver_noise_variance(signal_current, cfg)
+    channel_snr = signal_current**2 / np.maximum(noise_var, 1e-30)
+    diversity_snr = np.sum(channel_snr, axis=1)
+    diversity_capacity = np.log2(1.0 + diversity_snr)
+
+    allocation = np.asarray([_waterfill_power_allocation(row) for row in channel_snr])
+    parallel_capacity = np.sum(np.log2(1.0 + allocation * channel_snr), axis=1)
+
+    robust_signal = np.percentile(signal_current, cfg.fade_outage_pct, axis=0)
+    robust_noise = np.percentile(noise_var, cfg.fade_outage_pct, axis=0)
+    outage_weights = _normalized_weight(robust_signal / np.maximum(robust_noise, 1e-30))
+    mean_mrc_weights = _normalized_weight(
+        np.mean(signal_current / np.maximum(noise_var, 1e-30), axis=0)
+    )
+    capacity_weights = _normalized_weight(np.mean(allocation, axis=0))
+
+    ratio = float(r0_m / max(equivalent_subaperture_m, 1e-30))
+    if ratio < 1.0:
+        regime = "strong turbulence"
+        recommendation = "spatial diversity: outage-robust fixed MRC or predictive MRC"
+        recommended_weights = outage_weights
+    elif ratio < 2.0:
+        regime = "transition"
+        recommendation = "retain diversity combining; evaluate independent spatial modes experimentally"
+        recommended_weights = mean_mrc_weights
+    else:
+        regime = "weak turbulence"
+        recommendation = "diversity remains valid; spatial multiplexing is only a candidate with independent TX modes"
+        recommended_weights = mean_mrc_weights
+
+    return {
+        "r0_to_subaperture_ratio": ratio,
+        "regime": regime,
+        "recommendation": recommendation,
+        "equivalent_subaperture_m": float(equivalent_subaperture_m),
+        "outage_robust_weights": outage_weights,
+        "mean_mrc_weights": mean_mrc_weights,
+        "recommended_combining_weights": recommended_weights,
+        "capacity_power_allocation_weights": capacity_weights,
+        "capacity_power_allocation_trace": allocation,
+        "diversity_capacity_bps_hz": diversity_capacity,
+        "parallel_capacity_proxy_bps_hz": parallel_capacity,
+        "mean_diversity_capacity_bps_hz": float(np.mean(diversity_capacity)),
+        "mean_parallel_capacity_proxy_bps_hz": float(np.mean(parallel_capacity)),
+        "multiplexing_gain_proxy": float(
+            np.mean(parallel_capacity) / max(np.mean(diversity_capacity), 1e-30)
+        ),
+        "spatial_multiplexing_valid": False,
+        "capacity_note": (
+            "The parallel-channel curve is a screening proxy, not an upper bound. This direct-detection single-beam model "
+            "does not contain an independent-mode MIMO channel matrix, so its APD branches provide "
+            "diversity rather than demonstrated spatial multiplexing."
+        ),
+    }
+
+
+def run_fso_receiver(cfg: FSOEngineConfig):
     rng = np.random.default_rng(cfg.seed_base + 100_000)
-    sequence = simulate_colleague_multi_pd_sequence(cfg)
+    sequence = simulate_fso_sequence(cfg)
     adc = _adc_from_pd_power(sequence["pd_rx_power_w"], cfg, rng)
-    cnn = train_temporal_cnn(adc["measured_power_w"], cfg) if cfg.cnn_epochs > 0 else {
+    cnn = train_temporal_cnn(
+        adc["measured_power_w"],
+        cfg,
+        r0_m=sequence["r0_m"],
+        equivalent_subaperture_m=sequence["equivalent_subaperture_m"],
+    ) if cfg.cnn_epochs > 0 else {
         "available": False,
         "history": [],
         "weights": None,
@@ -723,6 +904,12 @@ def run_colleague_multi_pd_link(cfg: ColleagueMultiPDConfig):
     }
     metrics, performance, center_idx, total_power_dbm = _link_performance(
         sequence["pd_rx_power_w"], adc, cnn, cfg
+    )
+    spatial_strategy = _spatial_strategy(
+        sequence["pd_rx_power_w"],
+        cfg,
+        sequence["r0_m"],
+        sequence["equivalent_subaperture_m"],
     )
     return {
         **sequence,
@@ -732,6 +919,7 @@ def run_colleague_multi_pd_link(cfg: ColleagueMultiPDConfig):
         "performance_traces": performance,
         "center_idx": center_idx,
         "adc": adc,
+        "spatial_strategy": spatial_strategy,
         "total_pd_power_dbm": total_power_dbm,
         "external_simulator_path": str(EXTERNAL_FSO),
     }

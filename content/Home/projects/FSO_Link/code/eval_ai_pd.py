@@ -93,6 +93,20 @@ def main():
         "oracle_vs_equal_gain_db_mean": float(np.mean(safe_db(oracle_combined / equal_combined))),
         "pred_vs_oracle_gap_db_mean": float(np.mean(safe_db(pred_combined / oracle_combined))),
     }
+    physics_labels = ckpt.get("data_config", {}).get("physics_labels", [])
+    if "r0_m" in physics_labels:
+        r0_index = physics_labels.index("r0_m")
+    elif true_phys.shape[1] > 4:
+        r0_index = 4
+    else:
+        r0_index = None
+    if r0_index is not None:
+        r0_true = true_phys[:, r0_index]
+        r0_pred = pred_phys[:, r0_index]
+        metrics["r0_mae_mm"] = float(np.mean(np.abs(r0_pred - r0_true)) * 1e3)
+        metrics["r0_mape_pct"] = float(
+            100.0 * np.mean(np.abs(r0_pred - r0_true) / np.maximum(np.abs(r0_true), 1e-9))
+        )
 
     print(json.dumps(metrics, indent=2))
     if args.out:
