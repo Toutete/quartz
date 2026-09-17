@@ -135,6 +135,57 @@ CNN이 담당하는 기능:
 적용되지 않는다. 엔진의 obstruction parameter는 향후 실제 telescope 민감도 비교를
 위한 선택 기능으로만 남긴다.
 
+### 4.1 Fourier-domain AR frozen-flow와 boiling
+
+Srinath 등의 Fourier-domain autoregressive(AR) phase-screen 방식은 큰 화면을 미리
+생성해 이동시키는 대신, aperture 크기의 Fourier coefficient를 매 time step 갱신한다.
+풍속 벡터가 `(vx, vy)`, time step이 `dt`일 때 각 spatial frequency의 AR coefficient는
+다음과 같이 둘 수 있다.
+
+```text
+theta(fx, fy) = -2*pi*dt*(fx*vx + fy*vy)
+alpha(fx, fy) = rho*exp(j*theta)
+
+phi_hat[t]
+= alpha*phi_hat[t-1]
+  + sqrt(1 - |alpha|^2)*P(fx, fy)*omega_hat[t]
+```
+
+여기서 `P`는 von Karman 또는 Kolmogorov spectrum의 amplitude filter이고,
+`omega_hat`은 매 frame의 complex white noise이다. `alpha`의 phase는 Taylor
+frozen-flow 이동을, 크기 `rho`는 이전 screen의 기억과 turbulence boiling을 정한다.
+
+- `rho = 1`: 새로운 난류 성분이 없는 순수 frozen flow
+- `rho < 1`: 기존 screen은 감쇠하고 동일한 평균 phase power를 유지하도록 새 성분 주입
+- 작은 `rho`: decorrelation과 boiling이 빠름
+- 큰 `rho`: frozen-flow에 가까운 긴 시간 상관
+
+논문에서는 `rho=0.99`와 `0.999`를 주로 검증했고, 실제 telemetry fitting 예로
+약 `0.991~0.996` 범위를 보고했다. 그러나 이 값은 보편적인 상수가 아니므로, 현재
+FSO link의 frame interval, wind speed, aperture crossing time에 맞춰 temporal
+autocorrelation 또는 temporal PSD로 다시 식별해야 한다. Subharmonic을 추가할 경우에는
+저주파 성분까지 포함한 전체 phase power가 보존되도록 noise scaling을 별도로 점검한다.
+
+이 방식의 장점은 simulation 길이가 늘어나도 screen 메모리가 커지지 않고, 큰 screen의
+주기적 재사용을 피하면서 frozen flow와 boiling을 함께 만들 수 있다는 점이다. 논문의
+GPI 예에서는 384x384 AR screen이 큰 translating screen보다 메모리를 약 16~113.8배,
+계산량을 약 20~160배 줄였다. 이 수치는 해당 grid와 simulation duration에서의 결과이며,
+현재 엔진에 그대로 적용되는 보장값은 아니다.
+
+현재 `fso_engine.py`는 이미 aperture 크기의 screen을 만든 뒤 `np.roll`로 이동하므로
+각 time step 비용만 보면 Fourier AR의 noise 생성과 FFT/IFFT가 오히려 더 비쌀 수 있다.
+따라서 본 연구에서 AR 방식의 1차 가치는 단순 속도 향상이 아니라 다음에 있다.
+
+1. 작은 고정 grid로 긴 비주기 time series 생성
+2. 순수 frozen-flow보다 현실적인 turbulence decorrelation 표현
+3. 지나치게 예측하기 쉬운 반복 pattern을 제거한 CNN/GRU 검증
+4. wind advection과 boiling을 독립 parameter로 조절
+
+향후 엔진에는 `frozen_roll`, `fourier_ar`, `independent_screen` 세 temporal mode를 두고
+동일한 spatial PSD slope, phase variance, temporal PSD/autocorrelation, runtime과 memory를
+비교한다. 이후 동일한 APD/ADC 조건에서 SNR, EVM, BER, outage와 future-power predictor
+성능을 함께 비교해야 AR 방식의 물리적·계산적 이점을 판단할 수 있다.
+
 ## 5. 광 수신부와 4x4 APD 사양
 
 수신부의 기준 구조는 다음과 같다.
@@ -209,6 +260,72 @@ total loss
 SNR이나 EVM은 CNN의 단순 출력 label이 아니라, predicted weight를 실제 future
 channel에 적용했을 때 평가되는 목적함수 또는 differentiable proxy로 사용하는 것이
 자연스럽다.
+
+### 6.4 CNN-RNN temporal predictor와 PAT 제어 참고 구조
+
+제공된 uplink PAT 예시는 각 시점의 16x16 optical image를 CNN으로 encoding한 뒤,
+시간 순서의 feature map을 LSTM에 넣는 recurrent actor-critic 구조이다.
+
+```text
+B x Lseq x 1 x 16 x 16
+-> per-frame Conv2D + BatchNorm + LeakyReLU (3 blocks)
+-> AvgPool2D / Flatten
+-> B x Lseq x 64 feature sequence
+-> LSTM
+-> actor: pointing action의 mean/std
+-> twin critics: Q(state, action)
+```
+
+그림에 제시된 recurrent reinforcement-learning 조건은 다음과 같다. 이는 PAT 연구의
+출발점으로 기록하며, 현재 Multi-PD 모델의 기본값으로 그대로 복사하지 않는다.
+
+| 항목 | 참고값 |
+|---|---:|
+| Episodes | 100 |
+| Maximum steps per episode | 80 |
+| Replay buffer | 100,000 |
+| LSTM sequence length | 8 |
+| Random start steps | 200 |
+| Optimizer | Adam |
+| Learning rate | 1e-4 |
+| Discount factor | 0.99 |
+| Soft target update rate | 0.005 |
+| Entropy coefficient | Auto-tuned |
+| Policy update frequency | 1 |
+| Batch size | 256 |
+| Random seed | 42 |
+
+현재 수신기는 입력이 16x16 image가 아니라 4x4 APD power map이다. 따라서 stride 2인
+Conv2D 세 개를 그대로 사용하면 spatial dimension이 너무 빨리 사라진다. FPGA 구현까지
+고려한 권장 시작 구조는 다음과 같다.
+
+```text
+B x L x 1 x 4 x 4
+-> Conv2D(1, 16, 3x3, stride=1, padding=1) + ReLU
+-> Conv2D(16, 32, 3x3, stride=1, padding=1) + ReLU
+-> global average pool 또는 flatten
+-> B x L x 32 feature sequence
+-> GRU/LSTM(hidden=64)
+-> future APD power head: 16
+-> r0-ratio head: 1
+-> combining-weight head: 16
+-> optional PAT action head: 2
+```
+
+GRU는 LSTM보다 gate와 state가 적어 FPGA 자원과 latency 측면의 첫 후보로 적합하다.
+`L=8`은 제공된 예의 합리적인 시작점이지만, 현재 GUI의 `L=6`과 함께
+`L={4, 6, 8, 12}`를 검증해 wind crossing time과 예측 horizon에 맞는 값을 선택한다.
+Temporal Conv1D는 recurrent state가 없는 더 단순한 FPGA baseline으로 비교한다.
+
+PAT에서는 pointing action이 다음 시점의 beam 위치와 reward에 영향을 주므로 actor와
+twin critic을 사용하는 recurrent SAC 계열 강화학습이 타당하다. 반면 digital combining
+weight는 대기 상태 자체를 바꾸지 않고 instantaneous 또는 future channel에서 oracle MRC
+label을 계산할 수 있다. 이 경우에는 강화학습보다 future APD power/weight에 대한
+supervised CNN-GRU가 sample efficiency, 안정성, 검증 가능성 면에서 우선이다.
+
+장기적으로는 CNN-GRU encoder를 공유하되, APD predictor와 `r0` estimator는 supervised
+head로 유지하고 실제 steering mirror가 추가될 때만 PAT actor와 twin critics를 연결한다.
+이 구분을 통해 combining 개선과 closed-loop PAT 제어의 효과를 각각 독립적으로 평가한다.
 
 ## 7. Fried parameter r0 추정
 
@@ -422,15 +539,17 @@ Optical image의 color scale, APD heatmap scale, trace y-axis는 run 전체에�
 ## 15. 권장 실험 순서
 
 1. 난류가 없는 조건에서 power conservation과 APD geometry를 검증한다.
-2. 하나의 `Cn2`에서 frozen-flow time trace가 매끄럽고 상관성을 갖는지 확인한다.
-3. Single, selection, EGC, MRC의 기준 성능을 확보한다.
-4. 여러 `Cn2`, wind, seed로 offline dataset을 생성한다.
-5. CNN future-power와 `r0` multi-task model을 학습한다.
-6. 완전히 분리된 simulation realization에서 평가한다.
-7. CNN이 MRC 또는 oracle future-MRC에 얼마나 접근하는지 측정한다.
-8. Quantization 전후 성능 차이를 측정한다.
-9. Host inference와 FPGA fixed-point combiner를 연결한다.
-10. 실제 4x4 APD/TIA/ADC trace로 domain adaptation한다.
+2. 하나의 `Cn2`에서 `frozen_roll` time trace가 매끄럽고 상관성을 갖는지 확인한다.
+3. `fourier_ar`를 추가하고 spatial PSD, phase power, temporal PSD와 autocorrelation을 검증한다.
+4. `rho={0.99, 0.995, 0.999}`와 wind 조건을 sweep해 decorrelation time을 측정한다.
+5. 동일한 grid와 frame 수에서 `frozen_roll`과 `fourier_ar`의 runtime과 memory를 비교한다.
+6. Single, selection, EGC, MRC의 기준 성능을 확보한다.
+7. 여러 `Cn2`, wind, seed, temporal mode로 offline dataset을 생성한다.
+8. frame CNN, temporal Conv1D, CNN-GRU/LSTM의 future-power와 `r0` 성능을 비교한다.
+9. 완전히 분리된 simulation realization에서 평가한다.
+10. predictor가 MRC 또는 oracle future-MRC에 얼마나 접근하는지 측정한다.
+11. Quantization 전후 성능 차이를 측정하고 Host inference와 FPGA combiner를 연결한다.
+12. 실제 4x4 APD/TIA/ADC trace로 domain adaptation한다.
 
 ## 16. 현재 결론
 
@@ -442,3 +561,15 @@ Optical image의 color scale, APD heatmap scale, trace y-axis는 run 전체에�
 6. 실제 multiplexing 검증에는 independent TX mode와 channel matrix가 필요하다.
 7. GUI 30 epochs는 기능 확인용이고, 최종 모델은 early stopping을 사용한 offline 학습으로 결정한다.
 8. 최종 연구 성능은 CNN 대 EGC가 아니라 CNN 대 conventional/oracle MRC로 판단해야 한다.
+9. Fourier AR 방식은 현재 `np.roll`보다 무조건 빠른 대체재가 아니라, 긴 비주기 sequence와 boiling을 제공하는 물리 모델 후보이다.
+10. CNN-GRU/LSTM은 시간 예측에 유용하지만, combining은 supervised learning을 우선하고 closed-loop PAT에만 recurrent actor-critic을 적용한다.
+
+## 17. 참고 문헌 및 제공 구조
+
+1. S. Srinath, L. A. Poyneer, A. R. Rudy, and S. M. Ammons,
+   "Computationally efficient autoregressive method for generating phase screens with frozen flow and turbulence in optical simulations,"
+   *Optics Express*, vol. 23, no. 26, pp. 33335-33349, 2015.
+   DOI: `10.1364/OE.23.033335`.
+2. 사용자가 제공한 uplink satellite-ground FSO PAT용 CNN-LSTM recurrent actor/twin-critic
+   구조와 학습 hyperparameter 표. 출처 논문 정보가 확인되기 전까지는 구현 참고 구조로만
+   사용하며, 정식 인용에는 원 논문의 저자, 제목, 학회 또는 저널 정보를 추가해야 한다.
