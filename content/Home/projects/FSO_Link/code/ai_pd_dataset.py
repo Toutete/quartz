@@ -59,10 +59,14 @@ def sample_physics(rng, cfg):
 def simulate_pd_traces(physics, cfg):
     grid_mode = "small" if cfg.grid_n <= 256 else "medium" if cfg.grid_n <= 384 else "large"
     sim_cfg = ColleagueMultiPDConfig(
+        link_direction="downlink",
         hv57_ground_cn2_A=physics["Cn2"],
         wavelength_m=cfg.wavelength_nm * 1e-9,
         link_distance_m=physics["L"],
-        tx_beam_waist_ratio=physics["w0_m"] / 0.06,
+        tx_aperture_diameter_m=max(0.07, 2.2 * physics["w0_m"]),
+        tx_divergence_full_angle_rad=(
+            2.0 * cfg.wavelength_nm * 1e-9 / (np.pi * physics["w0_m"])
+        ),
         outer_scale_m=cfg.L0_m,
         inner_scale_m=cfg.l0_m,
         n_screens=cfg.n_screens,

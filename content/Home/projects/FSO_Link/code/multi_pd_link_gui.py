@@ -70,17 +70,22 @@ class MultiPDLinkGUI:
         self._add_group(
             "FSO channel and frozen-flow time axis",
             [
-                ("link_distance_m", "FSO distance (m)", "800"),
+                ("link_direction", "Link direction", "downlink", ("downlink", "uplink")),
+                ("link_distance_m", "FSO distance (m)", "20000"),
+                ("wavelength_nm", "Wavelength (nm)", "1550"),
+                ("tx_aperture_mm", "TX lens diameter (mm)", "70"),
+                ("tx_divergence_urad", "TX full divergence (urad)", "28"),
+                ("tx_antenna_gain_db", "TX antenna gain (dB)", "103.1"),
                 ("hv57_ground_cn2_A", "HV57 ground Cn2 A", "5e-14"),
                 ("n_screens", "Phase screens", "3"),
-                ("grid_mode", "Grid mode", "small"),
+                ("grid_mode", "Grid mode", "medium", ("small", "medium", "large")),
                 ("n_time_frames", "Time frames", "32"),
                 ("frame_interval_ms", "Frame interval (ms)", "1"),
                 ("wind_speed_mps", "Wind speed (m/s)", "5"),
                 ("wind_direction_deg", "Wind direction (deg)", "0"),
                 ("seed_base", "Phase-screen seed", "42"),
                 ("zenith_angle_deg", "Zenith angle (deg)", "0"),
-                ("tx_power_dbm", "Tx power (dBm)", "37"),
+                ("tx_power_dbm", "TX power (dBm)", "20"),
                 ("active_system_loss_db", "Additional optical loss (dB)", "30"),
                 ("datarate_gbps", "Data rate (Gbps)", "10"),
             ],
@@ -88,13 +93,14 @@ class MultiPDLinkGUI:
         self._add_group(
             "Receiver optics and PD array",
             [
-                ("rx_lens_diameter_cm", "Rx lens diameter (cm)", "5"),
+                ("rx_lens_diameter_mm", "RX lens diameter (mm)", "203.2"),
+                ("rx_antenna_gain_db", "RX antenna gain (dB)", "112.3"),
                 ("beam_reducer_ratio", "Beam reducer ratio", "10"),
-                ("pd_rows", "PD rows", "2"),
+                ("pd_rows", "PD rows", "4"),
                 ("pd_cols", "PD columns", "4"),
-                ("pd_spacing_mm", "PD pitch (mm)", "1"),
-                ("pd_radius_mm", "PD active radius (mm)", "0.25"),
-                ("microlens_enabled", "Microlens array? (0/1)", "0"),
+                ("pd_spacing_mm", "PD pitch (mm)", "5"),
+                ("pd_radius_mm", "PD active radius (mm)", "1.5"),
+                ("microlens_enabled", "Microlens array? (0/1)", "1"),
                 ("microlens_efficiency", "Microlens efficiency", "0.85"),
             ],
         )
@@ -133,8 +139,8 @@ class MultiPDLinkGUI:
         self.tree = ttk.Treeview(self.side, columns=("metric", "value"), show="headings", height=12)
         self.tree.heading("metric", text="Metric")
         self.tree.heading("value", text="Value")
-        self.tree.column("metric", width=230)
-        self.tree.column("value", width=140, anchor=tk.E)
+        self.tree.column("metric", width=195)
+        self.tree.column("value", width=180, anchor=tk.E)
         self.tree.pack(fill=tk.X, pady=(8, 0))
 
         self.notebook = ttk.Notebook(self.master)
@@ -192,14 +198,19 @@ class MultiPDLinkGUI:
     def _add_group(self, title, rows):
         box = ttk.LabelFrame(self.control_frame, text=title, padding=8)
         box.pack(fill=tk.X, pady=5)
-        for key, label, default in rows:
+        for item in rows:
+            key, label, default = item[:3]
             row = ttk.Frame(box)
             row.pack(fill=tk.X, pady=2)
             ttk.Label(row, text=label, width=30).pack(side=tk.LEFT)
-            entry = ttk.Entry(row, width=14)
-            entry.insert(0, default)
-            entry.pack(side=tk.RIGHT)
-            self.inputs[key] = entry
+            if len(item) == 4:
+                widget = ttk.Combobox(row, width=12, values=item[3], state="readonly")
+                widget.set(default)
+            else:
+                widget = ttk.Entry(row, width=14)
+                widget.insert(0, default)
+            widget.pack(side=tk.RIGHT)
+            self.inputs[key] = widget
 
     def _get_float(self, key):
         return float(self.inputs[key].get().strip())
@@ -213,7 +224,12 @@ class MultiPDLinkGUI:
 
     def _config_from_inputs(self):
         return ColleagueMultiPDConfig(
+            link_direction=self.inputs["link_direction"].get().strip(),
             link_distance_m=self._get_float("link_distance_m"),
+            wavelength_m=self._get_float("wavelength_nm") * 1e-9,
+            tx_aperture_diameter_m=self._get_float("tx_aperture_mm") * 1e-3,
+            tx_divergence_full_angle_rad=self._get_float("tx_divergence_urad") * 1e-6,
+            tx_antenna_gain_db=self._get_float("tx_antenna_gain_db"),
             hv57_ground_cn2_A=self._get_float("hv57_ground_cn2_A"),
             n_screens=self._get_int("n_screens"),
             grid_mode=self.inputs["grid_mode"].get().strip(),
@@ -226,7 +242,8 @@ class MultiPDLinkGUI:
             tx_power_dbm=self._get_float("tx_power_dbm"),
             active_system_loss_db=self._get_float("active_system_loss_db"),
             datarate_bps=self._get_float("datarate_gbps") * 1e9,
-            rx_lens_diameter_m=self._get_float("rx_lens_diameter_cm") * 1e-2,
+            rx_lens_diameter_m=self._get_float("rx_lens_diameter_mm") * 1e-3,
+            rx_antenna_gain_db=self._get_float("rx_antenna_gain_db"),
             beam_reducer_ratio=self._get_float("beam_reducer_ratio"),
             pd_rows=self._get_int("pd_rows"),
             pd_cols=self._get_int("pd_cols"),
@@ -280,7 +297,8 @@ class MultiPDLinkGUI:
         self.progress.start(12)
         self.status.set("Running colleague split-step BPM, frozen-flow time sequence, PD/ADC, and CNN...")
         self._append_log(
-            f"Run started: L={cfg.link_distance_m:g} m, Cn2={cfg.hv57_ground_cn2_A:.3e}, "
+            f"Run started: {cfg.link_direction}, L={cfg.link_distance_m:g} m, "
+            f"lambda={cfg.wavelength_m*1e9:.1f} nm, Cn2={cfg.hv57_ground_cn2_A:.3e}, "
             f"dt={cfg.frame_interval_s*1e3:.3f} ms, wind={cfg.wind_speed_mps:g} m/s, "
             f"PD={cfg.pd_rows}x{cfg.pd_cols}, reducer={cfg.beam_reducer_ratio:g}x"
         )
@@ -330,7 +348,15 @@ class MultiPDLinkGUI:
         r = self.result
         rows = [
             ("Physics engine", "colleague FSO"),
+            ("Link direction", r["link_direction"]),
+            ("TX / RX altitude", f"{r['tx_altitude_m']/1e3:.1f} / {r['rx_altitude_m']/1e3:.1f} km"),
             ("Link distance", f"{r['configured_link_distance_m']:.1f} m"),
+            ("TX beam waist", f"{r['tx_beam_waist_m']*1e3:.2f} mm"),
+            ("Modeled TX full divergence", f"{r['modeled_tx_divergence_full_angle_rad']*1e6:.2f} urad"),
+            ("TX antenna gain", f"{r['tx_antenna_gain_db']:.1f} dB (ideal {r['tx_ideal_aperture_gain_db']:.2f})"),
+            ("RX antenna gain", f"{r['rx_antenna_gain_db']:.1f} dB (ideal {r['rx_ideal_aperture_gain_db']:.2f})"),
+            ("Free-space path loss", f"{r['free_space_path_loss_db']:.1f} dB"),
+            ("Scalar link-budget RX", f"{r['link_budget_rx_power_dbm']:.1f} dBm"),
             ("r0", f"{r['r0_m'] * 100:.2f} cm"),
             ("Greenwood frequency", f"{r['greenwood_hz']:.1f} Hz"),
             ("Rytov variance", f"{r['rytov_variance']:.3e}"),
@@ -475,7 +501,7 @@ class MultiPDLinkGUI:
         )
         ax_reduced.set_title("2. After aperture clipping and beam reduction")
         ax_reduced.set_aspect("equal", adjustable="box")
-        ax_reduced.legend(loc="upper right", fontsize=8)
+        ax_reduced.legend(loc="lower right", fontsize=7)
         self.fig_optics.colorbar(image_reduced, ax=ax_reduced, fraction=0.046, pad=0.03, label="Power-preserving reduced intensity")
 
         pd_frame = r["pd_rx_power_w"][frame].reshape(cfg.pd_rows, cfg.pd_cols)
@@ -489,7 +515,7 @@ class MultiPDLinkGUI:
                 ax_heat.text(col, row, f"{pd_dbm[row, col]:.1f}", ha="center", va="center", color="white", fontsize=8)
         self.fig_optics.colorbar(heat, ax=ax_heat, fraction=0.046, pad=0.03, label="dBm")
 
-        for pd_index in range(min(r["pd_rx_power_w"].shape[1], 12)):
+        for pd_index in range(min(r["pd_rx_power_w"].shape[1], 16)):
             ax_trace.plot(time_ms, w_to_dbm(r["pd_rx_power_w"][:, pd_index]), linewidth=1.0, label=f"PD{pd_index}")
         ax_trace.axvline(time_ms[frame], color="black", linestyle="--", linewidth=1.0)
         ax_trace.set_title("4. PD optical-power traces from frozen-flow turbulence")
@@ -500,7 +526,7 @@ class MultiPDLinkGUI:
 
         self.frame_label.set(f"Frame {frame + 1}/{len(time_ms)}   t={time_ms[frame]:.2f} ms")
         self.fig_optics.suptitle(
-            f"One physical time frame: receiver plane -> {cfg.beam_reducer_ratio:g}x beam reducer -> {cfg.pd_rows}x{cfg.pd_cols} PD array",
+            f"{r['link_direction'].upper()} frame: receiver plane -> {cfg.beam_reducer_ratio:g}x beam reducer -> {cfg.pd_rows}x{cfg.pd_cols} PD array",
             fontsize=12,
         )
         self.canvas_optics.draw()

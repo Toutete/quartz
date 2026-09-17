@@ -32,6 +32,32 @@ The GUI reports Fried parameter, Greenwood frequency, Rytov variance, Strehl
 ratio, aperture capture, scintillation index, lag-one temporal correlation, and
 split-step power-conservation error.
 
+## Link Direction and Default Downlink
+
+The GUI can run either direction. `downlink` places the transmitter at the
+configured upper altitude and the receiver at ground level; `uplink` reverses
+those endpoints. The order of the altitude-dependent phase screens is also
+reversed, so this is not only a plot label.
+
+The default downlink is:
+
+- TX power: 20 dBm
+- vertical distance: 20 km
+- wavelength: 1550 nm
+- TX lens diameter: 70 mm
+- TX full-angle divergence: 28 urad
+- TX antenna gain: 103.1 dB
+- RX lens diameter: 203.2 mm
+- RX antenna gain: 112.3 dB
+
+The 28 urad value is interpreted as full-angle Gaussian divergence. The 70 mm
+aperture clips the inferred 35.24 mm waist to 35.00 mm, giving a modeled full
+angle of 28.19 urad. The ideal gains calculated from `20 log10(pi D/lambda)` are
+103.04 dB and 112.29 dB, consistent with the specified link-budget gains.
+Specified antenna gains are used only for the scalar link-budget cross-check;
+they are not multiplied into the wave-optics result, where diffraction and
+aperture collection are already modeled explicitly.
+
 ## Receiver Optics
 
 The first GUI tab shows two synchronized optical planes for the selected time
@@ -66,8 +92,9 @@ standard Gray-coded square M-QAM approximation.
 
 `Additional optical loss` represents losses not contained in the normalized
 wave-optics propagation, such as lens transmission, filter loss, coupling loss,
-and deliberate attenuation before the TIA. Its default is 30 dB so the 37 dBm,
-800 m example does not immediately saturate the default 50 uA ADC range.
+and deliberate attenuation before the TIA. Its default is 30 dB so the
+high-optical-power 20 km example does not immediately saturate the default
+50 uA ADC range.
 
 ## Install and Run
 
@@ -89,9 +116,10 @@ Run the single integrated GUI:
 .\run_multi_pd_link_gui.ps1
 ```
 
-The default experiment is an 800 m link at one selected `Cn2`. Use the frame
-slider or Play control to inspect the synchronized receiver plane, reduced
-plane, PD map, and PD power traces.
+The default experiment is the 20 km downlink above at one selected `Cn2`. Use
+the direction selector for uplink, and use the frame slider or Play control to
+inspect the synchronized receiver plane, reduced plane, PD map, and PD power
+traces.
 
 ## Offline Dataset and FPGA Export
 

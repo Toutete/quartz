@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.constants import elementary_charge
+from scipy.ndimage import map_coordinates
 from scipy.special import erfc
 
 
@@ -39,36 +40,38 @@ except Exception:
 class ColleagueMultiPDConfig:
     """Configuration for the colleague-FSO-based Multi-PD receiver."""
 
+    link_direction: str = "downlink"
     hv57_ground_cn2_A: float = 5e-14
     wavelength_m: float = 1550e-9
-    link_distance_m: float = 800.0
+    link_distance_m: float = 20_000.0
     zenith_angle_deg: float = 0.0
     ground_altitude_m: float = 0.0
-    ogs_aperture_diameter_m: float = 0.60
-    ogs_tx_eff_diameter_m: float = 0.12
-    tx_beam_waist_ratio: float = 0.7
+    tx_aperture_diameter_m: float = 0.070
+    tx_divergence_full_angle_rad: float = 28e-6
+    tx_antenna_gain_db: float = 103.1
     outer_scale_m: float = 100.0
     inner_scale_m: float = 0.01
     n_screens: int = 3
     n_subharmonics: int = 5
-    grid_mode: str = "small"
+    grid_mode: str = "medium"
     n_time_frames: int = 32
     frame_interval_s: float = 1e-3
     wind_speed_mps: float = 5.0
     wind_direction_deg: float = 0.0
     seed_base: int = 42
-    tx_power_dbm: float = 37.0
+    tx_power_dbm: float = 20.0
     active_system_loss_db: float = 30.0
     receiver_responsivity: float = 0.9
     receiver_nep_density: float = 1e-11
     datarate_bps: float = 10e9
-    rx_lens_diameter_m: float = 0.05
+    rx_lens_diameter_m: float = 0.2032
+    rx_antenna_gain_db: float = 112.3
     beam_reducer_ratio: float = 10.0
-    pd_rows: int = 2
+    pd_rows: int = 4
     pd_cols: int = 4
-    pd_spacing_m: float = 1.0e-3
-    pd_radius_m: float = 0.25e-3
-    microlens_enabled: bool = False
+    pd_spacing_m: float = 5.0e-3
+    pd_radius_m: float = 1.5e-3
+    microlens_enabled: bool = True
     microlens_efficiency: float = 0.85
     adc_bits: int = 8
     adc_full_scale_a: float = 50e-6
@@ -94,6 +97,21 @@ def w_to_dbm(watts):
     return 10.0 * np.log10(np.maximum(watts, 1e-30)) + 30.0
 
 
+def aperture_gain_db(diameter_m: float, wavelength_m: float) -> float:
+    """Ideal circular-aperture power gain, without adding it to wave propagation."""
+
+    return float(20.0 * np.log10(np.pi * diameter_m / wavelength_m))
+
+
+def tx_beam_waist_m(cfg: ColleagueMultiPDConfig) -> float:
+    """Gaussian waist implied by the configured full-angle divergence."""
+
+    divergence_waist = 2.0 * cfg.wavelength_m / (
+        np.pi * cfg.tx_divergence_full_angle_rad
+    )
+    return float(min(divergence_waist, cfg.tx_aperture_diameter_m / 2.0))
+
+
 def qam_ber_from_snr(snr_linear, qam_order: int):
     """Gray-coded square M-QAM BER approximation from symbol SNR."""
 
@@ -116,9 +134,14 @@ def pd_grid_positions(rows: int, cols: int, spacing_m: float):
 
 
 def _validate_config(cfg: ColleagueMultiPDConfig):
+    direction = cfg.link_direction.lower().strip()
+    if direction not in {"downlink", "uplink"}:
+        raise ValueError("Link direction must be downlink or uplink.")
     positive = {
         "link distance": cfg.link_distance_m,
         "wavelength": cfg.wavelength_m,
+        "TX aperture diameter": cfg.tx_aperture_diameter_m,
+        "TX full-angle divergence": cfg.tx_divergence_full_angle_rad,
         "frame interval": cfg.frame_interval_s,
         "receiver lens diameter": cfg.rx_lens_diameter_m,
         "beam reducer ratio": cfg.beam_reducer_ratio,
@@ -142,31 +165,38 @@ def _validate_config(cfg: ColleagueMultiPDConfig):
 
 
 def _make_spatial_grid(cfg: ColleagueMultiPDConfig, tc: TurbulenceConfig):
-    base = SpatialGrid(
-        tx_aperture_m=cfg.ogs_aperture_diameter_m,
-        rx_aperture_m=cfg.rx_lens_diameter_m,
-        fried_parameter_m=tc.fried_parameter_m,
-    )
     mode = cfg.grid_mode.lower().strip()
     if mode == "small":
-        span_factor, min_span, cap_n = 2.0, 0.20, 256
+        n = 256
     elif mode == "large":
-        span_factor, min_span, cap_n = 6.0, 0.42, 512
+        n = 512
     elif mode == "medium":
-        span_factor, min_span, cap_n = 3.0, 0.30, 384
+        n = 384
     else:
         raise ValueError("Grid mode must be small, medium, or large.")
-    dx = base.x_step_m
-    r_ap = cfg.rx_lens_diameter_m / 2.0
-    span = max(span_factor * tc.fried_parameter_m, 6.0 * r_ap, min_span)
-    n = min(max(64, int(np.ceil(span / dx))), cap_n)
-    return SpatialGrid.from_span_step(n * dx, dx)
+    w0 = tx_beam_waist_m(cfg)
+    z_rayleigh = np.pi * w0**2 / cfg.wavelength_m
+    w_at_receiver = w0 * np.sqrt(1.0 + (cfg.link_distance_m / z_rayleigh) ** 2)
+    span = max(
+        4.0 * w_at_receiver,
+        4.0 * cfg.rx_lens_diameter_m,
+        4.0 * cfg.tx_aperture_diameter_m,
+        0.40,
+    )
+    return SpatialGrid.from_span_step(span, span / n)
 
 
 def _build_channel(cfg: ColleagueMultiPDConfig):
+    direction = cfg.link_direction.lower().strip()
+    lower_altitude = cfg.ground_altitude_m
+    upper_altitude = cfg.ground_altitude_m + cfg.link_distance_m
+    if direction == "downlink":
+        tx_altitude, rx_altitude = upper_altitude, lower_altitude
+    else:
+        tx_altitude, rx_altitude = lower_altitude, upper_altitude
     geo = LinkGeometry(
-        tx_altitude_m=cfg.ground_altitude_m,
-        rx_altitude_m=cfg.ground_altitude_m + cfg.link_distance_m,
+        tx_altitude_m=tx_altitude,
+        rx_altitude_m=rx_altitude,
         zenith_angle_deg=cfg.zenith_angle_deg,
     )
     wind_profile = np.asarray([[0.0, cfg.wind_speed_mps], [25_000.0, cfg.wind_speed_mps]])
@@ -182,9 +212,9 @@ def _build_channel(cfg: ColleagueMultiPDConfig):
         subharmonic_grid_size=5,
     )
     tx_optics = TxOptics(
-        aperture_diameter_m=cfg.ogs_aperture_diameter_m,
+        aperture_diameter_m=cfg.tx_aperture_diameter_m,
         wavelength_m=cfg.wavelength_m,
-        beam_waist_m=cfg.tx_beam_waist_ratio * (cfg.ogs_tx_eff_diameter_m / 2.0),
+        beam_waist_m=tx_beam_waist_m(cfg),
     )
     rx_optics = RxOptics(
         aperture_diameter_m=cfg.rx_lens_diameter_m,
@@ -258,6 +288,18 @@ def _lag1_correlation(values):
     return float(np.corrcoef(arr[:-1], arr[1:])[0, 1])
 
 
+def _resample_complex_plane(field, source_coords, target_coords):
+    """Bilinearly resample one complex field onto a receiver-focused grid."""
+
+    source_step = float(source_coords[1] - source_coords[0])
+    target_index = (target_coords - source_coords[0]) / source_step
+    index_x, index_y = np.meshgrid(target_index, target_index, indexing="ij")
+    sample_points = np.asarray([index_x, index_y])
+    real = map_coordinates(np.real(field), sample_points, order=1, mode="constant", cval=0.0)
+    imag = map_coordinates(np.imag(field), sample_points, order=1, mode="constant", cval=0.0)
+    return real + 1j * imag
+
+
 def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
     """Generate a time-correlated optical sequence and Multi-PD powers."""
 
@@ -265,28 +307,33 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
     fso, geo, tc, tx_optics = _build_channel(cfg)
     sg = _make_spatial_grid(cfg, tc)
 
+    direction = cfg.link_direction.lower().strip()
     wavelength = tc.wavelength_m
-    z_total = cfg.link_distance_m
+    z_total = geo.link_distance_m
     z_atm = min(z_total, tc.z_turbulence_m)
     z_vac = max(0.0, z_total - z_atm)
     w0 = tx_optics.beam_waist_m
     z_rayleigh = np.pi * w0**2 / wavelength
-    r0 = tc.fried_parameter_m
-    w_exit = w0 * np.sqrt(1.0 + (z_atm / z_rayleigh) ** 2)
     dx = sg.x_step_m
-    n_min = int(np.ceil(max(3.0 * w_exit, 3.0 * r0, 3.0 * cfg.rx_lens_diameter_m) / dx))
-    n = int(2 ** np.ceil(np.log2(max(n_min, 64))))
-    cap_n = 256 if cfg.grid_mode.lower().strip() == "small" else 512
-    n = min(n, cap_n)
+    n = sg.x_num_samples
 
     coords_bpm = (np.arange(n) - (n - 1) / 2.0) * dx
     x_bpm, y_bpm = np.meshgrid(coords_bpm, coords_bpm, indexing="ij")
     radius_bpm = np.sqrt(x_bpm**2 + y_bpm**2)
     r_tx = tx_optics.aperture_diameter_m / 2.0
-    e_raw = np.exp(-(x_bpm**2 + y_bpm**2) / w0**2)
-    e_tx = e_raw * (radius_bpm <= r_tx)
-    p_in = float(np.sum(e_tx**2) * dx**2)
-    e_in = (e_tx / np.sqrt(p_in + 1e-30)).astype(np.complex128)
+    if direction == "downlink" and z_vac > 1e-9:
+        k = 2.0 * np.pi / wavelength
+        w_entry = w0 * np.sqrt(1.0 + (z_vac / z_rayleigh) ** 2)
+        inv_radius = 1.0 / (z_vac * (1.0 + (z_rayleigh / z_vac) ** 2))
+        gouy = np.arctan(z_vac / z_rayleigh)
+        e_source = (w0 / w_entry) * np.exp(-(x_bpm**2 + y_bpm**2) / w_entry**2)
+        e_source = e_source * np.exp(
+            1j * (k * z_vac + 0.5 * k * (x_bpm**2 + y_bpm**2) * inv_radius - gouy)
+        )
+    else:
+        e_source = np.exp(-(x_bpm**2 + y_bpm**2) / w0**2) * (radius_bpm <= r_tx)
+    p_in = float(np.sum(np.abs(e_source) ** 2) * dx**2)
+    e_in = (e_source / np.sqrt(p_in + 1e-30)).astype(np.complex128)
     field_in = np.zeros((2, n, n, 1), dtype=np.complex128)
     field_in[0, :, :, 0] = e_in
     field_in[1, :, :, 0] = e_in
@@ -296,32 +343,38 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
     positions = pd_grid_positions(cfg.pd_rows, cfg.pd_cols, cfg.pd_spacing_m)
     array_radius = max(max(abs(px), abs(py)) for px, py in positions) + cfg.pd_spacing_m
 
-    if z_vac > 1e-9:
-        n_receiver = 192
-        receiver_span = max(4.0 * r_lens, 2.2 * array_radius * reducer)
-        dx_receiver = receiver_span / n_receiver
-        coords_receiver = (np.arange(n_receiver) - (n_receiver - 1) / 2.0) * dx_receiver
-        output_mode = "colleague BPM + vacuum Zoom-DFT + Rx beam reducer"
+    n_receiver = 256
+    receiver_span = max(2.4 * r_lens, 2.2 * array_radius * reducer)
+    dx_receiver = receiver_span / n_receiver
+    coords_receiver = (np.arange(n_receiver) - (n_receiver - 1) / 2.0) * dx_receiver
+    if direction == "uplink" and z_vac > 1e-9:
+        output_mode = "uplink: colleague atmospheric BPM -> vacuum Zoom-DFT -> Rx reducer"
+    elif direction == "downlink" and z_vac > 1e-9:
+        output_mode = "downlink: analytic vacuum -> colleague atmospheric BPM -> Rx reducer"
     else:
-        n_receiver = n
-        dx_receiver = dx
-        coords_receiver = coords_bpm
-        output_mode = "colleague split-step BPM + Rx beam reducer"
+        output_mode = f"{direction}: colleague split-step atmospheric BPM -> Rx reducer"
     coords_out = coords_receiver / reducer
     dx_out = dx_receiver / reducer
     xr, yr = np.meshgrid(coords_receiver, coords_receiver, indexing="ij")
     lens_mask_receiver = (xr**2 + yr**2) <= r_lens**2
 
+    def to_receiver_plane(field_atmosphere):
+        if direction == "uplink" and z_vac > 1e-9:
+            return fso._propagate_far_field_zoom(
+                field_atmosphere, dx, dx_receiver, z_vac, wavelength
+            )
+        receiver = np.zeros((2, n_receiver, n_receiver, 1), dtype=np.complex128)
+        for polarization in range(2):
+            receiver[polarization, :, :, 0] = _resample_complex_plane(
+                field_atmosphere[polarization, :, :, 0], coords_bpm, coords_receiver
+            )
+        return receiver
+
     tc_no_turbulence = dataclasses.replace(tc, n_screens=0)
     field_ref, _ = fso._propagate_numerical_segment_full_field(
         field_in, z_atm, n, dx, wavelength, tc_no_turbulence, geo
     )
-    if z_vac > 1e-9:
-        field_ref_receiver = fso._propagate_far_field_zoom(
-            field_ref, dx, dx_receiver, z_vac, wavelength
-        )
-    else:
-        field_ref_receiver = field_ref
+    field_ref_receiver = to_receiver_plane(field_ref)
     reference_intensity = np.abs(field_ref_receiver[0, :, :, 0]) ** 2
     reference_aperture_field = field_ref_receiver[0, :, :, 0] * lens_mask_receiver
     reference_aperture_power = float(
@@ -342,6 +395,8 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
         subharmonic_grid_size=tc.subharmonic_grid_size,
         seed=cfg.seed_base,
     ) if tc.n_screens > 0 else []
+    if direction == "downlink":
+        base_screens = list(reversed(base_screens))
 
     frame_times = np.arange(cfg.n_time_frames, dtype=float) * cfg.frame_interval_s
     theta = np.deg2rad(cfg.wind_direction_deg)
@@ -369,12 +424,7 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
         field_t, parseval_error[frame_index] = _propagate_with_frozen_screens(
             fso, field_in, base_screens, shifts, z_atm, n, dx, wavelength
         )
-        if z_vac > 1e-9:
-            field_receiver = fso._propagate_far_field_zoom(
-                field_t, dx, dx_receiver, z_vac, wavelength
-            )
-        else:
-            field_receiver = field_t
+        field_receiver = to_receiver_plane(field_t)
         receiver_intensity = np.abs(field_receiver[0, :, :, 0]) ** 2
         reduced_intensity = receiver_intensity * lens_mask_receiver * reducer**2
 
@@ -384,7 +434,7 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
             reduced_intensity, coords_out, dx_out, positions, cfg
         )
 
-        total_plane = float(np.sum(receiver_intensity) * dx_receiver**2) + 1e-30
+        total_plane = 1.0
         collected = float(np.sum(receiver_intensity * lens_mask_receiver) * dx_receiver**2)
         aperture_fraction[frame_index] = collected / total_plane
         aperture_field = field_receiver[0, :, :, 0] * lens_mask_receiver
@@ -407,6 +457,16 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
     cn2_equivalent = float(np.trapezoid(cn2, h) / max(cfg.link_distance_m, 1e-30))
     k = 2.0 * np.pi / cfg.wavelength_m
     rytov_variance = float(1.23 * cn2_equivalent * k ** (7.0 / 6.0) * cfg.link_distance_m ** (11.0 / 6.0))
+    free_space_path_loss_db = float(
+        20.0 * np.log10(4.0 * np.pi * geo.link_distance_m / cfg.wavelength_m)
+    )
+    link_budget_rx_power_dbm = float(
+        cfg.tx_power_dbm
+        + cfg.tx_antenna_gain_db
+        + cfg.rx_antenna_gain_db
+        - free_space_path_loss_db
+        - cfg.active_system_loss_db
+    )
 
     return {
         "fso": fso,
@@ -433,6 +493,18 @@ def simulate_colleague_multi_pd_sequence(cfg: ColleagueMultiPDConfig):
         "screen_shift_pixels": screen_shift_pixels,
         "r0_m": tc.fried_parameter_m,
         "greenwood_hz": tc.greenwood_freq_hz,
+        "link_direction": direction,
+        "tx_altitude_m": geo.tx_altitude_m,
+        "rx_altitude_m": geo.rx_altitude_m,
+        "tx_beam_waist_m": w0,
+        "tx_divergence_full_angle_rad": cfg.tx_divergence_full_angle_rad,
+        "modeled_tx_divergence_full_angle_rad": 2.0 * cfg.wavelength_m / (np.pi * w0),
+        "tx_antenna_gain_db": cfg.tx_antenna_gain_db,
+        "rx_antenna_gain_db": cfg.rx_antenna_gain_db,
+        "tx_ideal_aperture_gain_db": aperture_gain_db(cfg.tx_aperture_diameter_m, cfg.wavelength_m),
+        "rx_ideal_aperture_gain_db": aperture_gain_db(cfg.rx_lens_diameter_m, cfg.wavelength_m),
+        "free_space_path_loss_db": free_space_path_loss_db,
+        "link_budget_rx_power_dbm": link_budget_rx_power_dbm,
         "rytov_variance": rytov_variance,
         "scintillation_index": scintillation_index,
         "temporal_correlation_lag1": _lag1_correlation(total_pd_power),

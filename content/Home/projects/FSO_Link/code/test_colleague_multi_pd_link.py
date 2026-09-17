@@ -5,6 +5,7 @@ import numpy as np
 from colleague_multi_pd_link import (
     ColleagueMultiPDConfig,
     _pd_power_from_intensity,
+    aperture_gain_db,
     run_colleague_multi_pd_link,
     simulate_colleague_multi_pd_sequence,
 )
@@ -13,6 +14,13 @@ from colleague_multi_pd_link import (
 class ColleagueMultiPDLinkTests(unittest.TestCase):
     def test_receiver_aperture_and_reducer_preserve_collected_power(self):
         cfg = ColleagueMultiPDConfig(
+            link_distance_m=800.0,
+            rx_lens_diameter_m=0.05,
+            pd_rows=2,
+            pd_cols=4,
+            pd_spacing_m=1e-3,
+            pd_radius_m=0.25e-3,
+            microlens_enabled=False,
             n_time_frames=3,
             n_screens=0,
             n_subharmonics=0,
@@ -37,6 +45,13 @@ class ColleagueMultiPDLinkTests(unittest.TestCase):
 
     def test_frozen_flow_produces_correlated_time_series_and_link_metrics(self):
         cfg = ColleagueMultiPDConfig(
+            link_distance_m=800.0,
+            rx_lens_diameter_m=0.05,
+            pd_rows=2,
+            pd_cols=4,
+            pd_spacing_m=1e-3,
+            pd_radius_m=0.25e-3,
+            microlens_enabled=False,
             n_time_frames=6,
             n_screens=1,
             n_subharmonics=0,
@@ -52,6 +67,32 @@ class ColleagueMultiPDLinkTests(unittest.TestCase):
         self.assertIn("CNN predictive", result["metrics"])
         self.assertEqual(result["pd_rx_power_w"].shape, (cfg.n_time_frames, cfg.pd_rows * cfg.pd_cols))
         self.assertTrue(all(np.isfinite(metric["mean_evm_pct"]) for metric in result["metrics"].values()))
+
+    def test_link_direction_and_requested_aperture_gains(self):
+        downlink = simulate_colleague_multi_pd_sequence(ColleagueMultiPDConfig(
+            link_direction="downlink",
+            n_time_frames=3,
+            n_screens=0,
+            n_subharmonics=0,
+            cnn_epochs=0,
+            grid_mode="small",
+        ))
+        uplink = simulate_colleague_multi_pd_sequence(ColleagueMultiPDConfig(
+            link_direction="uplink",
+            link_distance_m=800.0,
+            n_time_frames=3,
+            n_screens=0,
+            n_subharmonics=0,
+            cnn_epochs=0,
+            grid_mode="small",
+        ))
+
+        self.assertGreater(downlink["tx_altitude_m"], downlink["rx_altitude_m"])
+        self.assertLess(uplink["tx_altitude_m"], uplink["rx_altitude_m"])
+        self.assertAlmostEqual(downlink["tx_antenna_gain_db"], 103.1)
+        self.assertAlmostEqual(downlink["rx_antenna_gain_db"], 112.3)
+        self.assertAlmostEqual(aperture_gain_db(0.070, 1550e-9), 103.0, places=1)
+        self.assertAlmostEqual(aperture_gain_db(0.2032, 1550e-9), 112.3, places=1)
 
     def test_microlens_cells_collect_more_area_without_creating_power(self):
         coords = np.linspace(-2e-3, 2e-3, 101)
