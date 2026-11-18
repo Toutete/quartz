@@ -1,0 +1,48 @@
+{
+  "date_local": "2026-11-18",
+  "timezone": "Asia/Seoul",
+  "git_head": "c239cbdc9debeeb26a3b3e303d4e2d1cbda82559",
+  "v2_file_revision": "c5972d9fb61d82d5bfeb58154feb204ea88dac6b",
+  "code_sha256": {
+    "jlt_review_audit\\capture_audit.py": "f211789c644a2c09c03690b25b2eb377f0f7536efad8b2296111c2104b12d9c3",
+    "content\\Home\\projects\\THz_ISAC\\code\\isac_gui.py": "079751e4aaadb27b0b6f5384a34413e3aabeaa25812a148810eebc712cb97e60",
+    "content\\Home\\projects\\THz_ISAC\\code\\isac_gui_v2.py": "6b54a34a941917e8f863103783390fb6b61be5fe1f3c56cce106dbb5773db900",
+    "content\\Home\\projects\\THz_ISAC\\code\\remeasure_cpe_evm.py": "5a47f7f8fdcb6702bb8e0f4639e00b819d7e3772a3e9b5cf65feea9b1c61437a",
+    "content\\Home\\projects\\THz_ISAC\\code\\read_range_data.py": "1e8a3937d0e416839163aaa188524f0efe1ecd5c3bf232b039397ca350aa1371",
+    "content\\Home\\projects\\THz_ISAC\\code\\functions\\dsp_functions.py": "35a17ebf34d4908a51c8e523f147cf6b19a69f21065dc4beca8982112a2b7485",
+    "jlt_review_audit/model_audit.py": "6a706bf3a432d1f68f35b6be5e67fc26706d2f9157b3d519344f47670665c9e7"
+  },
+  "attachment_sha256": {
+    "2026_TVT_SI_reuse_THz_ISAC.pdf": "fd831a76f65bc167f56170cae33e5964da44f4f1f0531f6cac4e90d8a7377f6d",
+    "JLT_revision_response_plan.docx": "bb5ae0f1b03ad41cad286f048d0d7b07925fd5be5f1ba86a990a386c088bbc90",
+    "JLT_review_response_Codex_handoff.md": "8aba8922d885bfd40081478dc8399caa47088701b8eb64472fe549cfb60d6379"
+  },
+  "versions": {
+    "python": "3.12.10",
+    "numpy": "2.5.5",
+    "scipy": "1.18.1",
+    "matplotlib": "3.11.2"
+  },
+  "commands": [
+    "python -B jlt_review_audit/capture_audit.py",
+    "python -B jlt_review_audit/model_audit.py",
+    "python -B content/Home/projects/THz_ISAC/code/remeasure_cpe_evm.py --modulation 32QAM --out jlt_review_audit/evm_32qam.csv",
+    "python -B content/Home/projects/THz_ISAC/code/remeasure_cpe_evm.py --modulation 16QAM --out jlt_review_audit/evm_16qam.csv"
+  ],
+  "capture_reprocessing_seed": null,
+  "synthetic_seed": 20261118,
+  "v2_baseline_seed": 0,
+  "capture_counts": {
+    "bandwidth": 15,
+    "range_1100mm": 2,
+    "photocurrent": 10
+  },
+  "scoped_input_hashes": "capture_inventory.csv",
+  "measurements": "offline reprocessing only",
+  "omt_bench_sha256": {
+    "1to2_180deg_2.csv": "93610eb6bcd8d2f86947882c85e943a7b5b92c275a80d7151892c7fb031b1b92",
+    "long_1TO3_180deg_1.csv": "643554953d341a95f937326e4e20b8632bbd75efc1f635c0638f00ecd5e9d294",
+    "long_1TO4_180deg_2.csv": "170e12396480b99f8cfa0c9160a9812d5275ccb80d1bece413cf33ed1bb974b7",
+    "new_thru_0dbm_2.csv": "c48013f82b8007c1838b4e7c0fe822579a4745309d97e937aa8b8d56c419273c"
+  }
+}

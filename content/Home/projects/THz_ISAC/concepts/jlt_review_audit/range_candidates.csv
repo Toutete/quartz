@@ -1,0 +1,3 @@
+file,modulation,current_ma,modeled_utc_pd_power_dbm,c1_evm_db,c1_reference_aided_ber,c2_voltage_rms_v,c2_cfr_peak_m,c2_cfr_contrast_db,c2_cfr_mean_excess_db
+data/captures/range_1100mm/Data_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph6.5.npz,32QAM,6.5,-10.643693667428025,-14.612971315192148,0.06350260416666667,0.003372629825294477,1.12625,9.477123453894103,5.284189068245504
+data/captures/range_1100mm/Data_range_fIF11_fsym15_P-8_fRF280_DFT-s-OFDM_32QAM_Iph7.npz,32QAM,6.5,-10.643693667428025,-0.004204095006705263,0.4996875,0.002479157195019242,1.0975,33.33593663995038,26.098927411985365

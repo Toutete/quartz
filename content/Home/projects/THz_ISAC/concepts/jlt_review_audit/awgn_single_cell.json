@@ -1,0 +1,6 @@
+{
+  "pfa": 1e-06,
+  "pd": 0.9,
+  "sinr_db": 13.183490056793985,
+  "detector": "one complex bin, known mean H0 noise power, nonfluctuating target"
+}

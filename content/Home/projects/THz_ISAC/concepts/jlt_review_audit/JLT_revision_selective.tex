@@ -1,0 +1,1283 @@
+\documentclass[10pt,journal]{IEEEtran}
+% --- Core IEEEtran-friendly packages (keep this list minimal) ---
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+% Keep IEEEtran's Times setup in a XeTeX preview.
+\ifdefined\XeTeXversion
+  \usepackage[OT1]{fontenc}
+\fi
+% Change revisioncolor to black for the clean-text view.
+\colorlet{revisioncolor}{blue}
+\DeclareRobustCommand{\rev}[1]{\textcolor{revisioncolor}{#1}}
+\usepackage[caption=false,font=footnotesize]{subfig}
+
+% Tables
+\usepackage{booktabs}
+\usepackage{tabularx} % loads array internally
+\usepackage{makecell}
+\usepackage{multirow}
+
+% Reduce Underfull \hbox warnings in narrow IEEE columns (gentler than \sloppy)
+\emergencystretch=1em
+
+% tabularx helper column + thin rule used in Table~\ref{tab:thz_isac_comparison}
+\newcolumntype{Y}{>{\centering\arraybackslash}X}
+\newcommand{\rowrule}{\specialrule{0.22pt}{0.4pt}{0.4pt}}
+
+% Some TeX installations define these lengths via subfig; define only if missing.
+\makeatletter
+\@ifundefined{subfigcapskip}{\newlength{\subfigcapskip}}{}
+\@ifundefined{subfigbottomskip}{\newlength{\subfigbottomskip}}{}
+\makeatother
+
+\title{Self-Interference Reuse for Shared-Aperture Monostatic Full-Duplex THz ISAC}
+
+\author{Sungmin~Cho,~\IEEEmembership{Member,~IEEE,}
+        Sang-Rok~Moon,~\IEEEmembership{Member,~IEEE,}
+        Sooyeon~Kim,
+        Minkyu~Sung,~\IEEEmembership{Member,~IEEE,}
+        Seung-Hyun~Cho,~\IEEEmembership{Member,~IEEE,}
+        and~Ho-Jin~Song,~\IEEEmembership{Fellow,~IEEE}%
+\thanks{This work was supported by the Electronics and Telecommunications
+Research Institute (ETRI) grant funded by the Korean government
+[26ZH1100, Study on 3D communication technology for hyper-connectivity].
+(Corresponding author: Sungmin Cho.)}%
+\thanks{S. Cho, S.-R. Moon, S. Kim, M. Sung, and S.-H. Cho are with the Electronics
+and Telecommunications Research Institute (ETRI), Daejeon 34129, South
+Korea (e-mail: sungmincho@etri.re.kr).}%
+\thanks{H.-J. Song is with the Department of Electrical Engineering and
+Graduate School of Semiconductor Technology, Pohang University of Science
+and Technology (POSTECH), Pohang 37673, South Korea
+(e-mail: hojin.song@postech.ac.kr).}%
+}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Terahertz (THz) integrated sensing and communication (ISAC) can
+combine high-rate communication with fine ranging. For mobile and vehicular applications, sensing during data transmission helps maintain awareness of changing surroundings by avoiding time-division sensing gaps. Monostatic full-duplex ISAC (FD-ISAC) enables simultaneous downlink
+transmission and target-echo reception, but transmitter leakage
+causes strong self-interference (SI), particularly in shared-aperture
+transceivers. This paper proposes residual-SI reuse, in which passive
+\rev{antenna-domain isolation sets the residual leakage level for reuse
+as an embedded self-homodyne reference in a square-law receiver.} Because the SI power is independent of target
+range, the useful SI--echo cross-beat power follows the conventional
+$R^{-4}$ monostatic-radar dependence rather than the $R^{-8}$
+echo-only square-law dependence. The SI response from the same
+acquisition also enables channel frequency response (CFR)
+normalization for ranging. A 280-GHz shared-aperture prototype using
+free-running lasers and square-law direct detection \rev{demonstrates concurrent downlink transmission and monostatic
+sensing using a fixed wideband passive duplexer and post-detection
+CFR baseline removal.} Using a single 20-GHz data-bearing waveform, the system
+achieves a 100-Gb/s gross downlink rate over 1~m. \rev{The model identifies a residual-SI power that maximizes sensing
+signal-to-interference-plus-noise ratio (SINR) for a fixed echo.
+A target displacement of approximately 7.5~mm produces a
+corresponding one-range-cell shift in the SI-normalized CFR profile.}
+These results support residual-SI reuse as a design approach for
+wideband shared-aperture THz FD-ISAC.
+\end{abstract}
+\begin{IEEEkeywords}
+Full-duplex, integrated sensing and communication,
+self-interference reuse, square-law detection, terahertz.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Sixth-generation (6G) networks are expected to combine very-high-rate
+connectivity with accurate localization and environmental perception for
+applications such as vehicle-to-everything (V2X), autonomous mobility,
+and smart manufacturing. Integrated sensing and communication (ISAC)
+supports these functions by sharing spectrum, waveforms, hardware, and
+signal processing between communication and sensing
+\cite{liu_integrated_2022,gonzalez-prelcic_integrated_2024}. The
+terahertz (THz) band is particularly attractive for ISAC because its
+large available bandwidth can support very-high-rate communication and
+fine ranging
+\cite{song_terahertz_2022,chaccour_seven_2022,
+elbir_Terahertz_2024,zhang_terahertz_2026}. Recent experimental THz ISAC systems have demonstrated these capabilities by focusing on waveform-level integration \cite{jia_unified_2018,lyu_multichannel_2024,shi_310_2026a}.
+
+In mobile and vehicular environments, communication links, target
+locations, and beam directions can change rapidly. Time-division ISAC
+can therefore leave sensing gaps during communication, delaying the
+detection of suddenly appearing or rapidly approaching objects  
+\cite{he_nonlinear_2024,zhang_cochannel_2026}. Monostatic full-duplex ISAC (FD-ISAC) addresses these sensing gaps by
+enabling simultaneous downlink transmission and monostatic echo
+reception at the same node and in the same band
+\cite{zhang_inband_2022,duan_frequencydomain_2024,duan_inband_2025,
+zhang_cochannel_2026,du_fullduplexbased_2026,du_fullduplex_2026}. Here,
+\rev{FD at the monostatic node refers specifically to concurrent downlink
+transmission and echo reception. The demonstrated data link is
+one-way.} For THz links, where narrow
+high-gain beams impose stringent alignment requirements
+\cite{sung_practical_2026}, a shared aperture offers the advantages of
+a common transmit--receive boresight and reduced antenna duplication
+\cite{wu_integrated_2025}.
+
+The main challenge of FD-ISAC is self-interference (SI). In-band
+transmitter leakage enters the sensing receiver together with the much
+weaker target echo, limiting receiver linearity and dynamic range.
+Conventional FD-ISAC therefore suppresses SI in multiple stages,
+combining passive antenna-domain isolation with additional RF and digital
+SI cancellation (SIC)
+\cite{duan_inband_2025,
+du_fullduplexbased_2026,du_fullduplex_2026}.
+A photonics-assisted in-band FD-ISAC transceiver employed photonic SIC and
+achieved 23.6~dB of SI suppression after radar dechirping
+\cite{yu_photonicsassisted_2024a}. A recent shared-aperture FD-ISAC
+prototype used 30~dB of passive circulator isolation together with RF
+and digital SIC, achieving 126~dB of total SI suppression
+\cite{du_fullduplex_2026}. \rev{These architectures use dedicated cancellation stages to reduce
+leakage before recovering the desired received signals. Cancellation
+depth depends on the signal bandwidth, receive functions, and
+reference planes used in each demonstration.}
+
+\rev{For a photonic THz downlink with a shared aperture, residual SI
+provides a reference field already present at the sensing receiver.
+A homodyne receiver with a separately supplied reference would
+produce the same delayed beat at equal detector input fields. Here
+the duplexer sets the reference through its transmit-to-receive
+coupling. This eliminates the separate reference distribution path
+in the demonstrated sensing branch. The post-detection SI-suppression
+step consists of one complex scalar normalization and a constant
+CFR baseline subtraction. It uses the CFR already computed for
+ranging and avoids synthesizing a wideband replica of the RF
+leakage for this step.}
+
+\rev{At fixed echo power, raising the residual SI initially strengthens
+the useful SI--echo beat. SI-induced noise and signal--signal beat
+interference (SSBI) eventually limit the gain, giving a
+sensing-SINR-maximizing reference power. The prototype implements a
+fixed operating point with a passive wideband duplexer. Adjustable
+coupling would allow the reference power to be set for a different
+operating point.}
+
+The main contributions are summarized as follows.
+\begin{itemize}
+
+\item We establish a system model for the proposed shared-aperture
+monostatic FD-ISAC architecture and derive the sensing signal-to-interference-plus-noise ratio (SINR) from the
+square-law detector output. \rev{We derive the optimum residual-SI power at fixed echo power
+and characterize its relation to the receiver input limits and
+joint ISAC range. We also formulate SI-normalized CFR ranging
+for multiple echoes using an inverse fast Fourier transform
+(IFFT).}
+
+\item We experimentally demonstrate the proposed SI-reuse FD-ISAC
+architecture at 280~GHz \rev{using a fixed-isolation passive duplexer and digital CFR baseline
+removal. The prototype supports} 100-Gb/s gross downlink
+communication and monostatic sensing with a 20-GHz bandwidth and a
+7.5-mm bandwidth-limited range cell.
+
+\end{itemize}
+
+The remainder of this paper is organized as follows.
+Section~\ref{sec:system_model} presents the proposed architecture and
+signal model. Section~\ref{sec:experimental_setup} describes the
+experimental setup and processing. Section~\ref{sec:experimental_results}
+presents the experimental results and comparison.
+Section~\ref{sec:conclusion} concludes the paper.
+
+
+
+\section{Proposed SI-Reuse Shared-Aperture Monostatic FD-ISAC System}
+\label{sec:system_model}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig/fig1.png}
+\caption{Conceptual diagram of the proposed shared-aperture monostatic
+full-duplex THz ISAC architecture. LD: laser diode; IM: intensity
+modulator; UTC-PD: uni-traveling-carrier photodiode;
+LNA: low-noise amplifier; ADC: analog-to-digital converter; DSP: digital
+signal processing.}
+\label{fig:concept}
+\end{figure}
+
+Fig.~\ref{fig:concept} shows the proposed shared-aperture monostatic
+FD-ISAC architecture. A duplexing network connects the transmitter and
+colocated sensing receiver to a common aperture, providing a common
+boresight and passive antenna-domain isolation. \rev{The duplexer reduces the leakage at the receiver input and sets the
+residual reference field available for sensing.} At the square-law receiver, its beating with the
+target echo provides an embedded self-homodyne sensing reference, while
+the same SI response enables same-acquisition CFR normalization.
+Section~II-A defines the waveform model, Section~II-B develops the
+SI-assisted sensing and CFR normalization, Section~II-C presents the
+communication model, and Section~II-D derives the joint ISAC range behavior.
+
+\subsection{Free-Running Photonic Transmitter and Waveform}
+\label{sec:tx_signal}
+
+Two free-running lasers separated by $f_{\mathrm c}$ are photomixed in a
+uni-traveling-carrier photodiode (UTC-PD), with one optical carrier
+modulated by the data waveform. The complex analytic THz signal is
+\begin{equation}
+x(t)=\big[1+m\,d(t)\big]
+e^{j[2\pi(f_{\mathrm c}+\delta f)t+\Delta\theta(t)]},
+\label{eq:xt}
+\end{equation}
+where $d(t)$ is the normalized analytic representation of the
+data-bearing intermediate-frequency (IF) waveform, satisfying
+$\mathbb{E}[d(t)]=0$ and $\mathbb{E}[|d(t)|^2]=1$, $m$ is the
+modulation index, $\delta f$ is the beat-frequency offset, and
+$\Delta\theta(t)$ is the relative phase noise. The carrier-to-signal power ratio (CSPR) is
+$\mathrm{CSPR}=1/m^2$. With the above normalization, the average
+power of the modulated field is $1+m^2$ times its carrier-component
+power.
+
+\rev{When the beat-frequency offset $\delta f$ varies slowly within an
+acquisition, it contributes a frequency-independent phase to each
+delay path. The CFR retains the frequency-dependent phase associated
+with that delay.} Orthogonal frequency-division multiplexing (OFDM) enables direct
+subcarrier-wise CFR estimation using the known communication symbols.
+DFT-spread OFDM (DFT-s-OFDM) is adopted to retain this
+frequency-domain processing while reducing the peak-to-average power
+ratio (PAPR), allowing more efficient use of the limited THz transmit
+power \cite{han_thz_2024}. \rev{In the monostatic architecture, the sensing processor knows the
+transmitted data on the occupied subcarriers. The entire data waveform
+can therefore serve as the reference for CFR estimation, with a
+dedicated sensing pilot optional \cite{keskin_monostatic_2023}.}
+
+
+\subsection{SI-Assisted Sensing Branch}
+\label{sec:sens_branch}
+
+At the sensing low-noise amplifier (LNA) input, SI and the delayed target
+echo are superimposed as
+\begin{equation}
+r(t)=\sqrt{P_{\mathrm{SI}}}\,x(t)
++\sqrt{P_{\mathrm{ec}}(R)}\,x(t-\tau)+n(t),
+\label{eq:rt}
+\end{equation}
+where $\tau=2R/c$ and $n(t)$ is the input-referred receiver noise with
+power $N=kT_0F_{\mathrm{LNA}}B$, where $k$ is Boltzmann's constant,
+$T_0$ is the reference temperature, $F_{\mathrm{LNA}}$ is the LNA noise
+factor, and $B$ is the receiver bandwidth. The residual SI power after
+passive antenna-domain isolation is
+$P_{\mathrm{SI}}=P_{\mathrm t}10^{-\mathrm{ISO}/10}$, where
+$\mathrm{ISO}$ denotes the passive antenna-domain isolation.
+\rev{The usable reference power is bounded by the LNA input range and the
+square-law range of the detector after LNA gain and interstage loss.}
+$P_{\mathrm{SI}}$ is independent of target range, whereas the monostatic
+echo power follows \cite{skolnik_introduction_2001}
+\begin{equation}
+P_{\mathrm{ec}}(R)=
+\frac{P_{\mathrm t}G_{\mathrm t}G_{\mathrm r}
+\lambda^2\sigma_{\mathrm{eff}}}
+{(4\pi)^3R^4L^2},
+\label{eq:pec}
+\end{equation}
+where $G_{\mathrm t}$ and $G_{\mathrm r}$ are the antenna gains,
+$\lambda$ is the wavelength, $\sigma_{\mathrm{eff}}$ is the effective
+radar cross section (RCS), and $L$ is the one-way front-end loss.
+Hereafter, $P_{\mathrm t}$, $P_{\mathrm{SI}}$, and $P_{\mathrm{ec}}$
+denote carrier-component powers, with $P_{\mathrm{ec}}(R)$ abbreviated
+as $P_{\mathrm{ec}}$ when the range dependence is implicit.
+
+\subsubsection{Square-Law Detection}
+\label{sec:sld}
+
+The square-law detector output is proportional to $|r(t)|^2$.
+Expanding \eqref{eq:rt} gives
+\begin{align}
+|r(t)|^2={}&
+\underbrace{2\sqrt{P_{\mathrm{SI}}P_{\mathrm{ec}}}
+\,\mathrm{Re}\{x(t)x^*(t-\tau)\}}_{\text{SI--echo cross-beat}}
++\underbrace{P_{\mathrm{ec}}|x(t-\tau)|^2}_{\text{echo self-beat}}
+\notag\\
+&+\underbrace{P_{\mathrm{SI}}|x(t)|^2}_{\text{SI self-beat}}
++\mathcal N(t),
+\label{eq:sq_expand}
+\end{align}
+where
+\begin{equation}
+\mathcal N(t)
+=
+2\,\mathrm{Re}\!\left\{
+\left[
+\sqrt{P_{\mathrm{SI}}}x(t)
++\sqrt{P_{\mathrm{ec}}}x(t-\tau)
+\right]n^*(t)
+\right\}
++|n(t)|^2.
+\label{eq:noise}
+\end{equation}
+
+For the waveform in \eqref{eq:xt},
+\begin{equation}
+|x(t)|^2
+=
+1+m[d(t)+d^*(t)]+m^2|d(t)|^2.
+\label{eq:selfbeat}
+\end{equation}
+For the self-beat terms, square-law detection removes the common carrier
+phase and phase noise. IF bandpass
+filtering then extracts the desired beat, which is linear in $m$, while
+the second-order term contributes signal--signal beat interference
+(SSBI), smaller by a factor of order $m$. A CSPR of 13~dB
+($m=0.224$) is therefore used, making $m$ small enough to suppress SSBI
+while keeping sufficient sideband power.
+
+The SI--echo cross-beat retains the differential phase
+$\phi_\tau(t)=2\pi(f_{\mathrm c}+\delta f)\tau+
+\Delta\theta(t)-\Delta\theta(t-\tau)$. The frequency-related term
+$2\pi(f_{\mathrm c}+\delta f)\tau$ is constant within each acquisition,
+whereas the random variation is determined by the phase-noise difference
+over the round-trip delay. For two independent 15-kHz-linewidth lasers,
+the resulting 30-kHz beat linewidth gives a root-mean-square (rms)
+differential phase variation of $2.9^\circ$ at $R=2$~m.
+
+\rev{After IF filtering, the first-order analytic detector output is}
+{\color{revisioncolor}
+\begin{equation}
+y(t)=2m\big[C_0d(t)+C_\tau d(t-\tau)\big]+n_{\mathrm d}(t).
+\label{eq:yt}
+\end{equation}}
+\rev{Here \(C_0=P_{\mathrm{SI}}+Se^{j\phi_\tau}\) and
+\(C_\tau=P_{\mathrm{ec}}+Se^{-j\phi_\tau}\), with
+\(S=\sqrt{P_{\mathrm{SI}}P_{\mathrm{ec}}}\). These coefficients
+multiply the undelayed and delayed data, respectively.}
+
+\subsubsection{SI-Normalized CFR and Range Estimation}
+\label{sec:range_est}
+
+\rev{For \(L_{\mathrm t}\) stationary echoes, the delayed term in
+\eqref{eq:yt} becomes a sum over paths. Let \(C_\ell\) and
+\(\tau_\ell\) denote the effective detector coefficient and
+delay of echo \(\ell\), with the dominant SI at delay zero. The
+coefficients are \(C_\ell=a_\ell(\sum_{q=0}^{L_{\mathrm t}}a_q)^*\),
+where \(a_0\) is the SI carrier field and \(a_q\) for \(q>0\)
+are the echo carrier fields. With negligible inter-block
+interference, the occupied-bin model is}
+{\color{revisioncolor}
+\begin{equation}
+\begin{split}
+Y_k &\simeq H_kD_k+\mathcal V_k,\\
+H_k &=2mA_k\!\left(C_0+
+   \sum_{\ell=1}^{L_{\mathrm t}} C_\ell e^{-j2\pi k\Delta f\tau_\ell}
+              \right).
+\end{split}
+\label{eq:Yk}
+\end{equation}}
+\rev{Here \(D_k\) and \(Y_k\) are the transmit and receive spectra,
+\(\Delta f\) is the subcarrier spacing, \(A_k\) is the detector,
+IF, and digitizer response, and \(\mathcal V_k\) is receiver noise.
+A reference phase at the center frequency is absorbed in \(C_\ell\).
+The known \(D_k\) gives a per-bin CFR estimate
+\cite{sturm_waveform_2011}. The measurements use the regularized
+multi-block estimator in Section~\ref{sec:offline_processing}.}
+{\color{revisioncolor}
+\begin{equation}
+\widehat H_k=Y_k/D_k,\qquad D_k\ne0.
+\label{eq:cfr}
+\end{equation}}
+\rev{With the ideal frequency-resolved SI reference
+\(H_{\mathrm{SI},k}=2mA_kC_0\), the expected normalized
+response is}
+{\color{revisioncolor}
+\begin{equation}
+\widetilde H_k=\frac{\widehat H_k}{H_{\mathrm{SI},k}}-1
+\simeq \sum_{\ell=1}^{L_{\mathrm t}}
+\frac{C_\ell}{C_0}e^{-j2\pi k\Delta f\tau_\ell}.
+\label{eq:sinorm}
+\end{equation}}
+\rev{The practical implementation replaces \(H_{\mathrm{SI},k}\) by a
+complex scalar estimated across occupied bins. This removes the
+common complex scale and the constant baseline, while frequency
+selectivity of \(A_k\) can remain.}
+
+\rev{To form the range profile, place the occupied bins \(\mathcal K\)
+at their signed FFT indices in an \(N_{\mathrm R}\)-point array
+and set the other bins to zero. The IFFT gives}
+{\color{revisioncolor}
+\begin{equation}
+p[n]=\frac{1}{N_{\mathrm R}}\sum_{k\in\mathcal K}
+       \widetilde H_k e^{j2\pi kn/N_{\mathrm R}},\qquad
+R_n=\frac{cn}{2N_{\mathrm R}\Delta f}.
+\label{eq:slope}
+\end{equation}}
+\rev{After calibration of the SI-path offset, local maxima of
+\(\lvert p[n]\rvert^2\) in the search region give echo candidates.
+A peak is retained if \(\lvert p[n]\rvert^2>T[n]\) for the chosen
+threshold \(T[n]\). Zero padding refines the range grid. The
+occupied bandwidth sets the nominal range resolution \(c/(2B)\).
+Delayed leakage paths enter \eqref{eq:Yk} as additional terms of
+the same delay form and can produce spurious peaks. The scalar
+reference is most effective when one leakage path dominates. A
+target-off reference can help characterize delayed leakage and
+static clutter.}
+
+\subsubsection{Sensing SINR}
+
+\rev{The single-target SINR follows from the delayed term in
+\eqref{eq:yt}. For a unit-power analytic IF waveform, the delayed
+real-IF power is \(2m^2|C_\tau|^2\). Averaging over carrier phase
+with \(\mathbb E[\cos\phi_\tau]=0\) gives
+\(2m^2(P_{\mathrm{SI}}P_{\mathrm{ec}}+P_{\mathrm{ec}}^2)\).
+The detector-output denominator uses the fixed floor
+\(N_{\mathrm{d},0}\), the carrier--noise beat
+\(2N(P_{\mathrm{SI}}+P_{\mathrm{ec}})\), and the residual
+in-band SSBI. All terms are in input-referred power-product
+units. Here \(N\) represents the total input RF noise from the
+image bands admitted by the detector and IF filter. Applying
+the coherent processing gain gives}
+\begin{equation}
+\gamma_{\mathrm{sens}}(R)
+=
+\eta_{\mathrm d}G_{\mathrm p}
+\frac{
+2m^2\!\left[
+P_{\mathrm{SI}}P_{\mathrm{ec}}
++
+P_{\mathrm{ec}}^2
+\right]
+}{
+N_{\mathrm{d},0}
++
+2N\!\left[
+P_{\mathrm{SI}}+P_{\mathrm{ec}}
+\right]
++
+\kappa m^4P_{\mathrm{SI}}^2
+},
+\label{eq:sinr_sens}
+\end{equation}
+where $\eta_{\mathrm d}\leq1$ is the waveform-inversion efficiency and
+$\kappa$ is the effective in-band SSBI coefficient after IF filtering
+and digital signal processing. Without SI, \eqref{eq:sinr_sens} reduces to
+\begin{equation}
+\gamma_{\mathrm{sens}}^{\mathrm{w/o\,SI}}(R)
+=
+\eta_{\mathrm d}G_{\mathrm p}
+\frac{
+2m^2P_{\mathrm{ec}}^2
+}{
+N_{\mathrm{d},0}+2NP_{\mathrm{ec}}
+},
+\label{eq:sinr_nosi}
+\end{equation}
+where echo-generated SSBI is negligible for a weak echo. Since
+$P_{\mathrm{ec}}\propto R^{-4}$, the useful echo-only term scales as
+$P_{\mathrm{ec}}^2\propto R^{-8}$.
+
+With SI reuse, square-law detection introduces the SI--echo cross-beat
+term $P_{\mathrm{SI}}P_{\mathrm{ec}}$. For a weak echo
+($P_{\mathrm{SI}}\gg P_{\mathrm{ec}}$), when detector noise dominates
+the denominator, \eqref{eq:sinr_sens} becomes
+\begin{equation}
+\gamma_{\mathrm{sens}}
+\simeq
+\eta_{\mathrm d}G_{\mathrm p}
+\frac{
+2m^2P_{\mathrm{SI}}P_{\mathrm{ec}}
+}{
+N_{\mathrm{d},0}
+}.
+\label{eq:sinr_weak}
+\end{equation}
+Because $P_{\mathrm{SI}}$ is independent of target range, the
+SI-assisted sensing SINR scales as $R^{-4}$. Under the same
+detector-noise-limited condition, the echo-only SINR scales as
+$R^{-8}$. \rev{Residual SI thus supplies the detector with the reference field
+needed for the cross-beat.}
+
+\rev{At fixed \(P_{\mathrm{ec}}\), varying \(x=P_{\mathrm{SI}}\) in
+\eqref{eq:sinr_sens} gives a derivative with sign
+\(N_{\mathrm{d},0}-\kappa m^4(x^2+2P_{\mathrm{ec}}x)\). For
+\(\kappa>0\), the unconstrained SINR maximum occurs at}
+{\color{revisioncolor}
+\begin{equation}
+P_{\mathrm{SI}}^\star=
+\sqrt{P_{\mathrm{ec}}^2+\frac{N_{\mathrm{d},0}}{\kappa m^4}}
+-P_{\mathrm{ec}}.
+\label{eq:optimal_si}
+\end{equation}}
+\rev{The feasible setting is obtained by limiting this value to the
+available SI range and the linear input limits. The derivation
+holds at fixed echo power. Varying transmit power generally
+changes both the echo and SI.}
+
+\subsection{Communication Branch}
+\label{sec:comm_branch}
+
+The one-way received communication power is
+\begin{equation}
+P_{\mathrm{rx}}(R)=
+\frac{P_{\mathrm t}G_{\mathrm t}G_{\mathrm r}\lambda^2}
+{(4\pi)^2R^2L^2}.
+\label{eq:prx}
+\end{equation}
+\rev{The carrier--sideband beat yields real-IF data power
+\(2m^2P_{\mathrm{rx}}^2\). The same power-product model gives the
+fixed floor, the carrier--noise beat \(2NP_{\mathrm{rx}}\), and the
+in-band SSBI contribution \(\kappa m^4P_{\mathrm{rx}}^2\).
+This yields}
+\begin{equation}
+\gamma_{\mathrm{comm}}(R)=
+\frac{2m^2P_{\mathrm{rx}}^2(R)}
+{N_{\mathrm{d},0}+2NP_{\mathrm{rx}}(R)
++\kappa m^4P_{\mathrm{rx}}^2(R)}.
+\label{eq:sinr_comm}
+\end{equation}
+Unlike the sensing branch, the one-way communication link contains no
+SI--echo cross-beat; its desired component is the carrier--sideband
+self-beat, with no coherent sensing-processing gain.
+
+
+\subsection{ISAC Range Analysis}
+\label{sec:isac_range}
+
+The communication and sensing ranges are defined by their respective
+SINR thresholds $\gamma_{\mathrm c}$ and $\gamma_{\mathrm{th}}$
+\cite{sturm_waveform_2011}. The joint ISAC range is therefore
+\begin{equation}
+R_{\max}
+=
+\min\!\left(
+R_{\max}^{\mathrm{comm}},
+R_{\max}^{\mathrm{sens}}
+\right).
+\label{eq:rmax}
+\end{equation}
+Table~\ref{tab:simulation_parameters} summarizes the nominal parameters
+used for the closed-form analysis.
+
+\begin{table}[!t]
+\caption{Parameters for the Closed-Form Range Analysis}
+\label{tab:simulation_parameters}
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.07}
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{}
+>{\raggedright\arraybackslash}p{0.46\columnwidth}
+>{\centering\arraybackslash}p{0.24\columnwidth}
+>{\raggedleft\arraybackslash}p{0.24\columnwidth}
+@{}}
+\toprule
+Parameter & Symbol & Value \\
+\midrule
+Carrier / IF frequency
+    & $f_{\mathrm c},f_{\mathrm{IF}}$
+    & $280/11$~GHz \\
+Waveform / modulation
+    & --
+    & DFT-s-OFDM / 32-cross-QAM \\
+Symbol rate / bandwidth
+    & $R_{\mathrm s},B$
+    & $20$~GBd / $20$~GHz \\
+Gross line rate
+    & $R_{\mathrm b}$
+    & $100$~Gb/s \\
+Bandwidth-limited range cell
+    & $\Delta R$
+    & $7.5$~mm \\
+Transmit power
+    & $P_{\mathrm t}$
+    & $-10$~dBm \\
+CSPR / modulation index
+    & $\mathrm{CSPR},m$
+    & $13$~dB / $0.224$ \\
+Beat linewidth
+    & $\Delta\nu_{\mathrm b}$
+    & $30$~kHz \\
+TX/RX antenna gain
+    & $G_{\mathrm t},G_{\mathrm r}$
+    & $33$~dBi \\
+Front-end loss per pass
+    & $L$
+    & $2.3$~dB \\
+Passive antenna-domain isolation
+    & $\mathrm{ISO}$
+    & $25$~dB \\
+SI power at LNA input
+    & $P_{\mathrm{SI}}$
+    & $-35$~dBm \\
+LNA input compression point
+    & $\mathrm{IP}_{\mathrm{1dB}}$
+    & $-20$~dBm \\
+Effective RCS\textsuperscript{a}
+    & $\sigma_{\mathrm{eff}}$
+    & $-10$~dBsm \\
+LNA gain / noise figure
+    & $G_{\mathrm{LNA}},\mathrm{NF}_{\mathrm{LNA}}$
+    & $13/8$~dB \\
+RF noise power
+    & $N$
+    & $-63.0$~dBm \\
+Detector noise floor\textsuperscript{b}
+    & $N_{\mathrm{d},0}$
+    & $-89.0$~dB(mW$^2$)\\
+Effective in-band SSBI coefficient\textsuperscript{c}
+    & $\kappa$
+    & $0.06$ \\
+Coherent processing gain\textsuperscript{d}
+    & $G_{\mathrm p}$
+    & $30.1$~dB \\
+Waveform-inversion efficiency\textsuperscript{d}
+    & $\eta_{\mathrm d}$
+    & $1$ \\
+Required communication SINR\textsuperscript{e}
+    & $\gamma_{\mathrm c}$
+    & $15.75$~dB \\
+Required sensing SINR\textsuperscript{f}
+    & $\gamma_{\mathrm{th}}$
+    & $13.2$~dB \\
+\bottomrule
+\end{tabular}
+\vspace{2pt}
+\begin{minipage}{\columnwidth}
+\scriptsize
+\textsuperscript{a}Reference value; varied in
+Fig.~\ref{fig:isac_range}.\\
+\textsuperscript{b}Equivalent square-law detector noise floor referred
+to the LNA input.\\
+\textsuperscript{c}Obtained from deterministic 20-GBd DFT-s-OFDM
+simulation and rounded to 0.06.\\
+\textsuperscript{d}$G_{\mathrm p}$: 1024-point coherent processing;
+ideal waveform inversion.\\
+\textsuperscript{e}Equivalent threshold in additive white Gaussian noise
+(AWGN) for quasi-Gray
+32-cross-QAM at a pre-forward-error-correction (FEC) bit error rate
+(BER) of $2\times10^{-2}$. \rev{This is the design benchmark for the model, using the stated
+labeling.}\\
+\textsuperscript{f}Single-bin post-processing threshold for a
+nonfluctuating target in AWGN with $P_{\mathrm D}=0.9$ and
+$P_{\mathrm{FA}}=10^{-6}$ \cite{skolnik_introduction_2001}.
+\end{minipage}
+\end{table}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.80\columnwidth]{fig/fig2.png}
+\caption{Sensing SINR versus LNA-input SI power at $R=1$~m and
+$\sigma_{\mathrm{eff}}=-10$~dBsm. The dashed line denotes the
+weak-echo approximation in \eqref{eq:sinr_weak}.}
+\label{fig:sinr_si}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig/fig3.png}\\[-5pt]
+\hspace*{0.1\columnwidth}\makebox[0pt]{\footnotesize (a)}%
+\hspace*{0.5\columnwidth}\makebox[0pt]{\footnotesize (b)}%
+\setlength{\abovecaptionskip}{2pt}
+\caption{Communication, sensing, and joint ISAC ranges versus effective
+RCS for (a) $P_{\mathrm t}=-10$~dBm and (b) $P_{\mathrm t}=0$~dBm.}
+\label{fig:isac_range}
+\end{figure}
+
+Using these parameters, Fig.~\ref{fig:sinr_si} shows the sensing SINR
+versus residual SI power at $R=1$~m and
+$\sigma_{\mathrm{eff}}=-10$~dBsm. As $P_{\mathrm{SI}}$ increases beyond $P_{\mathrm{ec}}$, the
+SI--echo cross-beat strengthens and the sensing SINR initially increases
+approximately in proportion to $P_{\mathrm{SI}}$, as described by
+\eqref{eq:sinr_weak}. At higher SI
+levels, SI-induced noise and SSBI limit this gain and eventually
+degrade the SINR. The nominal $P_{\mathrm{SI}}=-35$~dBm lies within
+the resulting useful SI operating region, \rev{providing approximately 15~dB of modeled sensing-SINR gain over
+the echo-only baseline. Equation~\eqref{eq:optimal_si} gives an
+unconstrained optimum near \(-25.4\)~dBm for the nominal sweep.
+The high-SI region of the curve represents the ideal square-law
+model. The achievable operating point is subject to the LNA and
+ZBD input limits.}
+
+Fig.~\ref{fig:isac_range} shows how this SINR gain translates into
+joint ISAC coverage. At $P_{\mathrm t}=-10$~dBm and
+$\sigma_{\mathrm{eff}}=-10$~dBsm, SI reuse increases the sensing range
+to 1.6~m, nearly twice that of echo-only square-law sensing. The
+SI-assisted sensing range therefore exceeds the 1.0-m communication
+range, shifting the joint ISAC coverage from sensing-limited to
+communication-limited operation.
+
+This shift also changes the transmit-power scaling of the joint ISAC
+range. In the weak-echo, detector-noise-limited regime, the
+SI-assisted sensing range and the one-way communication range both
+scale as $\sqrt{P_{\mathrm t}}$. \rev{In the model, a 10-dB increase in \(P_{\mathrm t}\) raises the
+joint range from about 1.0 to 3.2~m. The corresponding hardware
+operating point would require sufficient receiver headroom.}
+
+\section{Experimental Setup}
+\label{sec:experimental_setup}
+
+\begin{figure*}[!t]
+\centering
+\setlength{\subfigcapskip}{-10pt}
+\setlength{\subfigbottomskip}{2pt}
+
+\subfloat[]{%
+  \includegraphics[width=0.87\textwidth,trim=0 1mm 0 0,clip]
+  {fig/fig4a.png}%
+  \label{fig:exp_config}%
+}\\[-2pt]
+
+\subfloat[]{%
+  \includegraphics[width=0.9\textwidth,trim=0 4mm 0 0,clip]
+  {fig/fig4b.png}%
+  \label{fig:exp_photo}%
+}\\[-3pt]
+
+\subfloat[]{%
+  \includegraphics[width=0.21\textwidth]{fig/fig4c.png}%
+  \label{fig:exp_optical}%
+}\hspace{2pt}%
+\subfloat[]{%
+  \includegraphics[width=0.69\textwidth]{fig/fig4d.png}%
+  \label{fig:exp_dsp}%
+}
+
+\caption{Experimental implementation of the proposed SI-reuse
+shared-aperture monostatic full-duplex THz ISAC system with a
+280-GHz carrier: (a) system configuration; (b) testbed photograph;
+(c) optical spectrum at the UTC-PD input; and (d) communication
+receiver and simultaneous two-channel acquisition, with IF spectra of
+the communication (C1) and sensing (C2) channels. MZM: Mach--Zehnder
+modulator; AWG: arbitrary waveform generator; OC: optical coupler;
+WSS: wavelength-selective switch; EDFA: erbium-doped fiber amplifier;
+VOA: variable optical attenuator; ZBD: zero-bias Schottky diode.}
+\label{fig:exp}
+\end{figure*}
+
+Fig.~\ref{fig:exp}(a) and (b) show the 280-GHz proof-of-concept
+testbed for simultaneous downlink communication and monostatic
+sensing. The system consists of a free-running photonic THz
+transmitter, a shared-aperture monostatic front end, and square-law
+receivers based on zero-bias Schottky diodes (ZBDs). A single
+data-bearing waveform is used for both functions, while the residual
+transmitter leakage through the shared-aperture front end is reused as
+the sensing reference.
+
+\subsection{ISAC Waveform and Photonic THz Transmitter}
+
+\rev{A pseudorandom binary sequence of order 15 (PRBS15) was mapped to
+32-cross-QAM and organized into DFT-s-OFDM blocks with 1024 occupied
+subcarriers. The sensing processor uses the stored transmit
+waveform over these same subcarriers.}
+
+An arbitrary waveform generator (AWG, Keysight M8194A) generated the
+waveform at symbol rates up to 20~GBd with an 11-GHz IF. At 20~GBd, the 20-GHz occupied bandwidth provides a
+100-Gb/s gross line rate and a bandwidth-limited monostatic range cell
+of $\Delta R=c/(2B)=7.5$~mm. After IF amplification, the waveform
+drove a Mach--Zehnder modulator (MZM, iXBlue MXAN-LN-40) with a
+13-dB CSPR.
+
+Two independent free-running laser diodes
+(LDs, Pure Photonics PPCL500), each with a 15-kHz Lorentzian
+linewidth, were operated at 192.41 and 192.13~THz. LD~\#1 was
+modulated by the MZM and combined with the continuous-wave LD~\#2.
+A wavelength-selective switch (WSS) selected the two optical carriers
+and the lower modulation sideband [Fig.~\ref{fig:exp}(c)], avoiding
+double-sideband power fading under laser-frequency drift.
+
+The optical signal was amplified and adjusted by an erbium-doped
+fiber amplifier (EDFA) and a variable optical attenuator (VOA) before
+photomixing in the UTC-PD (NTT IOD-PMJ-13001). The generated THz
+carrier was centered at 280~GHz with a maximum output power of
+$-10$~dBm. At 20~GBd, the data-bearing THz spectrum occupies
+approximately 259--279~GHz.
+
+\subsection{Shared-Aperture FD-ISAC Front End}
+\label{sec:setup_core}
+
+The UTC-PD output was connected to a shared-aperture monostatic front
+end comprising a custom dual-circular-polarization (dual-CP) duplexer
+and a common corrugated horn. The duplexer converted the transmitted
+signal to right-hand circular polarization (RHCP) and routed it to the
+horn with a measured insertion loss of 2~dB
+\cite{shu_wideband_2019}. Finite isolation between the transmit and
+sensing ports produced the residual SI used by the proposed
+architecture. \rev{The passive duplexer provides a fixed wideband example of the
+reference-setting architecture.}
+
+Two TPX lenses (Thorlabs TPX100) collimated and refocused the 1-m THz
+beam. A 25-dBi horn at the remote end served as both the communication
+receive antenna and the sensing target. The reflected signal returned
+to the common aperture with left-hand circular polarization (LHCP) and
+was routed to the sensing port, where it combined with the residual SI
+at the LNA input. The experimental link model used a 33-dBi effective
+antenna gain and a $-7$-dBsm effective RCS.
+
+The measured passive antenna-domain isolation averaged 23~dB over
+259--280~GHz. \rev{For a \(-10\)-dBm transmit signal, this gives an estimated mean
+LNA-input SI level of \(-33\)~dBm. With the typical 13-dB LNA gain
+and an assumed 1--2~dB interstage loss, the mean ZBD input is
+estimated at \(-22\) to \(-21\)~dBm, compared with its reported
+\(-20\)-dBm input compression point.}
+
+The superimposed SI and target echo were amplified by a THz LNA
+(VDI WR3.4AMP-LN) and square-law detected by a ZBD
+(VDI WR3.4ZBD). As described by \eqref{eq:sq_expand} and
+\eqref{eq:yt}, the square-law detector generated the SI--echo cross-beat
+in the IF band. After DC blocking and IF amplification, the sensing
+signal was digitized on channel C2 of a digital storage oscilloscope
+(DSO, Keysight UXR0404A) at 256~GSa/s.
+
+The remote communication receiver used the same LNA--ZBD
+direct-detection chain and was digitized on channel C1. \rev{The two channels were recorded on the DSO time base
+[Fig.~\ref{fig:exp}(d)] with a common transmit waveform reference.}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=1\columnwidth]{fig/fig5.png}
+\caption{Measured and signal-to-noise ratio (SNR)-limited error vector
+magnitude (EVM) versus
+symbol rate over the 1-m link with a 280-GHz carrier, including 32-cross-QAM
+constellations at 2 and 20~GBd. \rev{The AWGN threshold is the nominal quasi-Gray benchmark.}}
+\label{fig:evm_symbol_rate}
+\end{figure}
+
+\subsection{Offline ISAC Processing}
+\label{sec:offline_processing}
+
+The stored transmit waveform serves as the common processing reference.\rev{\footnote{The archived records used for reprocessing include an
+optional superimposed Zadoff--Chu component with a nominal power weight
+of 0.20. It is included in the stored reference.} The ranging waveforms used no cyclic prefix
+(\(N_{\mathrm{CP}}=0\)). The DSO data were downconverted and
+resampled from 256 to 120~GSa/s. The regularized sensing CFR
+uses rectangular FFT windows on the SI-aligned block boundaries.
+The 15-GBd record has 15 blocks of 8192 samples, while the checked
+20-GBd record has ten blocks of 6144 samples. Each block has 1024
+occupied subcarriers. At 1.10~m, the geometric round-trip delay is
+about 880 samples, or 10.7\% of the 15-GBd window. Samples at the
+start of the echo window can therefore belong to the preceding
+transmit block. Equation~\eqref{eq:Yk} neglects this term.}
+
+For communication, the C1 waveform is downconverted, synchronized, and
+DFT-s-OFDM demodulated with frequency-domain equalization. \rev{RMS EVM and pre-FEC hard-decision BER are evaluated with the
+stored reference and the transmitted bit labeling. The
+EVM-derived communication metric is
+\(1/\mathrm{EVM}_{\mathrm{rms}}^2\), where
+\(\mathrm{EVM}_{\mathrm{rms}}\) is expressed in linear units.}
+
+For sensing, the transmit reference and C2 recording are jointly
+processed across the blocks to reduce sensitivity to block-dependent
+spectral variations. The regularized CFR is estimated as
+\begin{equation}
+\widehat H_k=
+\frac{\sum_{b=1}^{N_b}Y_{b,k}D_{b,k}^{*}}
+{\sum_{b=1}^{N_b}|D_{b,k}|^2+\varepsilon\overline S_{DD}},
+\qquad \varepsilon=10^{-3},
+\label{eq:cfr_reg}
+\end{equation}
+where \rev{\(N_b\) is the number of jointly processed
+blocks (\(N_b=15\) for the 15-GBd ranging record),}
+$D_{b,k}$ and $Y_{b,k}$ are the transmitted and received complex
+spectra of block $b$, respectively, and $\overline S_{DD}$ is the
+mean accumulated transmit spectral power over the occupied subcarriers.
+
+\rev{The post-detection processor estimates a scalar SI reference
+from the complex mean of the occupied CFR bins, divides by it,
+and subtracts the unit baseline. This SI-suppression step adds
+\(\mathcal O(|\mathcal K|)\) operations per CFR profile. The resulting IFFT profile
+from \eqref{eq:slope} is referred to the SI arrival. A one-time
+known-range calibration fixes the hardware delay offset.}
+
+\rev{We report the profile peak excess relative to the median
+off-target background. In linear power units, \(P_{\mathrm{pk}}\)
+is the selected peak and \(P_{\mathrm{fl}}\) is the median floor.}
+{\color{revisioncolor}
+\begin{equation}
+Q_{\mathrm{prof,dB}}=
+10\log_{10}\!\left(P_{\mathrm{pk}}/P_{\mathrm{fl}}-1\right),
+\quad P_{\mathrm{pk}}>P_{\mathrm{fl}}.
+\label{eq:sinr_profile}
+\end{equation}}
+The target peak is the maximum-power bin within $\pm40$~mm of the
+nominal range. The median floor is evaluated over 0.5--2.0~m,
+excluding a $\pm2\Delta R$ guard interval around the detected target.
+\rev{The off-target bins can include sidelobes and static reflections.
+Their median defines a profile statistic. The SINR in
+\eqref{eq:sinr_sens} uses the mean modeled interference and
+noise power.}
+
+\section{Experimental Results and Discussion}
+\label{sec:experimental_results}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.72\columnwidth]{fig/fig6.png}
+\caption{Matched-filter and SI-normalized CFR range profiles at
+15~GBd for a target near 1.10~m. ROI: region of interest.}
+\label{fig:cfr_profile}
+\end{figure}
+
+\subsection{Communication Performance}
+
+Fig.~\ref{fig:evm_symbol_rate} compares the measured EVM with the
+SNR-limited result over the 1-m link. The 2-GBd
+constellation shows no noticeable phase-noise-induced rotation, whereas
+the 20-GBd constellation exhibits broader noise-like spreading. At high
+symbol rates, the small residual degradation from the SNR-limited result
+mainly reflects frequency-response nonflatness and other wideband
+implementation impairments. Overall, the measured EVM remains close to
+the SNR-limited prediction, indicating predominantly SNR-limited
+operation.
+
+\rev{At 20~GBd, the 32-cross-QAM DFT-s-OFDM waveform carries a
+100-Gb/s gross line rate over approximately 1~m. Reprocessing
+the archived record gives an EVM of \(-15.768\)~dB and a
+hard-decision BER of 3.875\% (1984 errors in 51\,200 bits)
+with its transmitted bit mapping. The \(-15.75\)-dB AWGN
+benchmark in Fig.~\ref{fig:evm_symbol_rate} assumes quasi-Gray
+labeling.}
+
+\subsection{SI-Normalized CFR Ranging}
+
+Fig.~\ref{fig:cfr_profile} compares matched filtering and SI-normalized
+CFR processing for the same 15-GBd acquisition. After one-time range
+calibration, both methods estimate the target at approximately 1.098~m,
+close to the physical distance of 1.10~m. Both profiles also show a
+static response near 0.97~m, attributed to reflection from the TPX lens.
+
+\rev{SI-normalized CFR processing improves the target-to-median-floor
+contrast while preserving the estimated target position.} Each subsequent acquisition provides
+both the SI reference and target response, enabling range estimation
+without a separate reference capture for each measurement.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{fig/fig7_profile_and_model.png}
+\caption{\rev{15-GBd range analysis. (a) Detector-output model
+predictions with a fixed SI level. (b) Profile excess statistics
+from one reprocessed capture near 1.10~m, reported on their
+own scale.}}
+\label{fig:sinr_range}
+\end{figure}
+
+\subsection{\rev{SI-Assisted Range Analysis}}
+
+\rev{Fig.~\ref{fig:sinr_range}(a) illustrates the modeled range
+dependence at 15~GBd for \(P_{\mathrm t}=-10\)~dBm,
+\(P_{\mathrm{SI}}=-33\)~dBm, and
+\(\sigma_{\mathrm{eff}}=-7\)~dBsm, with a 29.8-dB effective
+sensing processing gain and otherwise nominal model parameters.
+The echo-only curve is the model baseline. The fixed-SI cross-beat
+sustains a higher predicted sensing SINR over this range.}
+
+\rev{Fig.~\ref{fig:sinr_range}(b) shows the profile statistics
+for a 1.10-m record reprocessed with the matched filter and
+normalized CFR. The two methods locate the peak at 1.0975~m on
+the processing grid. The median-based excess increases from
+20.08 to 33.33~dB. Using the mean off-target floor on a common
+mask gives 26.10~dB for the CFR peak. In the special case of
+exponentially distributed noise-only power, the median is
+\(\ln 2\) times the mean. Structured background in a measured
+profile can change this ratio. The nominal 13.2-dB single-cell
+AWGN threshold applies to the sensing SINR model.}
+
+\begin{figure}[!t]
+\centering
+\subfloat[]{%
+  \includegraphics[width=0.6\columnwidth]{fig/fig8a.png}%
+  \label{fig:range_stage}}
+
+\subfloat[]{%
+  \includegraphics[width=0.73\columnwidth]{fig/fig8b.png}%
+  \label{fig:range_profiles}}
+\caption{Resolution-scale displacement measurement:
+(a) target translation of approximately 7.5~mm checked with a digital
+caliper and
+(b) corresponding 20-GBd SI-normalized CFR range profiles showing a
+7.5-mm range-peak shift.}
+\label{fig:range_resolution}
+\end{figure}
+
+\begin{table*}[!t]
+\caption{Representative millimeter-wave, terahertz,
+and full-duplex ISAC demonstrations}
+\label{tab:thz_isac_comparison}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{1.0pt}
+\renewcommand{\arraystretch}{1.08}
+
+\renewcommand{\tabularxcolumn}[1]{m{#1}}
+
+\begin{tabularx}{\textwidth}{@{}
+>{\raggedright\arraybackslash}m{0.105\textwidth}
+*{7}{Y}
+@{}}
+\toprule
+&
+\makecell{JSTQE'23\\\cite{bai_photonicsassisted_2023}}
+&
+\makecell{JLT'24\\\cite{lyu_multichannel_2024}}
+&
+\makecell{JLT'26\\\cite{shi_310_2026a}}
+&
+\makecell{OE'24\\\cite{yu_photonicsassisted_2024a}}
+&
+\makecell{IoTJ'25\\\cite{duan_inband_2025}}
+&
+\makecell{WCM'26\\\cite{du_fullduplex_2026}}
+&
+\textbf{This work}
+\\
+\midrule
+
+Sensing mode
+& Monostatic
+& Bistatic
+& Bistatic
+& Monostatic
+& Monostatic
+& Monostatic
+& \textbf{Monostatic}
+\\
+\rowrule
+
+TX/RX aperture
+& Separate
+& Separate
+& Separate
+& Separate
+& Separate
+& Shared
+& \textbf{Shared}
+\\
+\rowrule
+
+SI strategy
+& --
+& --
+& --
+& \makecell{Photonic SIC\\(23.6~dB)}
+& \makecell{Passive + spatial\\+ digital SIC}
+& \makecell{Passive + RF\\+ digital SIC\\(126~dB)}
+& \makecell{\textbf{Passive isolation}\\\textbf{+ SI reuse}\\
+\rev{+ CFR baseline}\\\rev{removal}}
+\\
+\rowrule
+
+Sensing RX
+& \makecell{Photonic dechirp\\+ PD}
+& \makecell{Schottky mixer\\+ LO}
+& \makecell{FMD direct\\detection}
+& \makecell{PD + mixer after\\photonic SIC}
+& \makecell{$16{\times}16$\\phased-array}
+& \makecell{USRP B210\\SDR RX}
+& \makecell{\textbf{ZBD direct}\\\textbf{detection}}
+\\
+\rowrule
+
+Ranging
+& \makecell{Dechirp\\+ fusion}
+& \makecell{Matched filter\\+ fusion}
+& \makecell{Weighted log-SNR\\+ path-loss model}
+& Dechirp
+& \makecell{OFDM range--\\Doppler}
+& \makecell{Dechirp\\+ DFT}
+& \makecell{\textbf{SI-normalized}\\\textbf{CFR}}
+\\
+
+\midrule\midrule
+
+Carrier
+& 38/52~GHz
+& \makecell{250/275/\\300~GHz}
+& 300~GHz
+& 10~GHz
+& 26.8~GHz
+& 1.74~GHz
+& \textbf{280~GHz}
+\\
+\rowrule
+
+Waveform
+& CE-LFM-OFDM
+& LFM-16QAM
+& PCS-OFDM
+& CE-LFM-OFDM
+& 16-QAM OFDM
+& OFDM--chirp
+& \makecell{\textbf{32-cross-QAM}\\\textbf{DFT-s-OFDM}}
+\\
+\rowrule
+
+Bandwidth
+& $4~\mathrm{GHz}\times2$
+& $10~\mathrm{GHz}\times3$
+& 33~GHz
+& \makecell{2~GHz total\\(1.5~GHz sensing)}
+& 491.52~MHz
+& 40~MHz
+& \textbf{20~GHz}
+\\
+\rowrule
+
+Gross data rate
+& 16~Gb/s
+& 120~Gb/s
+& 310.4~Gb/s\textsuperscript{a}
+& 3.0~Gb/s\textsuperscript{b}
+& N/R
+& N/R
+& \textbf{100~Gb/s}
+\\
+\rowrule
+
+Range resolution
+& 8.6~mm\textsuperscript{c}
+& 2.5~mm\textsuperscript{c}
+& N/R
+& 100~mm
+& 305.2~mm
+& N/R
+& \textbf{7.5~mm}\textsuperscript{d}
+\\
+\rowrule
+
+Comm. distance
+& 1.2~m
+& \multirow{2}{*}{0.5~m}
+& 0.3~m
+& \multirow{2}{*}{1.3~m}
+& N/R
+& 40~m
+& \multirow{2}{*}{\textbf{1.0~m}}
+\\
+
+\cmidrule(lr){1-2}
+\cmidrule(lr){4-4}
+\cmidrule(lr){6-7}
+
+Sensing distance
+& 3.2~m
+&
+& 0.3--1.0~m
+&
+& $\sim$85--145~m
+& 5--20~m
+&
+\\
+
+\bottomrule
+\end{tabularx}
+
+\vspace{1.5pt}
+\parbox{\textwidth}{\scriptsize
+\textsuperscript{a}Gross line rate obtained using
+dual-polarization 33-GBd PCS-64-QAM and satisfying the NGMI
+criterion at 0.3~m.
+\textsuperscript{b}Calculated from the reported 64-QAM and
+500-MBd CE-OFDM.
+\textsuperscript{c}Obtained after frequency-channel fusion.
+\textsuperscript{d}Bandwidth-limited monostatic range cell,
+assessed through single-target displacement using range-profile
+analysis inspired by \cite{lyu_multichannel_2024}.
+``--'' denotes not applicable. N/R: not reported.
+CE: constant envelope; DFT: discrete Fourier transform; FMD:
+Fermi-level-managed barrier diode; LFM: linear frequency modulation;
+NGMI: normalized generalized mutual information; PCS: probabilistic
+constellation shaping; SDR: software-defined radio; SIC:
+self-interference cancellation; USRP: universal software radio peripheral.
+}
+\end{table*}
+
+\subsection{Resolution-Scale Displacement Measurement}
+
+In the present shared-aperture FD-ISAC setup, the communication
+receiver also serves as the sensing target. Displacement sensing is
+therefore evaluated by translating this receiver along the range
+direction and tracking the SI-normalized CFR peak. The symbol rate
+was increased to 20~GBd, providing a 20-GHz occupied bandwidth and
+a bandwidth-limited monostatic range cell of 7.5~mm.
+
+The applied displacement of approximately 7.5~mm was independently verified
+using a digital caliper [Fig.~\ref{fig:range_resolution}(a)].
+The corresponding CFR peak shifts from 1012.5 to 1005.0~mm
+[Fig.~\ref{fig:range_resolution}(b)], yielding a 7.5-mm shift
+that closely matches the physical displacement. \rev{This record demonstrates displacement on the scale of one
+bandwidth-limited range cell using the data-bearing
+communication waveform and the acquired SI reference.}
+
+\subsection{Comparison and Future Research Directions}
+\label{sec:discussion}
+
+Table~\ref{tab:thz_isac_comparison} compares representative
+millimeter-wave/THz and FD-ISAC demonstrations. Previous
+waveform-integrated ISAC systems have achieved communication rates up
+to 310.4~Gb/s and millimeter-scale ranging
+\cite{lyu_multichannel_2024,shi_310_2026a}, but do not explicitly
+address SI-limited same-band monostatic FD operation. Recent FD-ISAC
+prototypes instead suppress SI using photonic SIC
+\cite{yu_photonicsassisted_2024a}, passive and spatial isolation
+followed by digital SIC \cite{duan_inband_2025}, or cascaded passive,
+RF, and digital SIC \cite{du_fullduplex_2026}. In particular, the
+shared-aperture prototype in \cite{du_fullduplex_2026} combines
+30~dB of passive circulator isolation with additional RF and digital
+SIC to achieve 126~dB of total cancellation. However, the compared
+FD-ISAC prototypes operate below 30~GHz with sensing bandwidths up to
+1.5~GHz, leaving wideband THz shared-aperture FD-ISAC largely
+unexplored.
+
+\rev{The 280-GHz prototype uses a fixed passive duplexer to place
+residual SI within a useful reference regime. The local CFR
+baseline removal acts after the SI--echo beat has been formed.
+Its processing scope differs from the cascaded SI suppression
+in \cite{du_fullduplex_2026}, which reports 126~dB for its
+configuration. Table~\ref{tab:thz_isac_comparison} places the
+two architectures in their respective bandwidth and receive
+contexts.}
+
+The primary focus of this work is SI-reuse operation in a
+shared-aperture FD-ISAC architecture. To evaluate this principle, we performed a simplified proof-of-concept
+experiment under controlled indoor conditions, focusing on static,
+one-dimensional ranging near 1~m. The demonstrated range is
+primarily limited by the current THz
+link budget, including available THz transmit power and interconnect
+loss. \rev{Higher transmit power, antenna gain, and detector responsivity
+can extend the modeled range subject to receiver headroom.} Chip-level
+integration and optimized packaging can further reduce interconnect
+loss and enable a smaller form factor.
+
+Future research directions include dynamic and multidimensional
+sensing. The SI--echo cross-beat preserves target-dependent Doppler information of a
+moving target, making range--Doppler sensing a natural extension of
+the present static experiment. Such processing will require
+compensation for inter-acquisition frequency and phase drift from the
+free-running transmitter. Multi-antenna or multiple-input multiple-output
+(MIMO) implementations could
+further extend the architecture to angular estimation and
+multidimensional localization. The colocated monostatic architecture
+can facilitate transmit--receive timing synchronization, while direct
+detection avoids separate coherent THz local-oscillator distribution
+and locking. Multichannel operation would nevertheless require
+channel-to-channel calibration and management of SI coupling across
+the array. Finally, the present work realizes FD-ISAC in the
+transmit--echo sense rather than bidirectional FD communication.
+Extending the architecture to simultaneous uplink and downlink
+communication with sensing would additionally require separation of
+the uplink signal, residual SI, and target echoes within the available
+receiver dynamic range.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper proposed and experimentally demonstrated residual-SI reuse
+for shared-aperture monostatic THz FD-ISAC. Passive antenna-domain
+\rev{isolation sets the residual leakage level available as an
+embedded self-homodyne sensing reference.} The
+square-law model shows that useful SI--echo cross-beat power follows
+the conventional $R^{-4}$ monostatic-radar dependence, compared with
+the $R^{-8}$ echo-only dependence. The SI response also enables
+same-acquisition CFR normalization for ranging. The analysis further
+\rev{gives the SINR-maximizing residual reference power at fixed echo
+power, with the feasible setting constrained by the receiver
+input limits.}
+
+A 280-GHz prototype using free-running lasers and square-law direct
+detection demonstrated simultaneous downlink communication and
+monostatic sensing \rev{using a passive duplexer and post-detection CFR baseline removal.} Using a single 20-GHz 32-cross-QAM DFT-s-OFDM
+waveform, the system achieved a 100-Gb/s gross downlink rate over
+1~m, while a 7.5-mm target displacement produced the corresponding
+SI-normalized CFR peak shift. Together, the analysis and measurements
+\rev{support residual-SI reuse for concurrent downlink transmission
+and monostatic ranging in a wideband shared-aperture photonic
+receiver.}
+
+
+\bibliographystyle{IEEEtran}
+\bibliography{ref_fin}
+\end{document}

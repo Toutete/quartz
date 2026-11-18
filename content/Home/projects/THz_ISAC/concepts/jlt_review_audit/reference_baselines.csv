@@ -1,0 +1,4 @@
+branch,range_m,echo_dbm,equal_reference_carrier_dbm,closed_form_sinr_db,phase_conditioned_desired_power_mw2,equal_delayed_linear_IF_max_abs_difference
+ideal_residual_si,1.1,-49.63273885944303,-33.0,24.993901724131867,6.818110087481334e-10,
+ideal_echo_only,1.1,-49.63273885944303,,9.807353794273135,1.1870861111072567e-11,
+ideal_separate_unmodulated_reference,1.1,-49.63273885944303,-33.0,,6.818110087481334e-10,0.0

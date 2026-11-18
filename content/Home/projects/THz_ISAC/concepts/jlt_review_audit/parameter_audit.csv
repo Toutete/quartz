@@ -1,0 +1,38 @@
+parameter_id,symbol,value,unit,status,source_file,source_location,reference_plane,waveform_or_condition,uncertainty,notes
+RF_CARRIER,f_c,280,GHz,code_confirmed,capture_inventory.csv,rf_ghz,TX carrier,scoped NPZ metadata,hardware frequency reference unknown,Same value in paper
+LASERS_OPTICAL,f_opt,192.41 / 192.13,THz,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III A,optical carriers,experimental,unknown,Frequency difference agrees with nominal RF carrier
+LASERS_OPTICAL_V2,f_opt,193.41,THz,code_confirmed,v2_baseline.json,optical_center_freq_thz,optical MZM carrier,stock simulator,simulation,Display model uses a different absolute optical center
+BEAT_LINEWIDTH,Delta_nu_b,30,kHz,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,optical beat,two independent 15 kHz lasers,unknown,Device specs or measured linewidth pending
+DSO_RATE,Fs_DSO,256,GSa/s,code_confirmed,capture_inventory.csv,c1_dso_fs_gsa / c2_dso_fs_gsa,DSO,15 and 20 GBd examples,timebase calibration unknown,Raw waveform sample interval
+FFT_RATE,Fs_FFT,120,GSa/s,code_confirmed,capture_inventory.csv,fft_fs_gsa,complex baseband,saved TX grid,exact saved grid,IF is downconverted at DSO rate before resampling
+FFT_15,N_FFT,8192,samples,code_confirmed,capture_inventory.csv,nfft,complex baseband,15 GBd 1.10 m,exact saved grid,14.6484375 MHz spacing and 68.267 ns per block
+FFT_20,N_FFT,6144,samples,code_confirmed,capture_inventory.csv,nfft,complex baseband,20 GBd 32QAM,exact saved grid,19.53125 MHz spacing and 51.2 ns per block
+CP,N_CP,0,samples,code_confirmed,capture_inventory.csv,tx_samples_beyond_fft_rows / awg_reconstruction_rel_error,stored TX samples,scoped legacy captures,exact for archived waveforms,Flat concatenation reproduced in saved real AWG waveform
+COMBINED_15,N_b,15,blocks,code_confirmed,capture_inventory.csv,c2_dsp_rows,C2 DSP,15 GBd 1.10 m,exact reprocessing,Within one acquisition
+COMBINED_20,N_b,10,blocks,code_confirmed,capture_inventory.csv,c2_dsp_rows,C2 DSP,20 GBd 32QAM candidate,exact reprocessing,Within one acquisition
+ACTIVE_K,K,-512 to 511,index,code_confirmed,capture_inventory.csv,occupied_first_bin / occupied_last_bin,complex baseband,15 and 20 GBd,exact saved grid,1024 bins including DC
+TX_PILOT,rho_ZC,0.20,component power fraction,code_confirmed,capture_inventory.csv,fitted_pilot_component_power_fraction,stored TX baseband,scoped NPZ files,fit residual tracked,Distinct from RF power coupling
+MMSE,epsilon,0.001,ratio,code_confirmed,capture_audit.py,_estimate_lfm_cfr call,CFR inversion,full-TX reprocessing,deterministic,Relative to mean accumulated occupied-bin power
+CSPR,CSPR,13,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I and Sec. III A,carrier to modulation sideband,nominal and reported setup,unknown,No independent per-file calibration found
+TX_NOMINAL,P_t,-10,dBm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Eq. (1) and Table I,TX carrier,nominal,unknown,Model carrier power by Eq. (1)
+TX_APPARATUS,P_t,-10,dBm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III B,UTC-PD final RF output,experimental,unknown,Carrier versus total ambiguity budgeted both ways
+AWG_20,P_AWG,-8,dBm,code_confirmed,capture_inventory.csv,awg_ch1_dbm,AWG electrical output setting,20 GBd 32QAM,hardware calibration unknown,Distinct reference plane from THz TX
+ISOLATION_NOM,ISO,25,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,nominal TX to LNA input,nominal,unknown,Apply once
+ISOLATION_EXP,ISO,23,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III B,reported antenna domain,259–280 GHz average,unknown,Installed port-to-port mapping pending
+TX_DUP_LOSS,L_dup,2,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III B,Tx duplexer pass,experiment,unknown,Nominal Table I total per-pass front-end value 2.3 dB
+LINK_GAIN,G_t / G_r,33,dBi,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I and Sec. III B,system equivalent,model,unknown,Bare remote horn 25 dBi in experimental description
+RCS_TAB,sigma_eff,-10,dBsm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,effective scenario,nominal,unknown,Varied in original Fig. 3
+RCS_EXP,sigma_eff,-7,dBsm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III B,effective scenario,reported comparison model,unknown,Independently calibrated status unknown
+LNA_GAIN,G_LNA,13,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I and Sec. III B,LNA input to output,typical,unknown,Frequency response and compression sweep pending
+LNA_NF,NF_LNA,8,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,LNA input,nominal,unknown,Actual ENBW and image noise PSD pending
+LNA_P1DB,IP1dB,-20,dBm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,LNA input,nominal,unknown,CW criterion
+ZBD_P1DB,IP1dB_ZBD,-20,dBm,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. III B,ZBD input,reported criterion,unknown,Usable square-law accuracy versus modulated drive pending
+LNA_ZBD_LOSS,L_path,1 to 2,dB,assumed_for_simulation,JLT_review_response_Codex_handoff.md,Sec. 2.2,LNA output to ZBD input,sensitivity bracket,unknown,No separately calibrated installed transfer curve
+DET_FLOOR,N_d0,-89,dB(mW^2),paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,detector-output equivalent referred to LNA input,nominal,unknown,Physical DSO noise and calibrated equivalent floor need distinct units
+SSBI_KAPPA,kappa,0.06,ratio,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,defined post IF and DSP,nominal 20 GBd,settings unknown,Independent pre-CFR diagnostic uses different band and stage
+PROC_GAIN,Gp,30.1,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,prior to waveform inversion,nominal eta_d=1,unknown,1024-bin ideal
+EXPERIMENTAL_GAIN,G_net,29.8,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Sec. IV C,post CFR,15 GBd distance comparison,unknown,Original derivation and fitting provenance pending
+FEC_CRITERION,EVM_threshold,-15.75,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I and Sec. IV A,C1 symbol domain,quasi-Gray AWGN surrogate,actual mapping differs,Legacy 20 GBd BER 3.875% with natural labels
+SENSING_CRITERION,gamma_th,13.2,dB,paper_reported,2026_TVT_SI_reuse_THz_ISAC.pdf,Table I,C2 single bin,AWGN PD 0.9 and PFA 1e-6,empirical threshold unknown,Do not use directly with ROI maximum and median floor
+RANGING_REFERENCE,A_k,,,unknown,2026_TVT_SI_reuse_THz_ISAC.pdf,Eq. (8),detector IF and digitizer response,installed sensing branch,unknown,Need complex target-off CFR or through calibration
+CURRENT_TO_RF,F(I_ph),,,pending_measurement,photocurrent_analysis.csv,modeled_utc_pd_power_dbm,UTC-PD RF output,current sweep,unknown,Simulator quadratic curve is anchored to an assumed operating point
